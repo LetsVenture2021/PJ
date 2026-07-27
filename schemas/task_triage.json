@@ -1,0 +1,14 @@
+{
+  "name": "task_triage",
+  "strict": true,
+  "schema": {
+    "type": "object",
+    "properties": {
+      "summary": {"type": "string"},
+      "priority": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
+      "next_actions": {"type": "array", "items": {"type": "string"}}
+    },
+    "required": ["summary", "priority", "next_actions"],
+    "additionalProperties": false
+  }
+}

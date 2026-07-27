@@ -1,0 +1,6 @@
+#!/bin/zsh
+# PJ launcher — loads env, activates venv, runs pj.py
+set -a
+source ~/.env
+set +a
+exec "$(dirname "$0")/venv/bin/python" "$(dirname "$0")/pj.py" "$@"

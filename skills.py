@@ -1,0 +1,296 @@
+"""
+skills.py — local Python functions exposed to PJ as function-calling tools.
+
+Add a new skill by:
+  1. Writing a plain Python function below.
+  2. Adding its JSON schema to TOOL_SCHEMAS.
+  3. Registering it in DISPATCH_TABLE.
+
+PJ (the model) decides when to call a skill; dispatch() runs the matching
+Python function and returns the result, which is fed back into the
+conversation.
+"""
+import json
+import sqlite3
+import subprocess
+import uuid
+from datetime import datetime
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+_DB_PATH = Path(__file__).resolve().parent / "pj_data.sqlite3"
+
+
+def _db():
+    conn = sqlite3.connect(_DB_PATH)
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS tasks (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            notes TEXT DEFAULT '',
+            priority TEXT DEFAULT 'P2',
+            status TEXT DEFAULT 'open',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS notes (
+            id TEXT PRIMARY KEY,
+            topic TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )"""
+    )
+    return conn
+
+
+def get_current_time(timezone: str = "America/Chicago") -> dict:
+    """Return the current date/time in the given IANA timezone."""
+    now = datetime.now(ZoneInfo(timezone))
+    return {"timezone": timezone, "iso8601": now.isoformat()}
+
+
+def add_task(title: str, notes: str = "", priority: str = "P2") -> dict:
+    """Log a task/commitment to the local SQLite task store."""
+    task_id = str(uuid.uuid4())[:8]
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO tasks (id, title, notes, priority) VALUES (?,?,?,?)",
+            (task_id, title, notes, priority),
+        )
+    return {"status": "logged", "task_id": task_id, "title": title,
+            "priority": priority}
+
+
+def list_tasks(status: str = "open") -> dict:
+    """List tasks from the local store, optionally filtered by status."""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT id, title, notes, priority, status, created_at FROM tasks "
+            "WHERE status = ? OR ? = 'all' ORDER BY priority, created_at",
+            (status, status),
+        ).fetchall()
+    return {"count": len(rows), "tasks": [
+        {"id": r[0], "title": r[1], "notes": r[2], "priority": r[3],
+         "status": r[4], "created_at": r[5]} for r in rows]}
+
+
+def complete_task(task_id: str) -> dict:
+    """Mark a task as done by its id."""
+    with _db() as conn:
+        cur = conn.execute(
+            "UPDATE tasks SET status='done' WHERE id=?", (task_id,))
+    return {"task_id": task_id,
+            "status": "done" if cur.rowcount else "not_found"}
+
+
+def save_note(topic: str, content: str) -> dict:
+    """Persist a note/memory under a topic for later recall."""
+    note_id = str(uuid.uuid4())[:8]
+    with _db() as conn:
+        conn.execute("INSERT INTO notes (id, topic, content) VALUES (?,?,?)",
+                     (note_id, topic, content))
+    return {"status": "saved", "note_id": note_id, "topic": topic}
+
+
+def search_notes(query: str) -> dict:
+    """Search saved notes by keyword across topic and content."""
+    like = f"%{query}%"
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT id, topic, content, created_at FROM notes "
+            "WHERE topic LIKE ? OR content LIKE ? ORDER BY created_at DESC "
+            "LIMIT 20", (like, like)).fetchall()
+    return {"count": len(rows), "notes": [
+        {"id": r[0], "topic": r[1], "content": r[2], "created_at": r[3]}
+        for r in rows]}
+
+
+def get_active_browser_tab() -> dict:
+    """Read the URL and title of the active Google Chrome tab (macOS)."""
+    script = ('tell application "Google Chrome" to get '
+              '{URL, title} of active tab of front window')
+    try:
+        out = subprocess.run(["osascript", "-e", script],
+                             capture_output=True, text=True, timeout=10)
+        if out.returncode != 0:
+            return {"error": out.stderr.strip() or "Chrome not available"}
+        url, _, title = out.stdout.strip().partition(", ")
+        return {"url": url, "title": title}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+def run_shortcut(name: str, input_text: str = "") -> dict:
+    """Run a macOS Shortcuts automation by name, optionally passing input."""
+    cmd = ["shortcuts", "run", name]
+    try:
+        out = subprocess.run(cmd, input=input_text, capture_output=True,
+                             text=True, timeout=120)
+        return {"shortcut": name, "exit_code": out.returncode,
+                "output": out.stdout.strip()[:2000],
+                "error": out.stderr.strip()[:500] or None}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "name": "get_current_time",
+        "description": "Get the current date and time in a given IANA timezone.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA timezone name, e.g. America/Chicago",
+                }
+            },
+            "required": [],
+        },
+    },
+    {
+        "type": "function",
+        "name": "add_task",
+        "description": "Log a task or commitment for later triage and follow-up.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Short task title"},
+                "notes": {"type": "string", "description": "Additional context"},
+                "priority": {
+                    "type": "string",
+                    "enum": ["P0", "P1", "P2", "P3"],
+                    "description": "Priority level",
+                },
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "list_tasks",
+        "description": "List logged tasks, filtered by status (open, done, or all).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["open", "done", "all"],
+                            "description": "Which tasks to list"},
+            },
+            "required": [],
+        },
+    },
+    {
+        "type": "function",
+        "name": "complete_task",
+        "description": "Mark a previously logged task as done.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Task id from list_tasks"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "save_note",
+        "description": "Persist a note or memory under a topic so it can be recalled later.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string", "description": "Short topic/category"},
+                "content": {"type": "string", "description": "The note content"},
+            },
+            "required": ["topic", "content"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "search_notes",
+        "description": "Search previously saved notes by keyword.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Keyword to search for"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "get_active_browser_tab",
+        "description": "Get the URL and title of the user's active Google Chrome tab.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "type": "function",
+        "name": "run_shortcut",
+        "description": "Run a macOS Shortcuts automation by name, optionally passing text input.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Exact Shortcut name"},
+                "input_text": {"type": "string", "description": "Optional input passed to the shortcut"},
+            },
+            "required": ["name"],
+        },
+    },
+]
+
+DISPATCH_TABLE = {
+    "get_current_time": get_current_time,
+    "add_task": add_task,
+    "list_tasks": list_tasks,
+    "complete_task": complete_task,
+    "save_note": save_note,
+    "search_notes": search_notes,
+    "get_active_browser_tab": get_active_browser_tab,
+    "run_shortcut": run_shortcut,
+}
+
+# --- SkillOps: PJ's self-improvement engine ---------------------------------
+# Adds observe/create/review/deprecate meta-skills and dynamically loads any
+# PJ-generated skills that have been activated. See skillops.py.
+import time as _time
+import skillops as _skillops
+
+TOOL_SCHEMAS.extend(_skillops.SKILLOPS_SCHEMAS)
+DISPATCH_TABLE.update(_skillops.SKILLOPS_DISPATCH)
+
+# --- DocOps: mission-critical document engine --------------------------------
+# Versioned templates, validated drafts, hash-sealed finals with review gates
+# and supersession lineage. See docops.py.
+import docops as _docops
+
+TOOL_SCHEMAS.extend(_docops.DOCOPS_SCHEMAS)
+DISPATCH_TABLE.update(_docops.DOCOPS_DISPATCH)
+
+# --- ChiefOps: executive operations toolkit ----------------------------------
+# Calendar, reminders, mail drafts, relationship memory, portfolio,
+# commitments, revenue pipeline, decision journal, risk register, web
+# checks, daily brief. See chiefops.py.
+import chiefops as _chiefops
+
+TOOL_SCHEMAS.extend(_chiefops.CHIEFOPS_SCHEMAS)
+DISPATCH_TABLE.update(_chiefops.CHIEFOPS_DISPATCH)
+
+_gen_schemas, _gen_dispatch = _skillops.load_generated_skills()
+TOOL_SCHEMAS.extend(_gen_schemas)
+DISPATCH_TABLE.update(_gen_dispatch)
+
+
+def dispatch(name: str, arguments: dict):
+    fn = DISPATCH_TABLE.get(name)
+    if fn is None:
+        return {"error": f"Unknown skill: {name}"}
+    start = _time.monotonic()
+    try:
+        result = fn(**arguments)
+    except Exception as exc:  # keep PJ running even if a skill errors
+        result = {"error": str(exc)}
+    latency_ms = int((_time.monotonic() - start) * 1000)
+    err = result.get("error") if isinstance(result, dict) else None
+    _skillops.record_invocation(name, err is None, latency_ms, err)
+    return result

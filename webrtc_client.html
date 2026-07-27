@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Talk to PJ</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 480px; margin: 60px auto; text-align: center; }
+  button { font-size: 18px; padding: 14px 28px; border-radius: 8px; border: none; cursor: pointer; }
+  #start { background: #16a34a; color: white; }
+  #stop { background: #dc2626; color: white; }
+  #status { margin-top: 20px; color: #555; }
+  #transcript { text-align: left; margin-top: 30px; white-space: pre-wrap; font-size: 14px; color: #333; }
+</style>
+</head>
+<body>
+  <h2>🎙️ Talk to PJ</h2>
+  <button id="start">Start Voice Chat</button>
+  <button id="stop" style="display:none">End Call</button>
+  <div id="status">Idle</div>
+  <div id="transcript"></div>
+
+  <audio id="pjAudio" autoplay></audio>
+
+<script>
+const SIGNALING_URL = "http://localhost:3001/session"; // your realtime_server.py
+const EXECUTE_TOOL_URL = "http://localhost:3001/execute-tool";
+
+let pc, dataChannel, micStream;
+// Accumulates streamed function-call argument deltas, keyed by call_id, so we
+// can show live progress and dispatch the finished call once arguments are complete.
+const pendingCalls = {};
+
+async function start() {
+  document.getElementById("status").textContent = "Requesting microphone...";
+  micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+  pc = new RTCPeerConnection();
+  pc.ontrack = (e) => { document.getElementById("pjAudio").srcObject = e.streams[0]; };
+  micStream.getTracks().forEach((track) => pc.addTrack(track, micStream));
+
+  // Data channel carries streaming events: transcription deltas,
+  // function-call requests/outputs, and text deltas alongside audio.
+  dataChannel = pc.createDataChannel("oai-events");
+  dataChannel.onmessage = (e) => handleRealtimeEvent(JSON.parse(e.data));
+
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  document.getElementById("status").textContent = "Connecting to PJ...";
+  const response = await fetch(SIGNALING_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/sdp" },
+    body: offer.sdp,
+  });
+  const answerSdp = await response.text();
+  await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+
+  document.getElementById("status").textContent = "🟢 Live — talk to PJ";
+  document.getElementById("start").style.display = "none";
+  document.getElementById("stop").style.display = "inline-block";
+}
+
+function handleRealtimeEvent(event) {
+  if (event.type === "conversation.item.input_audio_transcription.completed") {
+    appendTranscript("You: " + event.transcript);
+    return;
+  }
+  if (event.type === "response.output_text.delta") {
+    appendTranscript("PJ: " + event.delta);
+    return;
+  }
+
+  // --- Streaming function calls ---
+  // Arguments arrive incrementally as the model generates them; accumulate
+  // per call_id and show live progress in the transcript.
+  if (event.type === "response.function_call_arguments.delta") {
+    const call = pendingCalls[event.call_id] || (pendingCalls[event.call_id] = {
+      name: event.name, args: "", started: false,
+    });
+    call.args += event.delta;
+    if (!call.started) {
+      call.started = true;
+      appendTranscript(`🔧 PJ is calling ${event.name || call.name}(...)`);
+    }
+    return;
+  }
+
+  if (event.type === "response.function_call_arguments.done") {
+    const call = pendingCalls[event.call_id] || { name: event.name, args: event.arguments };
+    call.name = event.name || call.name;
+    call.args = event.arguments ?? call.args;
+    runFunctionCall(event.call_id, call.name, call.args);
+    return;
+  }
+
+  // Fallback: some server events deliver the finished call as a single
+  // output_item rather than via delta/done above.
+  if (event.type === "response.output_item.done" && event.item && event.item.type === "function_call") {
+    const item = event.item;
+    if (!(item.call_id in pendingCalls) || !pendingCalls[item.call_id].dispatched) {
+      runFunctionCall(item.call_id, item.name, item.arguments);
+    }
+  }
+}
+
+async function runFunctionCall(callId, name, argsJson) {
+  if (pendingCalls[callId]) pendingCalls[callId].dispatched = true;
+  else pendingCalls[callId] = { dispatched: true };
+
+  let args = {};
+  try {
+    args = argsJson ? JSON.parse(argsJson) : {};
+  } catch (err) {
+    appendTranscript(`⚠️ Failed to parse arguments for ${name}: ${err}`);
+  }
+
+  let output;
+  try {
+    const resp = await fetch(EXECUTE_TOOL_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, arguments: args }),
+    });
+    output = await resp.text();
+  } catch (err) {
+    output = JSON.stringify({ error: String(err) });
+  }
+
+  appendTranscript(`✅ ${name} → ${output}`);
+
+  // Feed the result back into the realtime conversation, then ask the
+  // model to continue (it will incorporate the function's output).
+  dataChannel.send(JSON.stringify({
+    type: "conversation.item.create",
+    item: { type: "function_call_output", call_id: callId, output },
+  }));
+  dataChannel.send(JSON.stringify({ type: "response.create" }));
+
+  delete pendingCalls[callId];
+}
+
+function stop() {
+  if (pc) pc.close();
+  if (micStream) micStream.getTracks().forEach((t) => t.stop());
+  document.getElementById("status").textContent = "Call ended";
+  document.getElementById("start").style.display = "inline-block";
+  document.getElementById("stop").style.display = "none";
+}
+
+function appendTranscript(line) {
+  const el = document.getElementById("transcript");
+  el.textContent += line + "\n";
+}
+
+document.getElementById("start").onclick = start;
+document.getElementById("stop").onclick = stop;
+</script>
+</body>
+</html>
