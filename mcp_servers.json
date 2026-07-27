@@ -10,8 +10,10 @@
     "label": "github",
     "url": "https://api.githubcopilot.com/mcp/",
     "require_approval": "always",
-    "enabled": false,
-    "headers": { "Authorization": "Bearer ${GITHUB_MCP_PAT}" },
+    "enabled": true,
+    "headers": {
+      "Authorization": "Bearer ${GITHUB_MCP_PAT}"
+    },
     "_comment": "Set GITHUB_MCP_PAT in ~/.env (a GitHub PAT), then flip enabled to true."
   },
   {
@@ -19,7 +21,9 @@
     "url": "https://mcp.notion.com/mcp",
     "require_approval": "always",
     "enabled": false,
-    "headers": { "Authorization": "Bearer ${NOTION_MCP_TOKEN}" },
+    "headers": {
+      "Authorization": "Bearer ${NOTION_MCP_TOKEN}"
+    },
     "_comment": "Set NOTION_MCP_TOKEN in ~/.env, then flip enabled to true."
   },
   {
@@ -27,7 +31,9 @@
     "url": "https://mcp.stripe.com",
     "require_approval": "always",
     "enabled": false,
-    "headers": { "Authorization": "Bearer ${STRIPE_MCP_KEY}" },
+    "headers": {
+      "Authorization": "Bearer ${STRIPE_MCP_KEY}"
+    },
     "_comment": "Set STRIPE_MCP_KEY (restricted key) in ~/.env, then flip enabled to true."
   }
 ]
