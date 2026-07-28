@@ -1251,6 +1251,7 @@ def import_codeops_guidance(
     current_docs_checked: bool = False,
     historical_context_acknowledged: bool = False,
     dry_run: bool = False,
+    include_provisional: bool = True,
 ) -> dict:
     """Parse ITEM blocks into the local CodeOps guidance table."""
     if not isinstance(corpus_text, str) or not corpus_text.strip():
@@ -1262,7 +1263,10 @@ def import_codeops_guidance(
         r"(.*?)^---ITEM_END:\s*\1---\s*$"
     )
     records = []
+    matched_count = 0
+    skipped_provisional = 0
     for item_id, body in pattern.findall(corpus_text):
+        matched_count += 1
         item_id = item_id.strip()
         raw_hash = _yaml_value(body, "content_sha256", _hash(body))
         requires_current = _yaml_value(
@@ -1304,13 +1308,25 @@ def import_codeops_guidance(
         )
         if any(not record[key] for key in required):
             raise ValueError(f"incomplete corpus metadata for {item_id}")
+        lifecycle = str(record["corpus_status"] or "").strip().lower()
+        provisional = (
+            "provisional" in lifecycle
+            or lifecycle in {"draft", "experimental", "wip"}
+            or _yaml_value(body, "provisional", "false").lower() == "true"
+            or _yaml_value(body, "is_provisional", "false").lower() == "true"
+        )
+        if provisional and not include_provisional:
+            skipped_provisional += 1
+            continue
         records.append(record)
-    if not records:
+    if not records and not (matched_count and skipped_provisional == matched_count):
         raise ValueError("no valid ITEM_START/ITEM_END blocks found")
     details = {
         "source_label": source_label[:200],
         "source_sha256": _hash(corpus_text),
         "record_count": len(records),
+        "items_total": matched_count,
+        "items_skipped_provisional": skipped_provisional,
         "item_ids": [record["item_id"] for record in records],
         "current_docs_checked": bool(current_docs_checked),
         "historical_context_acknowledged": bool(historical_context_acknowledged),
@@ -1597,7 +1613,8 @@ CODEOPS_SCHEMAS = [
      "parameters": {"type": "object", "properties": {
          "corpus_text": {"type": "string"}, "source_label": {"type": "string"},
          "current_docs_checked": {"type": "boolean"},
-         "historical_context_acknowledged": {"type": "boolean"}},
+         "historical_context_acknowledged": {"type": "boolean"},
+         "include_provisional": {"type": "boolean"}},
          "required": ["corpus_text"]}},
     {"type": "function", "name": "list_codeops_guides",
      "description": "List corpus-grounded CodeOps guides and freshness metadata.",

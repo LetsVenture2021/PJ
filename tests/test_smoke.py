@@ -394,6 +394,13 @@ required_sections:
 
 class TestVectorStoreSync(unittest.TestCase):
     def setUp(self):
+        self.original_skillops_db_path = skillops._DB_PATH
+        self.original_docops_db_path = docops._DB_PATH
+        self.original_codeops_db_path = codeops._DB_PATH
+        self.temp_db_path = Path(tempfile.mkstemp(suffix=".sqlite3")[1])
+        skillops._DB_PATH = self.temp_db_path
+        docops._DB_PATH = self.temp_db_path
+        codeops._DB_PATH = self.temp_db_path
         self.lock_path = Path(tempfile.mkdtemp()) / "vector-sync.lock"
         self.cache_path = self.lock_path.parent / "vector-source-cache"
         self.pack_text = """\
@@ -419,6 +426,12 @@ required_sections:
             "created_at": 100,
             "purpose": "assistants_output",
         }
+
+    def tearDown(self):
+        skillops._DB_PATH = self.original_skillops_db_path
+        docops._DB_PATH = self.original_docops_db_path
+        codeops._DB_PATH = self.original_codeops_db_path
+        self.temp_db_path.unlink(missing_ok=True)
 
     def _run_sync(self, **kwargs):
         with (
@@ -451,6 +464,37 @@ required_sections:
             ),
         ):
             return skillops.sync_vector_store(**kwargs)
+
+    def _run_learn(self, **kwargs):
+        with (
+            mock.patch.object(
+                skillops, "_VECTOR_SOURCE_CACHE_DIR", self.cache_path
+            ),
+            mock.patch.object(
+                skillops, "_require_vector_store_id", return_value="vs-test"
+            ),
+            mock.patch.object(
+                skillops, "_require_openai_api_key", return_value="test-key"
+            ),
+            mock.patch.object(
+                skillops,
+                "_list_vector_store_files",
+                return_value=[dict(self.entry)],
+            ),
+            mock.patch.object(
+                skillops,
+                "_list_openai_file_metadata",
+                return_value={
+                    str(self.entry["file_id"]): dict(self.metadata)
+                },
+            ),
+            mock.patch.object(
+                skillops,
+                "_read_openai_file_content",
+                return_value=(self.pack_text, False),
+            ),
+        ):
+            return skillops.learn_from_vector_store(**kwargs)
 
     def test_sync_skips_unchanged_and_reprocesses_changed_content(self):
         first = self._run_sync()
@@ -610,6 +654,7 @@ required_sections:
 ```yaml
 item_id: "DOC-SYNC"
 source_page_url: "https://example.test/codeops"
+source_record_id: "DOC-SYNC"
 canonical_title: "Synced CodeOps Guide"
 tool_family: "CodeOps"
 surface: "CLI"
@@ -633,6 +678,8 @@ Return evidence.
 - [ ] Evidence exists.
 #### Current authoritative sources
 - https://example.test/current
+## Embedded source heading
+This heading must not make the record a DocOps template.
 ---ITEM_END: DOC-SYNC---
 """
         self.metadata = {
@@ -662,6 +709,54 @@ Return evidence.
             for guide in codeops.list_codeops_guides(limit=100)["guides"]
         }
         self.assertIn("DOC-SYNC", guide_ids)
+        learned = self._run_learn(overwrite_existing=True)
+        self.assertEqual(learned["status"], "completed")
+        self.assertEqual(learned["guidance_records_imported"], 1)
+
+    def test_sync_filters_provisional_codeops_and_reports_status(self):
+        self.entry = {
+            "id": "vs-file-provisional-codeops",
+            "file_id": "file-provisional-codeops",
+            "created_at": 301,
+        }
+        self.pack_text = """\
+---ITEM_START: DOC-PROVISIONAL---
+```yaml
+item_id: "DOC-PROVISIONAL"
+source_page_url: "https://example.test/provisional"
+source_record_id: "DOC-PROVISIONAL"
+canonical_title: "Provisional CodeOps Guide"
+tool_family: "CodeOps"
+surface: "CLI"
+version_scope: "historical"
+corpus_status: "provisional_instructional_spec"
+requires_current_docs_check: true
+content_sha256: "provisional-hash"
+```
+#### Prompt contract
+State the objective.
+#### Output contract
+Return evidence.
+---ITEM_END: DOC-PROVISIONAL---
+"""
+        self.metadata = {
+            "id": "file-provisional-codeops",
+            "filename": "provisional-codeops.md",
+            "bytes": len(self.pack_text.encode("utf-8")),
+            "created_at": 301,
+        }
+        result = self._run_sync(include_provisional=False)
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["guidance_records_imported"], 0)
+        self.assertEqual(result["items_skipped_provisional"], 1)
+        guide_ids = {
+            guide["item_id"]
+            for guide in codeops.list_codeops_guides(limit=100)["guides"]
+        }
+        self.assertNotIn("DOC-PROVISIONAL", guide_ids)
+        latest = skillops.get_vector_sync_status(limit=1)["runs"][0]
+        self.assertEqual(latest["items_skipped_provisional"], 1)
+        self.assertEqual(latest["items_skipped_invalid"], 0)
 
     def test_complete_reader_rejects_oversized_file_without_returning_prefix(self):
         class FakeResponse:
@@ -732,6 +827,16 @@ required_sections:
         self.assertEqual(included["files_processed"], 1)
         self.assertEqual(included["templates_created"], 1)
 
+    def test_sync_deduplication_includes_importer_revision(self):
+        current = skillops._sync_policy_hash(True, True)
+        with mock.patch.object(
+            skillops,
+            "SYNC_IMPORTER_REVISION",
+            "legacy-docops-codeops-router",
+        ):
+            previous = skillops._sync_policy_hash(True, True)
+        self.assertNotEqual(current, previous)
+
     def test_cross_process_lock_prevents_overlapping_sync(self):
         with mock.patch.object(skillops, "_SYNC_LOCK_PATH", self.lock_path):
             with skillops._vector_sync_lock() as acquired:
@@ -776,12 +881,18 @@ class TestCodingCapabilityCorpus(unittest.TestCase):
 
     def setUp(self):
         self.original_db_path = skillops._DB_PATH
+        self.original_docops_db_path = docops._DB_PATH
+        self.original_codeops_db_path = codeops._DB_PATH
         self.temp_db_path = Path(tempfile.mkstemp(suffix=".sqlite3")[1])
         skillops._DB_PATH = self.temp_db_path
+        docops._DB_PATH = self.temp_db_path
+        codeops._DB_PATH = self.temp_db_path
         self.lock_path = Path(tempfile.mkdtemp()) / "coding-sync.lock"
 
     def tearDown(self):
         skillops._DB_PATH = self.original_db_path
+        docops._DB_PATH = self.original_docops_db_path
+        codeops._DB_PATH = self.original_codeops_db_path
         self.temp_db_path.unlink(missing_ok=True)
 
     def _eight_record_corpus(self):
@@ -908,6 +1019,399 @@ required_sections:
 ---ITEM_END: DOCOPS-1---
 """
         self.assertFalse(skillops._is_coding_capability_corpus(docops_text))
+        self.assertFalse(
+            skillops._looks_like_coding_capability_corpus(docops_text)
+        )
+
+    def test_malformed_coding_corpus_fails_closed_in_all_sync_paths(self):
+        text = self._eight_record_corpus().replace(
+            "record_count: 8",
+            "record_count: 9",
+            1,
+        )
+        damaged_header = text.replace(
+            "# AI CODING TOOLS - VECTOR-STORE TRAINING CORPUS",
+            "# DAMAGED CORPUS HEADER",
+            1,
+        )
+        damaged_heading = text.replace(
+            "## TRAINING ITEMS",
+            "## DAMAGED TRAINING HEADING",
+            1,
+        )
+        self.assertTrue(skillops._looks_like_coding_capability_corpus(text))
+        self.assertTrue(
+            skillops._looks_like_coding_capability_corpus(damaged_header)
+        )
+        self.assertTrue(
+            skillops._looks_like_coding_capability_corpus(damaged_heading)
+        )
+        self.assertFalse(skillops._is_coding_capability_corpus(text))
+        routed = skillops._import_vector_content(
+            text,
+            overwrite_existing=True,
+            include_provisional=True,
+            dry_run=True,
+            audit=False,
+        )
+        self.assertEqual(routed["corpus_type"], "ai_coding_capabilities")
+        self.assertGreater(routed["items_skipped_invalid"], 0)
+        self.assertEqual(routed["capabilities_created"], 0)
+
+        entry = {"id": "vs-file-invalid", "file_id": "file-invalid"}
+        metadata = {
+            "id": "file-invalid",
+            "filename": "invalid-coding-corpus.md",
+            "bytes": len(text.encode("utf-8")),
+        }
+        patches = (
+            mock.patch.object(skillops, "_SYNC_LOCK_PATH", self.lock_path),
+            mock.patch.object(
+                skillops, "_require_vector_store_id", return_value="vs-test"
+            ),
+            mock.patch.object(
+                skillops, "_require_openai_api_key", return_value="test-key"
+            ),
+            mock.patch.object(
+                skillops, "_list_vector_store_files", return_value=[entry]
+            ),
+            mock.patch.object(
+                skillops,
+                "_list_openai_file_metadata",
+                return_value={"file-invalid": metadata},
+            ),
+            mock.patch.object(
+                skillops, "_get_openai_file_metadata", return_value=metadata
+            ),
+            mock.patch.object(
+                skillops,
+                "_read_openai_file_content",
+                return_value=(text, False),
+            ),
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patches[5], patches[6]:
+            automatic = skillops.sync_vector_store(dry_run=True)
+        self.assertEqual(automatic["status"], "partial_failed")
+        self.assertEqual(automatic["files_failed"], 1)
+        self.assertEqual(automatic["capabilities_created"], 0)
+        self.assertEqual(automatic["templates_created"], 0)
+        self.assertGreater(automatic["items_skipped_invalid"], 0)
+        sync_status = skillops.get_vector_sync_status(limit=1)["runs"][0]
+        self.assertEqual(
+            sync_status["items_skipped_invalid"],
+            automatic["items_skipped_invalid"],
+        )
+
+        with patches[1], patches[2], patches[3], patches[4], patches[6]:
+            on_demand = skillops.learn_from_vector_store(
+                dry_run=True,
+                overwrite_existing=True,
+            )
+        self.assertEqual(on_demand["status"], "failed")
+        self.assertEqual(skillops.list_coding_capabilities()["count"], 0)
+
+    def test_required_corpus_and_freshness_metadata_fail_closed(self):
+        corpus = self._eight_record_corpus()
+        invalid_variants = (
+            corpus.replace("record_count: 8\n", "", 1),
+            corpus.replace("corpus_version: 1.0.0\n", "", 1),
+            corpus.replace("requires_current_docs_check: true\n", ""),
+        )
+        for invalid in invalid_variants:
+            with self.subTest():
+                self.assertTrue(
+                    skillops._looks_like_coding_capability_corpus(invalid)
+                )
+                result = skillops.import_coding_capability_corpus_text(
+                    invalid,
+                    dry_run=True,
+                    audit=False,
+                )
+                self.assertGreater(result["items_skipped_invalid"], 0)
+                self.assertEqual(result["capabilities_created"], 0)
+                self.assertTrue(result["errors"])
+
+    def test_required_metadata_is_not_sourced_from_reference_body(self):
+        corpus = self._eight_record_corpus()
+        moved = corpus.replace("corpus_version: 1.0.0\n", "", 1)
+        moved = moved.replace("record_count: 8\n", "", 1)
+        moved = moved.replace(
+            "requires_current_docs_check: true\n",
+            "",
+            1,
+        )
+        moved = moved.replace(
+            "#### Appropriate tasks",
+            "#### Source-derived reference content\n"
+            "corpus_version: 1.0.0\n"
+            "record_count: 8\n"
+            "requires_current_docs_check: true\n"
+            "#### Appropriate tasks",
+            1,
+        )
+        result = skillops.import_coding_capability_corpus_text(
+            moved,
+            dry_run=True,
+            audit=False,
+        )
+        self.assertGreater(result["items_skipped_invalid"], 0)
+        self.assertEqual(result["capabilities_created"], 0)
+        self.assertTrue(any(
+            "record_count" in error for error in result["errors"]
+        ))
+        self.assertTrue(any(
+            "corpus_version" in error for error in result["errors"]
+        ))
+        self.assertTrue(any(
+            "requires_current_docs_check" in error
+            for error in result["errors"]
+        ))
+
+    def test_malformed_fallback_corpora_do_not_commit_partial_records(self):
+        malformed_docops = """\
+---ITEM_START: DOC-COMPLETE---
+item_id: DOC-COMPLETE
+canonical_title: Complete But Uncommitted
+template_name: complete_but_uncommitted
+required_sections:
+- Summary
+---ITEM_END: DOC-COMPLETE---
+---ITEM_START: DOC-TRUNCATED---
+item_id: DOC-TRUNCATED
+"""
+        doc_result = skillops._import_vector_content(
+            malformed_docops,
+            overwrite_existing=True,
+            include_provisional=True,
+            dry_run=False,
+        )
+        self.assertEqual(doc_result["status"], "invalid")
+        self.assertNotIn(
+            "complete_but_uncommitted",
+            {
+                template["name"]
+                for template in docops.list_doc_templates()["templates"]
+            },
+        )
+
+        malformed_codeops = """\
+---ITEM_START: CODE-COMPLETE---
+```yaml
+item_id: "CODE-COMPLETE"
+source_page_url: "https://example.test/code"
+source_record_id: "CODE-COMPLETE"
+canonical_title: "Complete But Uncommitted CodeOps"
+tool_family: "CodeOps"
+surface: "CLI"
+version_scope: "historical"
+corpus_status: "training_ready_current_docs_override"
+requires_current_docs_check: true
+content_sha256: "code-hash"
+```
+#### Prompt contract
+State the objective.
+#### Output contract
+Return evidence.
+---ITEM_END: CODE-COMPLETE---
+---ITEM_START: CODE-TRUNCATED---
+"""
+        code_result = skillops._import_vector_content(
+            malformed_codeops,
+            overwrite_existing=True,
+            include_provisional=True,
+            dry_run=False,
+        )
+        self.assertEqual(code_result["status"], "invalid")
+        self.assertNotIn(
+            "CODE-COMPLETE",
+            {
+                guide["item_id"]
+                for guide in codeops.list_codeops_guides(limit=100)["guides"]
+            },
+        )
+
+        malformed_metadata_codeops = """\
+---ITEM_START: CODE-MISSING---
+```yaml
+item_id: "CODE-MISSING"
+source_record_id: "CODE-MISSING"
+canonical_title: "Malformed CodeOps"
+tool_family: "CodeOps"
+surface: "CLI"
+version_scope: "historical"
+corpus_status: "training_ready_current_docs_override"
+requires_current_docs_check: true
+content_sha256: "missing-source-url"
+```
+#### Prompt contract
+State the objective.
+#### Output contract
+Return evidence.
+## Embedded source heading
+This must not turn the item into a DocOps template.
+---ITEM_END: CODE-MISSING---
+"""
+        malformed_result = skillops._import_vector_content(
+            malformed_metadata_codeops,
+            overwrite_existing=True,
+            include_provisional=True,
+            dry_run=False,
+        )
+        self.assertEqual(malformed_result["status"], "invalid")
+        self.assertEqual(malformed_result["corpus_type"], "codeops_guidance")
+        self.assertEqual(malformed_result["templates_created"], 0)
+
+    def test_on_demand_semantic_preflight_prevents_partial_docops_write(self):
+        first_text = """\
+---ITEM_START: DOC-FIRST---
+item_id: DOC-FIRST
+canonical_title: First Valid But Uncommitted
+template_name: first_valid_but_uncommitted
+required_sections:
+- Summary
+---ITEM_END: DOC-FIRST---
+"""
+        invalid_text = """\
+---ITEM_START: DOC-VALID---
+item_id: DOC-VALID
+canonical_title: Valid But Uncommitted
+template_name: valid_but_uncommitted
+required_sections:
+- Summary
+---ITEM_END: DOC-VALID---
+---ITEM_START: DOC-INVALID---
+item_id: DOC-INVALID
+canonical_title: Missing Required Sections
+template_name: missing_required_sections
+---ITEM_END: DOC-INVALID---
+"""
+        entries = [
+            {"id": "vs-file-first", "file_id": "file-first"},
+            {"id": "vs-file-semantic", "file_id": "file-semantic"},
+        ]
+        metadata = {
+            "file-first": {
+                "id": "file-first",
+                "filename": "first-valid-docops.md",
+                "bytes": len(first_text.encode("utf-8")),
+            },
+            "file-semantic": {
+                "id": "file-semantic",
+                "filename": "semantic-invalid-docops.md",
+                "bytes": len(invalid_text.encode("utf-8")),
+            },
+        }
+        with (
+            mock.patch.object(
+                skillops, "_require_vector_store_id", return_value="vs-test"
+            ),
+            mock.patch.object(
+                skillops, "_require_openai_api_key", return_value="test-key"
+            ),
+            mock.patch.object(
+                skillops, "_list_vector_store_files", return_value=entries
+            ),
+            mock.patch.object(
+                skillops,
+                "_list_openai_file_metadata",
+                return_value=metadata,
+            ),
+            mock.patch.object(
+                skillops,
+                "_read_openai_file_content",
+                side_effect=[
+                    (first_text, False),
+                    (invalid_text, False),
+                ],
+            ),
+        ):
+            result = skillops.learn_from_vector_store(
+                overwrite_existing=True,
+            )
+        self.assertEqual(result["status"], "failed")
+        self.assertNotIn(
+            "valid_but_uncommitted",
+            {
+                template["name"]
+                for template in docops.list_doc_templates()["templates"]
+            },
+        )
+        self.assertNotIn(
+            "first_valid_but_uncommitted",
+            {
+                template["name"]
+                for template in docops.list_doc_templates()["templates"]
+            },
+        )
+
+    def test_capability_import_honors_provisional_policy(self):
+        corpus = self._eight_record_corpus().replace(
+            'corpus_status: "training_ready_current_docs_override"',
+            'corpus_status: "provisional_instructional_spec"',
+            1,
+        )
+        excluded = skillops.import_coding_capability_corpus_text(
+            corpus,
+            include_provisional=False,
+            dry_run=True,
+        )
+        self.assertEqual(excluded["capabilities_created"], 7)
+        self.assertEqual(excluded["items_skipped_provisional"], 1)
+        self.assertEqual(
+            excluded["imports"][0]["action"],
+            "skipped_provisional",
+        )
+        audit = skillops.list_coding_capabilities()["import_audit"][0]
+        self.assertFalse(audit["include_provisional"])
+        self.assertEqual(audit["records_skipped_provisional"], 1)
+
+        entry = {"id": "vs-file-provisional", "file_id": "file-provisional"}
+        metadata = {
+            "id": "file-provisional",
+            "filename": "provisional-coding-corpus.md",
+            "bytes": len(corpus.encode("utf-8")),
+        }
+        with (
+            mock.patch.object(skillops, "_SYNC_LOCK_PATH", self.lock_path),
+            mock.patch.object(
+                skillops, "_require_vector_store_id", return_value="vs-test"
+            ),
+            mock.patch.object(
+                skillops, "_require_openai_api_key", return_value="test-key"
+            ),
+            mock.patch.object(
+                skillops, "_list_vector_store_files", return_value=[entry]
+            ),
+            mock.patch.object(
+                skillops,
+                "_list_openai_file_metadata",
+                return_value={"file-provisional": metadata},
+            ),
+            mock.patch.object(
+                skillops, "_get_openai_file_metadata", return_value=metadata
+            ),
+            mock.patch.object(
+                skillops,
+                "_read_openai_file_content",
+                return_value=(corpus, False),
+            ),
+        ):
+            synchronized = skillops.sync_vector_store(
+                dry_run=True,
+                include_provisional=False,
+            )
+        self.assertEqual(synchronized["status"], "dry_run_complete")
+        self.assertEqual(synchronized["items_skipped_provisional"], 1)
+        self.assertEqual(synchronized["capabilities_created"], 7)
+
+        included = skillops.import_coding_capability_corpus_text(
+            corpus,
+            include_provisional=True,
+            dry_run=True,
+        )
+        self.assertEqual(included["capabilities_created"], 8)
+        self.assertEqual(included["items_skipped_provisional"], 0)
 
     def test_quoted_false_freshness_flag_stays_false(self):
         corpus = self._eight_record_corpus().replace(
