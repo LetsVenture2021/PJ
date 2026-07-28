@@ -362,8 +362,10 @@ DISPATCH_TABLE.update(_gen_dispatch)
 _POLICY_MODES = {"allow", "deny", "approval"}
 _BUILTIN_APPROVAL_TOOLS = {
     "approve_codeops_task",
+    "create_skill",
     "learn_from_vector_store",
     "run_codeops_validation",
+    "run_shortcut",
     "sync_vector_store",
 }
 

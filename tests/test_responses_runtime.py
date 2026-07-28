@@ -400,6 +400,64 @@ class TestResponsesRoutes(unittest.TestCase):
             "bridge_auth_not_configured",
         )
 
+    def test_local_web_session_authorizes_same_origin_browser_only(self):
+        with (
+            patch.dict(os.environ, {"PJ_TOOL_BRIDGE_TOKEN": ""}),
+            patch.dict(
+                realtime_server.app.config,
+                {"LOCAL_WEB_OWNER_SESSION_ENABLED": True},
+            ),
+        ):
+            loaded = self.client.get(
+                "/",
+                environ_base={"REMOTE_ADDR": "127.0.0.1"},
+            )
+            self.assertEqual(loaded.status_code, 200)
+            loaded.close()
+            allowed = self.client.get(
+                "/responses/capabilities",
+                headers={"Referer": "http://localhost/"},
+                environ_base={"REMOTE_ADDR": "127.0.0.1"},
+            )
+            denied = self.client.get(
+                "/responses/capabilities",
+                headers={"Origin": "https://attacker.example"},
+                environ_base={"REMOTE_ADDR": "127.0.0.1"},
+            )
+
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(denied.status_code, 503)
+        self.assertEqual(
+            denied.get_json()["error"]["code"],
+            "bridge_auth_not_configured",
+        )
+
+    def test_builtin_web_client_rejects_non_loopback_requests(self):
+        with patch.dict(
+            realtime_server.app.config,
+            {"LOCAL_WEB_OWNER_SESSION_ENABLED": True},
+        ):
+            response = self.client.get(
+                "/",
+                environ_base={"REMOTE_ADDR": "192.0.2.10"},
+            )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.get_json()["error"]["code"],
+            "local_web_only",
+        )
+
+    def test_builtin_web_client_is_disabled_without_explicit_local_mode(self):
+        with patch.dict(
+            realtime_server.app.config,
+            {"LOCAL_WEB_OWNER_SESSION_ENABLED": False},
+        ):
+            response = self.client.get(
+                "/",
+                environ_base={"REMOTE_ADDR": "127.0.0.1"},
+            )
+        self.assertEqual(response.status_code, 403)
+
     def test_session_lifecycle_stream_and_server_side_response_id(self):
         created = self.client.post(
             "/responses/sessions",
