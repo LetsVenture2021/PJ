@@ -20,6 +20,9 @@ must define:
 Active skills are loaded dynamically by skills.py at startup.
 """
 import ast
+import codecs
+import fcntl
+import hashlib
 import importlib.util
 import json
 import os
@@ -39,6 +42,16 @@ _DB_PATH = _ROOT / "pj_data.sqlite3"
 GENERATED_DIR = _ROOT / "generated_skills"
 GENERATED_DIR.mkdir(exist_ok=True)
 _CONFIG_PATH = _ROOT / "config.json"
+_SYNC_LOCK_PATH = Path(
+    os.getenv("PJ_VECTOR_SYNC_LOCK_PATH")
+    or Path.home() / "Library" / "Application Support" / "PJ"
+    / "vector-store-sync.lock"
+)
+
+DEFAULT_MAX_CHARS_PER_FILE = 5_000_000
+MAX_MAX_CHARS_PER_FILE = 25_000_000
+DEFAULT_REQUEST_RETRIES = 4
+DEFAULT_RETRY_BACKOFF_SECONDS = 0.5
 
 # Names that can never be overridden by generated skills.
 RESERVED_NAMES = {
@@ -46,6 +59,7 @@ RESERVED_NAMES = {
     "save_note", "search_notes", "get_active_browser_tab", "run_shortcut",
     "observe_pattern", "list_observations", "create_skill", "activate_skill",
     "review_skills", "deprecate_skill", "learn_from_vector_store",
+    "sync_vector_store", "get_vector_sync_status",
     "list_doc_templates", "create_doc_template", "draft_document",
     "revise_document", "finalize_document", "export_document",
     "list_documents", "get_document",
@@ -148,6 +162,48 @@ def _db():
             started_at TEXT DEFAULT CURRENT_TIMESTAMP,
             finished_at TEXT
         )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS skillops_vector_sync_files (
+            vector_store_id TEXT NOT NULL,
+            source_file_id TEXT NOT NULL,
+            vector_store_file_id TEXT DEFAULT '',
+            filename TEXT DEFAULT '',
+            success_version_hash TEXT,
+            sync_policy_hash TEXT,
+            content_sha256 TEXT,
+            content_chars INTEGER DEFAULT 0,
+            synchronized_at TEXT,
+            last_attempt_run_id TEXT DEFAULT '',
+            last_attempt_status TEXT DEFAULT '',
+            last_attempt_error TEXT,
+            last_attempt_at TEXT,
+            PRIMARY KEY (vector_store_id, source_file_id)
+        )""")
+        existing_run_columns = {
+            row[1] for row in conn.execute(
+                "PRAGMA table_info(skillops_learning_runs)"
+            ).fetchall()
+        }
+        for column, definition in {
+            "run_type": "TEXT DEFAULT 'learn'",
+            "force": "INTEGER DEFAULT 0",
+            "files_skipped_unchanged": "INTEGER DEFAULT 0",
+            "files_failed": "INTEGER DEFAULT 0",
+        }.items():
+            if column not in existing_run_columns:
+                conn.execute(
+                    f"ALTER TABLE skillops_learning_runs "
+                    f"ADD COLUMN {column} {definition}"
+                )
+        existing_sync_columns = {
+            row[1] for row in conn.execute(
+                "PRAGMA table_info(skillops_vector_sync_files)"
+            ).fetchall()
+        }
+        if "sync_policy_hash" not in existing_sync_columns:
+            conn.execute(
+                "ALTER TABLE skillops_vector_sync_files "
+                "ADD COLUMN sync_policy_hash TEXT"
+            )
         yield conn
         conn.commit()
     finally:
@@ -227,6 +283,39 @@ def _openai_headers(api_key: str) -> dict:
     }
 
 
+def _request_with_retry(url: str, *, headers: dict, params: dict = None,
+                        timeout: int = 30, stream: bool = False,
+                        retries: int = DEFAULT_REQUEST_RETRIES):
+    last_error = ""
+    attempts = max(1, int(retries or 1))
+    for attempt in range(attempts):
+        try:
+            response = requests.get(
+                url,
+                headers=headers,
+                params=params,
+                timeout=timeout,
+                stream=stream,
+            )
+        except requests.RequestException as exc:
+            last_error = str(exc)
+            retryable = True
+        else:
+            if response.status_code < 400:
+                return response
+            last_error = f"HTTP {response.status_code}: {response.text[:300]}"
+            retryable = response.status_code == 429 or response.status_code >= 500
+            if not retryable:
+                raise RuntimeError(last_error)
+            response.close()
+        if not retryable or attempt + 1 >= attempts:
+            break
+        time.sleep(DEFAULT_RETRY_BACKOFF_SECONDS * (2 ** attempt))
+    raise RuntimeError(
+        f"request failed after {attempts} attempts: {last_error}"
+    )
+
+
 def _list_vector_store_files(vector_store_id: str, api_key: str,
                              max_files: int = 0) -> list:
     files = []
@@ -235,18 +324,14 @@ def _list_vector_store_files(vector_store_id: str, api_key: str,
         params = {"limit": 100}
         if after:
             params["after"] = after
-        resp = requests.get(
+        resp = _request_with_retry(
             f"https://api.openai.com/v1/vector_stores/{vector_store_id}/files",
             headers=_openai_headers(api_key),
             params=params,
             timeout=30,
         )
-        if resp.status_code >= 400:
-            raise RuntimeError(
-                f"vector store file list failed ({resp.status_code}): "
-                f"{resp.text[:300]}"
-            )
         payload = resp.json()
+        resp.close()
         data = payload.get("data", [])
         files.extend(data)
         if max_files > 0 and len(files) >= max_files:
@@ -261,22 +346,69 @@ def _list_vector_store_files(vector_store_id: str, api_key: str,
     return files
 
 
-def _read_openai_file_content(file_id: str, api_key: str,
-                              max_chars_per_file: int) -> tuple[str, bool]:
-    resp = requests.get(
-        f"https://api.openai.com/v1/files/{file_id}/content",
-        headers={"Authorization": f"Bearer {api_key}"},
-        timeout=40,
+def _get_openai_file_metadata(file_id: str, api_key: str) -> dict:
+    response = _request_with_retry(
+        f"https://api.openai.com/v1/files/{file_id}",
+        headers=_openai_headers(api_key),
+        timeout=30,
     )
-    if resp.status_code >= 400:
-        raise RuntimeError(
-            f"file content read failed for {file_id} ({resp.status_code}): "
-            f"{resp.text[:300]}"
-        )
-    text = resp.content.decode("utf-8", errors="replace")
-    if max_chars_per_file > 0 and len(text) > max_chars_per_file:
-        return text[:max_chars_per_file], True
-    return text, False
+    try:
+        payload = response.json()
+    finally:
+        response.close()
+    return payload if isinstance(payload, dict) else {}
+
+
+def _read_openai_file_content(file_id: str, api_key: str,
+                              max_chars_per_file: int,
+                              expected_bytes: int = 0) -> tuple[str, bool]:
+    headers = _openai_headers(api_key)
+    headers["Accept-Encoding"] = "identity"
+    response = _request_with_retry(
+        f"https://api.openai.com/v1/files/{file_id}/content",
+        headers=headers,
+        timeout=40,
+        stream=True,
+    )
+    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    chunks = []
+    char_count = 0
+    byte_count = 0
+    try:
+        for chunk in response.iter_content(chunk_size=64 * 1024):
+            if not chunk:
+                continue
+            byte_count += len(chunk)
+            decoded = decoder.decode(chunk)
+            char_count += len(decoded)
+            if max_chars_per_file > 0 and char_count > max_chars_per_file:
+                raise ValueError(
+                    f"file {file_id} exceeds max_chars_per_file "
+                    f"({max_chars_per_file}); no partial content was processed"
+                )
+            chunks.append(decoded)
+        tail = decoder.decode(b"", final=True)
+        char_count += len(tail)
+        if max_chars_per_file > 0 and char_count > max_chars_per_file:
+            raise ValueError(
+                f"file {file_id} exceeds max_chars_per_file "
+                f"({max_chars_per_file}); no partial content was processed"
+            )
+        chunks.append(tail)
+        content_length = int(response.headers.get("Content-Length") or 0)
+        expected_bytes = int(expected_bytes or 0)
+        for expected, source in (
+            (content_length, "HTTP Content-Length"),
+            (expected_bytes, "file metadata"),
+        ):
+            if expected > 0 and byte_count != expected:
+                raise RuntimeError(
+                    f"incomplete file read for {file_id}: received "
+                    f"{byte_count} bytes, expected {expected} from {source}"
+                )
+    finally:
+        response.close()
+    return "".join(chunks), False
 
 
 def learn_from_vector_store(
@@ -284,13 +416,18 @@ def learn_from_vector_store(
         max_files: int = 0,
         overwrite_existing: bool = False,
         include_provisional: bool = False,
-        max_chars_per_file: int = 250_000) -> dict:
+        max_chars_per_file: int = DEFAULT_MAX_CHARS_PER_FILE) -> dict:
     """Import template specs from every file in the configured vector store."""
     run_id = "lrn-" + str(uuid.uuid4())[:8]
     now = datetime.now(timezone.utc).isoformat()
     max_files = max(0, int(max_files or 0))
-    max_chars_per_file = max(10_000, min(int(max_chars_per_file or 250_000),
-                                          2_000_000))
+    max_chars_per_file = max(
+        10_000,
+        min(
+            int(max_chars_per_file or DEFAULT_MAX_CHARS_PER_FILE),
+            MAX_MAX_CHARS_PER_FILE,
+        ),
+    )
     vector_store_id = ""
     api_key = ""
     with _db() as conn:
@@ -454,6 +591,576 @@ def learn_from_vector_store(
                 ),
             )
         return {"status": "failed", "run_id": run_id, "error": err}
+
+
+@contextmanager
+def _vector_sync_lock():
+    _SYNC_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = _SYNC_LOCK_PATH.open("a+")
+    try:
+        os.chmod(_SYNC_LOCK_PATH, 0o600)
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    finally:
+        lock_file.close()
+
+
+def _stable_hash(value) -> str:
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _sync_policy_hash(overwrite_existing: bool,
+                      include_provisional: bool) -> str:
+    return _stable_hash({
+        "overwrite_existing": bool(overwrite_existing),
+        "include_provisional": bool(include_provisional),
+    })
+
+
+def _sync_version_hash(entry: dict, metadata: dict,
+                       sync_policy_hash: str) -> str:
+    return _stable_hash({
+        "vector_store_file_id": entry.get("id"),
+        "source_file_id": entry.get("file_id"),
+        "vector_store_created_at": entry.get("created_at"),
+        "attributes": entry.get("attributes"),
+        "source_created_at": metadata.get("created_at"),
+        "filename": metadata.get("filename"),
+        "bytes": metadata.get("bytes"),
+        "purpose": metadata.get("purpose"),
+        "sync_policy_hash": sync_policy_hash,
+    })
+
+
+def _get_sync_state(vector_store_id: str, source_file_id: str) -> dict:
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT success_version_hash, sync_policy_hash, content_sha256, content_chars, "
+            "synchronized_at, last_attempt_status, last_attempt_error "
+            "FROM skillops_vector_sync_files "
+            "WHERE vector_store_id=? AND source_file_id=?",
+            (vector_store_id, source_file_id),
+        ).fetchone()
+    if not row:
+        return {}
+    return {
+        "success_version_hash": row[0],
+        "sync_policy_hash": row[1],
+        "content_sha256": row[2],
+        "content_chars": row[3],
+        "synchronized_at": row[4],
+        "last_attempt_status": row[5],
+        "last_attempt_error": row[6],
+    }
+
+
+def _record_sync_attempt(vector_store_id: str, source_file_id: str,
+                         vector_store_file_id: str, filename: str,
+                         run_id: str, status: str, error: str = ""):
+    now = datetime.now(timezone.utc).isoformat()
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO skillops_vector_sync_files "
+            "(vector_store_id, source_file_id, vector_store_file_id, filename, "
+            "last_attempt_run_id, last_attempt_status, last_attempt_error, "
+            "last_attempt_at) VALUES (?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(vector_store_id, source_file_id) DO UPDATE SET "
+            "vector_store_file_id=excluded.vector_store_file_id, "
+            "filename=excluded.filename, "
+            "last_attempt_run_id=excluded.last_attempt_run_id, "
+            "last_attempt_status=excluded.last_attempt_status, "
+            "last_attempt_error=excluded.last_attempt_error, "
+            "last_attempt_at=excluded.last_attempt_at",
+            (
+                vector_store_id,
+                source_file_id,
+                vector_store_file_id,
+                filename,
+                run_id,
+                status,
+                (error or "")[:1000] or None,
+                now,
+            ),
+        )
+
+
+def _record_sync_success(vector_store_id: str, source_file_id: str,
+                         vector_store_file_id: str, filename: str,
+                         version_hash: str, sync_policy_hash: str,
+                         content_sha256: str,
+                         content_chars: int, run_id: str, status: str):
+    now = datetime.now(timezone.utc).isoformat()
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO skillops_vector_sync_files "
+            "(vector_store_id, source_file_id, vector_store_file_id, filename, "
+            "success_version_hash, sync_policy_hash, content_sha256, "
+            "content_chars, synchronized_at, "
+            "last_attempt_run_id, last_attempt_status, last_attempt_error, "
+            "last_attempt_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,NULL,?) "
+            "ON CONFLICT(vector_store_id, source_file_id) DO UPDATE SET "
+            "vector_store_file_id=excluded.vector_store_file_id, "
+            "filename=excluded.filename, "
+            "success_version_hash=excluded.success_version_hash, "
+            "sync_policy_hash=excluded.sync_policy_hash, "
+            "content_sha256=excluded.content_sha256, "
+            "content_chars=excluded.content_chars, "
+            "synchronized_at=excluded.synchronized_at, "
+            "last_attempt_run_id=excluded.last_attempt_run_id, "
+            "last_attempt_status=excluded.last_attempt_status, "
+            "last_attempt_error=NULL, last_attempt_at=excluded.last_attempt_at",
+            (
+                vector_store_id,
+                source_file_id,
+                vector_store_file_id,
+                filename,
+                version_hash,
+                sync_policy_hash,
+                content_sha256,
+                content_chars,
+                now,
+                run_id,
+                status,
+                now,
+            ),
+        )
+
+
+def _content_was_synchronized(vector_store_id: str,
+                              content_sha256: str,
+                              sync_policy_hash: str) -> bool:
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM skillops_vector_sync_files "
+            "WHERE vector_store_id=? AND content_sha256=? "
+            "AND sync_policy_hash=? "
+            "AND success_version_hash IS NOT NULL LIMIT 1",
+            (vector_store_id, content_sha256, sync_policy_hash),
+        ).fetchone()
+    return bool(row)
+
+
+def _start_sync_run(run_id: str, vector_store_id: str, *,
+                    dry_run: bool, overwrite_existing: bool,
+                    include_provisional: bool, force: bool,
+                    max_files: int, max_chars_per_file: int,
+                    status: str = "running"):
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO skillops_learning_runs "
+            "(run_id, vector_store_id, dry_run, overwrite_existing, "
+            "include_provisional, force, max_files, max_chars_per_file, "
+            "run_type, status, details_json, started_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                run_id,
+                vector_store_id,
+                1 if dry_run else 0,
+                1 if overwrite_existing else 0,
+                1 if include_provisional else 0,
+                1 if force else 0,
+                max_files,
+                max_chars_per_file,
+                "sync",
+                status,
+                "{}",
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+
+
+def _finish_sync_run(run_id: str, status: str, totals: dict,
+                     details: dict, error: str = ""):
+    with _db() as conn:
+        conn.execute(
+            "UPDATE skillops_learning_runs SET "
+            "files_seen=?, files_processed=?, files_skipped_unchanged=?, "
+            "files_failed=?, templates_created=?, templates_updated=?, "
+            "aliases_registered=?, items_skipped_provisional=?, "
+            "items_skipped_invalid=?, status=?, error=?, details_json=?, "
+            "finished_at=? WHERE run_id=?",
+            (
+                totals["files_seen"],
+                totals["files_processed"],
+                totals["files_skipped_unchanged"],
+                totals["files_failed"],
+                totals["templates_created"],
+                totals["templates_updated"],
+                totals["aliases_registered"],
+                totals["items_skipped_provisional"],
+                totals["items_skipped_invalid"],
+                status,
+                (error or "")[:1000] or None,
+                json.dumps(details),
+                datetime.now(timezone.utc).isoformat(),
+                run_id,
+            ),
+        )
+
+
+def sync_vector_store(
+        dry_run: bool = False,
+        max_files: int = 0,
+        overwrite_existing: bool = True,
+        include_provisional: bool = True,
+        max_chars_per_file: int = DEFAULT_MAX_CHARS_PER_FILE,
+        force: bool = False) -> dict:
+    """Idempotently synchronize changed vector-store files into DocOps."""
+    max_files = max(0, int(max_files or 0))
+    max_chars_per_file = max(
+        10_000,
+        min(
+            int(max_chars_per_file or DEFAULT_MAX_CHARS_PER_FILE),
+            MAX_MAX_CHARS_PER_FILE,
+        ),
+    )
+    run_id = "syn-" + str(uuid.uuid4())[:8]
+    totals = {
+        "files_seen": 0,
+        "files_processed": 0,
+        "files_skipped_unchanged": 0,
+        "files_failed": 0,
+        "templates_created": 0,
+        "templates_updated": 0,
+        "aliases_registered": 0,
+        "items_skipped_provisional": 0,
+        "items_skipped_invalid": 0,
+    }
+    reports = []
+    errors = []
+
+    with _vector_sync_lock() as acquired:
+        if not acquired:
+            vector_store_id = ""
+            try:
+                vector_store_id = _require_vector_store_id()
+            except ValueError:
+                vector_store_id = "unknown"
+            _start_sync_run(
+                run_id,
+                vector_store_id,
+                dry_run=dry_run,
+                overwrite_existing=overwrite_existing,
+                include_provisional=include_provisional,
+                force=force,
+                max_files=max_files,
+                max_chars_per_file=max_chars_per_file,
+                status="locked",
+            )
+            _finish_sync_run(
+                run_id,
+                "locked",
+                totals,
+                {"totals": totals, "files": [], "errors": [
+                    "another vector-store synchronization is already running"
+                ]},
+                "another vector-store synchronization is already running",
+            )
+            return {
+                "status": "locked",
+                "run_id": run_id,
+                "error": "another vector-store synchronization is already running",
+            }
+
+        vector_store_id = "unknown"
+        run_started = False
+        try:
+            vector_store_id = _require_vector_store_id()
+            _start_sync_run(
+                run_id,
+                vector_store_id,
+                dry_run=dry_run,
+                overwrite_existing=overwrite_existing,
+                include_provisional=include_provisional,
+                force=force,
+                max_files=max_files,
+                max_chars_per_file=max_chars_per_file,
+            )
+            run_started = True
+            api_key = _require_openai_api_key()
+            files = _list_vector_store_files(vector_store_id, api_key, max_files)
+            totals["files_seen"] = len(files)
+            sync_policy_hash = _sync_policy_hash(
+                overwrite_existing,
+                include_provisional,
+            )
+
+            import docops
+
+            for entry in files:
+                source_file_id = str(entry.get("file_id") or entry.get("id") or "")
+                vector_store_file_id = str(entry.get("id") or "")
+                filename = str(entry.get("filename") or source_file_id)
+                report = {
+                    "file_id": source_file_id or None,
+                    "vector_store_file_id": vector_store_file_id or None,
+                    "filename": filename,
+                }
+                try:
+                    if not source_file_id:
+                        raise ValueError("vector-store entry has no file identity")
+                    metadata = _get_openai_file_metadata(source_file_id, api_key)
+                    filename = str(metadata.get("filename") or filename)
+                    report["filename"] = filename
+                    version_hash = _sync_version_hash(
+                        entry,
+                        metadata,
+                        sync_policy_hash,
+                    )
+                    state = _get_sync_state(vector_store_id, source_file_id)
+                    if (
+                        not force
+                        and state.get("success_version_hash") == version_hash
+                    ):
+                        totals["files_skipped_unchanged"] += 1
+                        report["status"] = "skipped_unchanged"
+                        if not dry_run:
+                            _record_sync_attempt(
+                                vector_store_id,
+                                source_file_id,
+                                vector_store_file_id,
+                                filename,
+                                run_id,
+                                "skipped_unchanged",
+                            )
+                        reports.append(report)
+                        continue
+
+                    text, truncated = _read_openai_file_content(
+                        source_file_id,
+                        api_key,
+                        max_chars_per_file,
+                        expected_bytes=metadata.get("bytes") or 0,
+                    )
+                    if truncated:
+                        raise RuntimeError(
+                            "partial file reads are not eligible for synchronization"
+                        )
+                    content_sha256 = hashlib.sha256(
+                        text.encode("utf-8")
+                    ).hexdigest()
+                    if (
+                        not force
+                        and _content_was_synchronized(
+                            vector_store_id,
+                            content_sha256,
+                            sync_policy_hash,
+                        )
+                    ):
+                        totals["files_skipped_unchanged"] += 1
+                        report["status"] = "skipped_duplicate_content"
+                        report["content_sha256"] = content_sha256
+                        if not dry_run:
+                            _record_sync_success(
+                                vector_store_id,
+                                source_file_id,
+                                vector_store_file_id,
+                                filename,
+                                version_hash,
+                                sync_policy_hash,
+                                content_sha256,
+                                len(text),
+                                run_id,
+                                "skipped_duplicate_content",
+                            )
+                        reports.append(report)
+                        continue
+
+                    preflight = docops.import_doc_templates_from_knowledge_pack_text(
+                        text,
+                        overwrite_existing=overwrite_existing,
+                        include_provisional=include_provisional,
+                        dry_run=True,
+                    )
+                    invalid_count = int(
+                        preflight.get("items_skipped_invalid", 0)
+                    )
+                    import_errors = preflight.get("errors", [])
+                    if invalid_count or import_errors:
+                        raise RuntimeError(
+                            f"DocOps import was incomplete: "
+                            f"{invalid_count} invalid item(s); "
+                            f"{'; '.join(import_errors[:3])}"
+                        )
+                    imported = preflight
+                    if not dry_run:
+                        imported = (
+                            docops.import_doc_templates_from_knowledge_pack_text(
+                                text,
+                                overwrite_existing=overwrite_existing,
+                                include_provisional=include_provisional,
+                                dry_run=False,
+                            )
+                        )
+
+                    totals["files_processed"] += 1
+                    for key in (
+                        "templates_created",
+                        "templates_updated",
+                        "aliases_registered",
+                        "items_skipped_provisional",
+                        "items_skipped_invalid",
+                    ):
+                        totals[key] += int(imported.get(key, 0))
+                    report.update({
+                        "status": (
+                            "would_synchronize" if dry_run else "synchronized"
+                        ),
+                        "content_sha256": content_sha256,
+                        "content_chars": len(text),
+                        "items_total": imported.get("items_total", 0),
+                        "templates_created": imported.get("templates_created", 0),
+                        "templates_updated": imported.get("templates_updated", 0),
+                    })
+                    if not dry_run:
+                        _record_sync_success(
+                            vector_store_id,
+                            source_file_id,
+                            vector_store_file_id,
+                            filename,
+                            version_hash,
+                            sync_policy_hash,
+                            content_sha256,
+                            len(text),
+                            run_id,
+                            "synchronized",
+                        )
+                except Exception as exc:
+                    error = str(exc)
+                    totals["files_failed"] += 1
+                    errors.append(f"{source_file_id or vector_store_file_id}: {error}")
+                    report.update({"status": "failed", "error": error[:1000]})
+                    if source_file_id and not dry_run:
+                        _record_sync_attempt(
+                            vector_store_id,
+                            source_file_id,
+                            vector_store_file_id,
+                            filename,
+                            run_id,
+                            "failed",
+                            error,
+                        )
+                reports.append(report)
+
+            if totals["files_failed"]:
+                final_status = "partial_failed"
+            elif dry_run:
+                final_status = "dry_run_complete"
+            else:
+                final_status = "completed"
+            details = {
+                "totals": totals,
+                "files": reports,
+                "errors": errors[:100],
+            }
+            _finish_sync_run(
+                run_id,
+                final_status,
+                totals,
+                details,
+                errors[0] if errors else "",
+            )
+            return {
+                "status": final_status,
+                "run_id": run_id,
+                "vector_store_id": vector_store_id,
+                "dry_run": bool(dry_run),
+                "force": bool(force),
+                **totals,
+                "file_reports": reports,
+                "errors": errors[:50],
+            }
+        except Exception as exc:
+            error = str(exc)
+            if not run_started:
+                _start_sync_run(
+                    run_id,
+                    vector_store_id,
+                    dry_run=dry_run,
+                    overwrite_existing=overwrite_existing,
+                    include_provisional=include_provisional,
+                    force=force,
+                    max_files=max_files,
+                    max_chars_per_file=max_chars_per_file,
+                )
+            _finish_sync_run(
+                run_id,
+                "failed",
+                totals,
+                {"totals": totals, "files": reports, "errors": [error]},
+                error,
+            )
+            return {"status": "failed", "run_id": run_id, "error": error}
+
+
+def get_vector_sync_status(limit: int = 10) -> dict:
+    """Return recent durable sync runs and per-file synchronization state."""
+    limit = max(1, min(int(limit or 10), 50))
+    with _db() as conn:
+        run_rows = conn.execute(
+            "SELECT run_id, vector_store_id, status, dry_run, force, "
+            "files_seen, files_processed, files_skipped_unchanged, files_failed, "
+            "templates_created, templates_updated, error, started_at, finished_at "
+            "FROM skillops_learning_runs WHERE run_type='sync' "
+            "ORDER BY started_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        file_rows = conn.execute(
+            "SELECT vector_store_id, source_file_id, vector_store_file_id, "
+            "filename, content_sha256, content_chars, synchronized_at, "
+            "last_attempt_status, last_attempt_error, last_attempt_at "
+            "FROM skillops_vector_sync_files "
+            "ORDER BY COALESCE(last_attempt_at, synchronized_at) DESC LIMIT 100"
+        ).fetchall()
+    return {
+        "runs": [
+            {
+                "run_id": row[0],
+                "vector_store_id": row[1],
+                "status": row[2],
+                "dry_run": bool(row[3]),
+                "force": bool(row[4]),
+                "files_seen": row[5],
+                "files_processed": row[6],
+                "files_skipped_unchanged": row[7],
+                "files_failed": row[8],
+                "templates_created": row[9],
+                "templates_updated": row[10],
+                "error": row[11],
+                "started_at": row[12],
+                "finished_at": row[13],
+            }
+            for row in run_rows
+        ],
+        "files": [
+            {
+                "vector_store_id": row[0],
+                "file_id": row[1],
+                "vector_store_file_id": row[2],
+                "filename": row[3],
+                "content_sha256": row[4],
+                "content_chars": row[5],
+                "synchronized_at": row[6],
+                "last_attempt_status": row[7],
+                "last_attempt_error": row[8],
+                "last_attempt_at": row[9],
+            }
+            for row in file_rows
+        ],
+    }
 
 
 # ---------------------------------------------------------- skill creation
@@ -843,7 +1550,32 @@ SKILLOPS_SCHEMAS = [
          "include_provisional": {"type": "boolean",
                                  "description": "Import items marked provisional/draft/experimental"},
          "max_chars_per_file": {"type": "integer",
-                                "description": "Max characters to read from each file before parsing"},
+                                "description": "Complete-file safety limit (default 5,000,000; files over the limit fail without partial import)"},
+     }, "required": []}},
+    {"type": "function", "name": "sync_vector_store",
+     "description": ("Idempotently synchronize new or changed vector-store "
+                    "files into DocOps using durable metadata/content "
+                    "deduplication, a cross-process lock, and run audit."),
+     "parameters": {"type": "object", "properties": {
+        "dry_run": {"type": "boolean",
+                    "description": "Report changes without mutating DocOps or file sync state"},
+        "max_files": {"type": "integer",
+                      "description": "Optional file cap (0=all)"},
+        "overwrite_existing": {"type": "boolean",
+                               "description": "Update existing DocOps templates (default true)"},
+        "include_provisional": {"type": "boolean",
+                                "description": "Import provisional instructional specs (default true)"},
+        "max_chars_per_file": {"type": "integer",
+                               "description": "Complete-file safety limit (default 5,000,000)"},
+        "force": {"type": "boolean",
+                  "description": "Reprocess files even when identity/content is unchanged"},
+     }, "required": []}},
+    {"type": "function", "name": "get_vector_sync_status",
+     "description": ("Inspect recent durable vector-store sync runs, failures, "
+                    "and per-file synchronization state."),
+     "parameters": {"type": "object", "properties": {
+        "limit": {"type": "integer",
+                  "description": "Number of recent runs to return (1-50)"},
      }, "required": []}},
     {"type": "function", "name": "deprecate_skill",
      "description": "Deprecate a generated skill so it no longer loads (reversible via activate_skill).",
@@ -859,5 +1591,7 @@ SKILLOPS_DISPATCH = {
     "activate_skill": activate_skill,
     "review_skills": review_skills,
     "learn_from_vector_store": learn_from_vector_store,
+    "sync_vector_store": sync_vector_store,
+    "get_vector_sync_status": get_vector_sync_status,
     "deprecate_skill": deprecate_skill,
 }
