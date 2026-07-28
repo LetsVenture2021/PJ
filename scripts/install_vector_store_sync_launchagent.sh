@@ -2,7 +2,7 @@
 set -eu
 
 ROOT=${1:-"$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"}
-PYTHON=${PJ_PYTHON:-"$ROOT/venv/bin/python"}
+PYTHON=${PJ_PYTHON:-"$ROOT/.venv/bin/python"}
 LOG_DIR=${PJ_LOG_DIR:-"$HOME/Library/Logs/PJ"}
 KEYCHAIN_SERVICE=${PJ_OPENAI_KEYCHAIN_SERVICE:-"pj-openai-api-key"}
 TEMPLATE="$ROOT/scripts/com.pj.vector-store-sync.plist"

@@ -15,7 +15,10 @@ import skillops  # noqa: E402
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Synchronize changed vector-store files into PJ DocOps."
+        description=(
+            "Synchronize cached, changed vector-store sources into PJ "
+            "DocOps and CodeOps."
+        )
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--force", action="store_true")
