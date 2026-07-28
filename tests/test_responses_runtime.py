@@ -390,6 +390,14 @@ class TestResponsesRuntime(unittest.TestCase):
             "documentation": (
                 "see https://docs.n8n.io/integrations/builtin/core-nodes/"
             ),
+            "download_url": (
+                "/responses/artifacts/"
+                "ART-0123456789abcdef0123456789abcdef"
+            ),
+            "near_miss_download_url": (
+                "/responses/artifacts/"
+                "ART-0123456789abcdef0123456789abcdef/extra"
+            ),
             "source_path": "relative/source.md",
         }
         redacted = responses_runtime.redact_server_paths(value)
@@ -404,6 +412,14 @@ class TestResponsesRuntime(unittest.TestCase):
         self.assertEqual(
             redacted["documentation"],
             "see https://docs.n8n.io/integrations/builtin/core-nodes/",
+        )
+        self.assertEqual(
+            redacted["download_url"],
+            "/responses/artifacts/ART-0123456789abcdef0123456789abcdef",
+        )
+        self.assertIn(
+            "[server path redacted]",
+            redacted["near_miss_download_url"],
         )
 
     def test_powerpoint_completion_is_blocked_after_one_repair(self):
@@ -716,10 +732,14 @@ class TestResponsesRoutes(unittest.TestCase):
         session = chatlog.new_session(channel="realtime")
         exported = self._create_powerpoint_artifact()
         with patch.object(
-            realtime_server,
-            "dispatch_realtime_function",
+            responses_runtime,
+            "dispatch_local_function",
             return_value=exported,
         ):
+            direct = responses_runtime.dispatch_realtime_function(
+                "export_document",
+                {},
+            )
             response = self.client.post(
                 "/execute-tool",
                 json={
@@ -730,6 +750,19 @@ class TestResponsesRoutes(unittest.TestCase):
                 headers=self.auth,
             )
         self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        expected_download_url = exported["artifact"]["download_url"]
+        self.assertEqual(
+            direct["artifact"]["download_url"],
+            expected_download_url,
+        )
+        self.assertEqual(
+            payload["artifact"]["download_url"],
+            expected_download_url,
+        )
+        self.assertNotIn("path", direct)
+        self.assertNotIn("path", payload)
+        self.assertNotIn("/Users/", json.dumps(payload))
         self.assertEqual(
             chatlog.list_session_artifact_ids(session["id"]),
             [exported["artifact"]["artifact_id"]],

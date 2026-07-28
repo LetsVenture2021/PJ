@@ -549,6 +549,9 @@ _SERVER_PATH_PATTERN = re.compile(
     re.X,
 )
 _URI_PATTERN = re.compile(r"\bhttps?://[^\s\"'<>}\]]+")
+_ARTIFACT_DOWNLOAD_PATTERN = re.compile(
+    r"^/responses/artifacts/ART-[a-f0-9]{32}$"
+)
 _SERVER_PATH_FIELDS = {
     "canonical_path",
     "cwd",
@@ -578,6 +581,8 @@ def redact_server_paths(value):
     if isinstance(value, (list, tuple)):
         return [redact_server_paths(item) for item in value]
     if isinstance(value, str):
+        if _ARTIFACT_DOWNLOAD_PATTERN.fullmatch(value):
+            return value
         uris: dict[str, str] = {}
 
         def preserve_uri(match: re.Match) -> str:

@@ -509,8 +509,11 @@ test("browser module initializes with Full Power helpers in shared scope", async
      const parseErrorBody = () => "";
      const fetchWithTimeout = async (url, options = {}) => {
        window.__testFetches.push({ url, options });
+       const payload = url.endsWith("/execute-tool")
+         ? window.__directToolOutput
+         : (url.endsWith("/health") ? { ok: true } : { tools: [] });
        return new Response(
-         JSON.stringify(url.endsWith("/health") ? { ok: true } : { tools: [] }),
+         JSON.stringify(payload),
          { status: 200, headers: { "content-type": "application/json" } },
        );
      };`,
@@ -564,6 +567,7 @@ test("browser module initializes with Full Power helpers in shared scope", async
   };
   const window = {
     __testFetches: [],
+    __directToolOutput: null,
     location: {
       hostname: "localhost",
       protocol: "http:",
@@ -582,6 +586,7 @@ test("browser module initializes with Full Power helpers in shared scope", async
        state,
        handleRealtimeEvent,
        renderArtifactCard,
+       runFunctionCall,
        seedRealtimeConversation,
      };`,
   );
@@ -746,6 +751,33 @@ test("browser module initializes with Full Power helpers in shared scope", async
     "ART-0123456789abcdef0123456789abcdef",
   );
   assert.ok(artifactCard.querySelector(".artifact-image-preview"));
+
+  const directArtifactId = "ART-fedcba9876543210fedcba9876543210";
+  window.__directToolOutput = {
+    artifact: {
+      artifact_id: directArtifactId,
+      filename: "direct-realtime.pptx",
+      download_url: `/responses/artifacts/${directArtifactId}`,
+      format: "pptx",
+      mime_type:
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      byte_size: 2048,
+      sha256: "b".repeat(64),
+      status: "ready",
+    },
+  };
+  await hooks.runFunctionCall(
+    "call-direct-artifact",
+    "export_document",
+    "{}",
+    "http://localhost:3001",
+  );
+  assert.ok(hooks.state.artifactCards.get(directArtifactId));
+  assert.ok(
+    window.__testFetches.some(
+      ({ url }) => url === "http://localhost:3001/execute-tool",
+    ),
+  );
 
   const seedSent = [];
   hooks.state.pendingSeedHistory = [
