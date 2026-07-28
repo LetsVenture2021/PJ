@@ -58,6 +58,9 @@ jobs:
       - name: Type check Python
         run: python -m mypy
 
+      - name: Audit Python dependencies
+        run: python -m pip_audit --requirement requirements.txt
+
   python-tests:
     name: Python tests
     runs-on: ubuntu-latest
@@ -87,11 +90,14 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "20.19.0"
           cache: npm
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Audit Worker dependencies
+        run: npm audit --audit-level=high
 
       - name: Lint Worker
         run: npm run lint

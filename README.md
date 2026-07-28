@@ -75,7 +75,7 @@ interface and use the OpenAI adapter in `ops/shared/providers`.
 - Python **3.11** (the version exercised by CI) and `pip`.
 - An OpenAI API key for assistant, voice, provider image, and remote ingestion
   flows. Local deterministic tools and most tests mock provider calls.
-- Node.js 20+ with the built-in `node:test` runner for Worker tests.
+- Node.js 20.19+ with the built-in `node:test` runner for Worker tests.
 - A microphone, speakers, and PortAudio-compatible audio devices for terminal
   voice.
 - A Cloudflare account, an existing DNS zone, Wrangler, and Cloudflare Access
