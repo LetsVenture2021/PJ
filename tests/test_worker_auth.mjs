@@ -750,7 +750,7 @@ test("browser module initializes with Full Power helpers in shared scope", async
        renderArtifactCard,
        runFunctionCall,
        seedRealtimeConversation,
-      shouldUseEphemeralSignalingFallback,
+       shouldUseEphemeralSignalingFallback,
      };`,
   );
 
