@@ -1,4 +1,6 @@
+import io
 import json
+import logging
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,6 +20,7 @@ from ops.shared.errors import (
     map_exception,
 )
 from ops.shared.io import atomic_copy, sha256_file, write_json_atomic
+from ops.shared.logging import JsonFormatter, log_context, redact_sensitive
 from ops.shared.providers.openai import OpenAIRealtimeProvider
 from ops.shared.retry import RetryPolicy, get_with_retry
 
@@ -98,7 +101,63 @@ class OpsSharedTestCase(unittest.TestCase):
                 "detail": "LEASE HELD",
             },
         )
+    def test_structured_logging_includes_context_and_redacts_secrets(self):
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(JsonFormatter())
+        logger = logging.getLogger("test.pj.structured")
+        logger.handlers = [handler]
+        logger.propagate = False
+        logger.setLevel(logging.INFO)
 
+        with log_context(request_id="req-123", session_id="session-456"):
+            logger.info(
+                "tool.execution.completed",
+                extra={
+                    "authorization": "Bearer header-secret",
+                    "detail": "api_key=embedded-secret",
+                    "metadata": {
+                        "access_token": "nested-secret",
+                        "tool_name": "get_current_time",
+                    },
+                },
+            )
+
+        entry = json.loads(stream.getvalue())
+        self.assertEqual(entry["message"], "tool.execution.completed")
+        self.assertEqual(entry["request_id"], "req-123")
+        self.assertEqual(entry["session_id"], "session-456")
+        self.assertEqual(entry["authorization"], "[REDACTED]")
+        self.assertEqual(entry["metadata"]["access_token"], "[REDACTED]")
+        self.assertEqual(entry["metadata"]["tool_name"], "get_current_time")
+        self.assertNotIn("header-secret", stream.getvalue())
+        self.assertNotIn("embedded-secret", stream.getvalue())
+        self.assertNotIn("nested-secret", stream.getvalue())
+
+    def test_sensitive_redaction_covers_nested_values_and_token_strings(self):
+        redacted = redact_sensitive(
+            {
+                "safe": "visible",
+                "client_secret": "top-secret",
+                "nested": {
+                    "password": "hunter2",
+                    "message": "Authorization: Bearer abc.def",
+                    "provider_key": "sk-abcdefghijk12345",
+                    "repr": "{'refresh_token': 'message-value'}",
+                    "quoted": "password='multi word value'",
+                },
+            }
+        )
+
+        self.assertEqual(redacted["safe"], "visible")
+        self.assertEqual(redacted["client_secret"], "[REDACTED]")
+        serialized = json.dumps(redacted)
+        self.assertNotIn("top-secret", serialized)
+        self.assertNotIn("hunter2", serialized)
+        self.assertNotIn("abc.def", serialized)
+        self.assertNotIn("message-value", serialized)
+        self.assertNotIn("multi word value", serialized)
+        self.assertNotIn("sk-abcdefghijk12345", serialized)
     def test_realtime_provider_uses_supplied_credentials(self):
         class Http:
             def __init__(self):
@@ -146,11 +205,13 @@ class OpsSharedTestCase(unittest.TestCase):
         class Provider:
             def create_response(self, **_kwargs):
                 return {
-                    "output_text": json.dumps({
-                        "refined_prompt": "Prepare the report.",
-                        "intent_summary": "Prepare a report.",
-                        "constraints_preserved": [],
-                    })
+                    "output_text": json.dumps(
+                        {
+                            "refined_prompt": "Prepare the report.",
+                            "intent_summary": "Prepare a report.",
+                            "constraints_preserved": [],
+                        }
+                    )
                 }
 
         result = promptops.perfect_prompt(

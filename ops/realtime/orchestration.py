@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """Shared configuration and Responses API orchestration for PJ."""
+
 import contextvars
 import copy
 import json
 import os
 import re
 from pathlib import Path
+from time import perf_counter
 
 from openai import OpenAI
 
 import skills
 from runtime_config import load_mcp_config, load_runtime_config
 from ops.shared.interfaces import ResponsesProvider, ToolDispatcher
+from ops.shared.logging import get_logger
 from ops.shared.providers import OpenAIResponsesProvider
 from ops.shared.validation import (
     public_url as _shared_public_url,
@@ -26,6 +29,7 @@ COMPUTER_USE_MODELS = {"computer-use-preview"}
 MAX_LOCAL_TOOL_ROUNDS = 12
 MAX_DELEGATION_DETAIL_LENGTH = 6000
 MAX_DELEGATION_CITATIONS = 25
+_LOGGER = get_logger("realtime.orchestration")
 
 ADVANCED_DELEGATION_TOOL = {
     "type": "function",
@@ -132,17 +136,21 @@ def build_tools(cfg, *, mcp_servers=None, environ=None):
     if vector_store_ids is None:
         vector_store_ids = [cfg["vector_store_id"]] if cfg.get("vector_store_id") else []
     if vector_store_ids:
-        tools.append({
-            "type": "file_search",
-            "vector_store_ids": list(vector_store_ids),
-        })
+        tools.append(
+            {
+                "type": "file_search",
+                "vector_store_ids": list(vector_store_ids),
+            }
+        )
     if cfg.get("computer_use_enabled") and cfg.get("model") in COMPUTER_USE_MODELS:
-        tools.append({
-            "type": "computer_use_preview",
-            "display_width": 1280,
-            "display_height": 800,
-            "environment": "browser",
-        })
+        tools.append(
+            {
+                "type": "computer_use_preview",
+                "display_width": 1280,
+                "display_height": 800,
+                "environment": "browser",
+            }
+        )
 
     prepared = prepare_mcp_servers(mcp_servers, environ=environ)
     for server in prepared:
@@ -209,46 +217,41 @@ def capability_manifest(cfg=None, *, mcp_servers=None, environ=None):
             status = "degraded"
         else:
             status = "configured"
-        mcp.append({
-            "label": server["label"],
-            "url": _public_url(server["url"]),
-            "status": status,
-            "configured": True,
-            "enabled": server["enabled"],
-            "authentication": (
-                "missing_environment_secret"
-                if server["missing_secrets"] else
-                ("configured" if server["headers"] else "not_required")
-            ),
-            "require_approval": server["require_approval"],
-            "runtime_enabled": (
-                server["enabled"]
-                and not server["missing_secrets"]
-            ),
-            "approval_flow": (
-                "explicit_owner_confirmation"
-                if server["require_approval"] != "never"
-                else "not_required"
-            ),
-        })
+        mcp.append(
+            {
+                "label": server["label"],
+                "url": _public_url(server["url"]),
+                "status": status,
+                "configured": True,
+                "enabled": server["enabled"],
+                "authentication": (
+                    "missing_environment_secret"
+                    if server["missing_secrets"]
+                    else ("configured" if server["headers"] else "not_required")
+                ),
+                "require_approval": server["require_approval"],
+                "runtime_enabled": (server["enabled"] and not server["missing_secrets"]),
+                "approval_flow": (
+                    "explicit_owner_confirmation"
+                    if server["require_approval"] != "never"
+                    else "not_required"
+                ),
+            }
+        )
 
     computer_status = "disabled"
     if cfg.get("computer_use_enabled"):
-        computer_status = (
-            "active" if cfg.get("model") in COMPUTER_USE_MODELS else "unavailable"
-        )
+        computer_status = "active" if cfg.get("model") in COMPUTER_USE_MODELS else "unavailable"
     native = {
         "web_search": {
             "status": "active" if cfg.get("web_search_enabled", True) else "disabled",
             "configured": True,
         },
         "file_search": {
-            "status": "active" if (
-                cfg.get("vector_store_ids") or cfg.get("vector_store_id")
-            ) else "unavailable",
-            "configured": bool(
-                cfg.get("vector_store_ids") or cfg.get("vector_store_id")
-            ),
+            "status": "active"
+            if (cfg.get("vector_store_ids") or cfg.get("vector_store_id"))
+            else "unavailable",
+            "configured": bool(cfg.get("vector_store_ids") or cfg.get("vector_store_id")),
         },
         "tool_search": {
             "status": "active" if cfg.get("tool_search_enabled", True) else "disabled",
@@ -268,9 +271,7 @@ def capability_manifest(cfg=None, *, mcp_servers=None, environ=None):
         },
     }
     return {
-        "status_values": [
-            "configured", "active", "disabled", "degraded", "unavailable"
-        ],
+        "status_values": ["configured", "active", "disabled", "degraded", "unavailable"],
         "model": {"id": cfg["model"], "status": "active"},
         "imageops": image_status,
         "instructions": {
@@ -285,12 +286,9 @@ def capability_manifest(cfg=None, *, mcp_servers=None, environ=None):
         },
         "mcp_servers": mcp,
         "disabled_capabilities": [
-            name for name, value in native.items()
-            if value["status"] in ("disabled", "unavailable")
-        ] + [
-            f"mcp:{server['label']}" for server in mcp
-            if server["status"] == "disabled"
-        ],
+            name for name, value in native.items() if value["status"] in ("disabled", "unavailable")
+        ]
+        + [f"mcp:{server['label']}" for server in mcp if server["status"] == "disabled"],
     }
 
 
@@ -333,11 +331,13 @@ def _function_calls(response):
     for item in _get(response, "output", []) or []:
         if _get(item, "type") != "function_call":
             continue
-        calls.append({
-            "name": _get(item, "name"),
-            "call_id": _get(item, "call_id") or _get(item, "id"),
-            "arguments": _parsed_arguments(_get(item, "arguments", "{}")),
-        })
+        calls.append(
+            {
+                "name": _get(item, "name"),
+                "call_id": _get(item, "call_id") or _get(item, "id"),
+                "arguments": _parsed_arguments(_get(item, "arguments", "{}")),
+            }
+        )
     return calls
 
 
@@ -346,12 +346,14 @@ def _mcp_approval_requests(response):
     for item in _get(response, "output", []) or []:
         if _get(item, "type") != "mcp_approval_request":
             continue
-        approvals.append({
-            "provider_item_id": _get(item, "id"),
-            "name": _get(item, "name"),
-            "server_label": _get(item, "server_label"),
-            "arguments": _parsed_arguments(_get(item, "arguments", "{}")),
-        })
+        approvals.append(
+            {
+                "provider_item_id": _get(item, "id"),
+                "name": _get(item, "name"),
+                "server_label": _get(item, "server_label"),
+                "arguments": _parsed_arguments(_get(item, "arguments", "{}")),
+            }
+        )
     return approvals
 
 
@@ -364,8 +366,13 @@ def _citation_metadata(response):
                 data = {
                     key: _get(annotation, key)
                     for key in (
-                        "type", "title", "url", "filename", "file_id",
-                        "start_index", "end_index",
+                        "type",
+                        "title",
+                        "url",
+                        "filename",
+                        "file_id",
+                        "start_index",
+                        "end_index",
                     )
                     if _get(annotation, key) is not None
                 }
@@ -385,17 +392,19 @@ def _source_metadata(response):
         if item_type == "file_search_call":
             for result in _get(item, "results", []) or []:
                 text = _get(result, "text")
-                sources.append({
-                    key: value
-                    for key, value in {
-                        "type": "file_search",
-                        "file_id": _get(result, "file_id"),
-                        "filename": _get(result, "filename"),
-                        "score": _get(result, "score"),
-                        "text": text[:500] if isinstance(text, str) else None,
-                    }.items()
-                    if value is not None
-                })
+                sources.append(
+                    {
+                        key: value
+                        for key, value in {
+                            "type": "file_search",
+                            "file_id": _get(result, "file_id"),
+                            "filename": _get(result, "filename"),
+                            "score": _get(result, "score"),
+                            "text": text[:500] if isinstance(text, str) else None,
+                        }.items()
+                        if value is not None
+                    }
+                )
         elif item_type == "web_search_call":
             action = _get(item, "action")
             source = {
@@ -406,9 +415,7 @@ def _source_metadata(response):
             }
             if source["url"] is not None:
                 source["url"] = _public_url(source["url"])
-            sources.append({
-                key: value for key, value in source.items() if value is not None
-            })
+            sources.append({key: value for key, value in source.items() if value is not None})
     return sources
 
 
@@ -440,9 +447,7 @@ def _native_tool_result(item):
 def _stream_error(event):
     error = _get(event, "error")
     return sanitize_text_urls(
-        _get(error, "message")
-        or _get(event, "message")
-        or str(error or event)
+        _get(error, "message") or _get(event, "message") or str(error or event)
     )
 
 
@@ -512,9 +517,7 @@ _SERVER_PATH_PATTERN = re.compile(
     re.X,
 )
 _URI_PATTERN = re.compile(r"\bhttps?://[^\s\"'<>}\]]+")
-_ARTIFACT_DOWNLOAD_PATTERN = re.compile(
-    r"^/responses/artifacts/ART-[a-f0-9]{32}$"
-)
+_ARTIFACT_DOWNLOAD_PATTERN = re.compile(r"^/responses/artifacts/ART-[a-f0-9]{32}$")
 _SERVER_PATH_FIELDS = {
     "canonical_path",
     "cwd",
@@ -534,9 +537,8 @@ def redact_server_paths(value):
         cleaned = {}
         for key, item in value.items():
             normalized_key = str(key).casefold()
-            if (
-                normalized_key in _SERVER_PATH_FIELDS
-                or normalized_key.endswith(("_path", "_paths"))
+            if normalized_key in _SERVER_PATH_FIELDS or normalized_key.endswith(
+                ("_path", "_paths")
             ):
                 if isinstance(item, str) and not (
                     item.startswith("/")
@@ -593,17 +595,18 @@ def _tool_call_key(call_id, tool_type, name):
 
 class ResponsesOrchestrator:
     def __init__(
-            self,
-            client,
-            cfg,
-            *,
-            dispatcher: ToolDispatcher = dispatch_local_function,
-            approved_dispatcher: ToolDispatcher = dispatch_approved_local_function,
-            approval_handler=None,
-            tool_executor=None,
-            response_checkpoint=None,
-            expose_local_paths=False,
-            provider: ResponsesProvider | None = None):
+        self,
+        client,
+        cfg,
+        *,
+        dispatcher: ToolDispatcher = dispatch_local_function,
+        approved_dispatcher: ToolDispatcher = dispatch_approved_local_function,
+        approval_handler=None,
+        tool_executor=None,
+        response_checkpoint=None,
+        expose_local_paths=False,
+        provider: ResponsesProvider | None = None,
+    ):
         self.client = client
         self.provider = provider or OpenAIResponsesProvider(client)
         self.cfg = cfg
@@ -615,12 +618,8 @@ class ResponsesOrchestrator:
         self.expose_local_paths = bool(expose_local_paths)
 
     def _request_kwargs(
-            self,
-            input_value,
-            previous_response_id,
-            text_format,
-            first,
-            idempotency_key=None):
+        self, input_value, previous_response_id, text_format, first, idempotency_key=None
+    ):
         kwargs = {
             "model": self.cfg["model"],
             "input": input_value,
@@ -642,7 +641,38 @@ class ResponsesOrchestrator:
         if self.tool_executor is not None:
             return self.tool_executor(call, approved)
         dispatcher = self.approved_dispatcher if approved else self.dispatcher
-        return dispatcher(call["name"], call["arguments"])
+        started_at = perf_counter()
+        fields = {
+            "approval_granted": approved,
+            "tool_call_id": call.get("call_id"),
+            "tool_name": call["name"],
+        }
+        _LOGGER.info("tool.execution.started", extra=fields)
+        try:
+            result = dispatcher(call["name"], call["arguments"])
+        except Exception:
+            _LOGGER.exception(
+                "tool.execution.failed",
+                extra={
+                    **fields,
+                    "duration_ms": round(
+                        (perf_counter() - started_at) * 1000,
+                        3,
+                    ),
+                },
+            )
+            raise
+        _LOGGER.info(
+            "tool.execution.completed",
+            extra={
+                **fields,
+                "duration_ms": round(
+                    (perf_counter() - started_at) * 1000,
+                    3,
+                ),
+            },
+        )
+        return result
 
     def _checkpoint_response(self, operation_key, response_id):
         if (
@@ -651,19 +681,18 @@ class ResponsesOrchestrator:
             and self.response_checkpoint is not None
             and not self.response_checkpoint(operation_key, response_id)
         ):
-            raise RuntimeError(
-                "Provider idempotency key returned a different response ID"
-            )
+            raise RuntimeError("Provider idempotency key returned a different response ID")
 
     def stream_turn(
-            self,
-            message,
-            *,
-            previous_response_id=None,
-            text_format=None,
-            required_deliverable_format=None,
-            ready_artifact_ids=(),
-            idempotency_key_prefix=None):
+        self,
+        message,
+        *,
+        previous_response_id=None,
+        text_format=None,
+        required_deliverable_format=None,
+        ready_artifact_ids=(),
+        idempotency_key_prefix=None,
+    ):
         input_value = message
         first = True
         round_number = 0
@@ -677,13 +706,9 @@ class ResponsesOrchestrator:
 
             artifact = docops.resolve_export_artifact(artifact_id)
             if artifact.get("status") != "ready":
-                raise RuntimeError(
-                    "Persisted deliverable artifact failed integrity validation"
-                )
+                raise RuntimeError("Persisted deliverable artifact failed integrity validation")
             ready_artifacts[artifact_id] = artifact
-        required_format = (
-            required_deliverable_format or requested_deliverable_format(message)
-        )
+        required_format = required_deliverable_format or requested_deliverable_format(message)
         if required_format not in {
             None,
             "md",
@@ -699,8 +724,7 @@ class ResponsesOrchestrator:
 
         while True:
             operation_key = (
-                f"{idempotency_key_prefix}:round:{round_number}"
-                if idempotency_key_prefix else None
+                f"{idempotency_key_prefix}:round:{round_number}" if idempotency_key_prefix else None
             )
             kwargs = self._request_kwargs(
                 input_value,
@@ -753,9 +777,7 @@ class ResponsesOrchestrator:
                         }
                 elif event_type == "response.function_call_arguments.delta":
                     call_id = _get(event, "call_id") or _get(event, "item_id")
-                    key = _tool_call_key(
-                        call_id, "function_call", _get(event, "name")
-                    )
+                    key = _tool_call_key(call_id, "function_call", _get(event, "name"))
                     if key not in tool_calls_emitted:
                         tool_calls_emitted.add(key)
                         yield {
@@ -770,11 +792,7 @@ class ResponsesOrchestrator:
                         "delta": _get(event, "delta", ""),
                     }
                 elif event_type.startswith("response.mcp_call"):
-                    call_id = (
-                        _get(event, "item_id")
-                        or _get(event, "call_id")
-                        or _get(event, "id")
-                    )
+                    call_id = _get(event, "item_id") or _get(event, "call_id") or _get(event, "id")
                     name = _get(event, "name") or _get(event, "server_label")
                     key = _tool_call_key(call_id, "mcp_call", name)
                     if key not in tool_calls_emitted:
@@ -796,24 +814,20 @@ class ResponsesOrchestrator:
                             "tool_type": "mcp_call",
                             "source_event": event_type,
                             "name": name,
-                            "status": (
-                                "failed" if event_type.endswith(".failed")
-                                else "completed"
-                            ),
+                            "status": ("failed" if event_type.endswith(".failed") else "completed"),
                         }
                 elif any(
                     event_type.startswith(f"response.{tool_type}_call")
                     for tool_type in (
-                        "web_search", "file_search", "code_interpreter",
-                        "image_generation", "computer",
+                        "web_search",
+                        "file_search",
+                        "code_interpreter",
+                        "image_generation",
+                        "computer",
                     )
                 ):
                     tool_type = event_type.split(".")[1]
-                    call_id = (
-                        _get(event, "item_id")
-                        or _get(event, "call_id")
-                        or _get(event, "id")
-                    )
+                    call_id = _get(event, "item_id") or _get(event, "call_id") or _get(event, "id")
                     key = _tool_call_key(call_id, tool_type, None)
                     if key not in tool_calls_emitted:
                         tool_calls_emitted.add(key)
@@ -832,13 +846,12 @@ class ResponsesOrchestrator:
                             "tool_type": tool_type,
                             "source_event": event_type,
                             "call_id": call_id,
-                            "status": (
-                                "failed" if event_type.endswith(".failed")
-                                else "completed"
-                            ),
+                            "status": ("failed" if event_type.endswith(".failed") else "completed"),
                         }
                 elif event_type in (
-                    "response.error", "response.failed", "response.incomplete",
+                    "response.error",
+                    "response.failed",
+                    "response.incomplete",
                     "error",
                 ):
                     raise RuntimeError(_stream_error(event))
@@ -900,22 +913,28 @@ class ResponsesOrchestrator:
                     yield approval_event
                     if self.approval_handler is None:
                         return
-                    approved = bool(self.approval_handler({
-                        key: value
-                        for key, value in approval_event.items()
-                        if not key.startswith("_")
-                    }))
+                    approved = bool(
+                        self.approval_handler(
+                            {
+                                key: value
+                                for key, value in approval_event.items()
+                                if not key.startswith("_")
+                            }
+                        )
+                    )
                     yield {
                         "type": "approval.resolved",
                         "approval_kind": "mcp",
                         "name": approval["name"],
                         "approved": approved,
                     }
-                    approval_outputs.append({
-                        "type": "mcp_approval_response",
-                        "approval_request_id": approval["provider_item_id"],
-                        "approve": approved,
-                    })
+                    approval_outputs.append(
+                        {
+                            "type": "mcp_approval_response",
+                            "approval_request_id": approval["provider_item_id"],
+                            "approve": approved,
+                        }
+                    )
                 round_number += 1
                 if round_number > MAX_LOCAL_TOOL_ROUNDS:
                     raise RuntimeError("Tool continuation limit exceeded")
@@ -998,19 +1017,15 @@ class ResponsesOrchestrator:
                 return
 
             approval_calls = [
-                call for call in calls
-                if skills.tool_policy_mode(call["name"]) == "approval"
+                call for call in calls if skills.tool_policy_mode(call["name"]) == "approval"
             ]
             if approval_calls:
                 if len(calls) != 1:
                     raise RuntimeError(
-                        "Responses requiring approval must contain exactly one "
-                        "local function call"
+                        "Responses requiring approval must contain exactly one local function call"
                     )
                 call = approval_calls[0]
-                call_key = _tool_call_key(
-                    call["call_id"], "function_call", call["name"]
-                )
+                call_key = _tool_call_key(call["call_id"], "function_call", call["name"])
                 if call_key not in tool_calls_emitted:
                     tool_calls_emitted.add(call_key)
                     yield {
@@ -1032,11 +1047,15 @@ class ResponsesOrchestrator:
                 yield approval_event
                 if self.approval_handler is None:
                     return
-                approved = bool(self.approval_handler({
-                    key: value
-                    for key, value in approval_event.items()
-                    if not key.startswith("_")
-                }))
+                approved = bool(
+                    self.approval_handler(
+                        {
+                            key: value
+                            for key, value in approval_event.items()
+                            if not key.startswith("_")
+                        }
+                    )
+                )
                 if approved:
                     result = self._dispatch_call(call, approved=True)
                 else:
@@ -1047,11 +1066,7 @@ class ResponsesOrchestrator:
                     "name": call["name"],
                     "approved": approved,
                 }
-                public_result = (
-                    result
-                    if self.expose_local_paths
-                    else redact_server_paths(result)
-                )
+                public_result = result if self.expose_local_paths else redact_server_paths(result)
                 artifact = _verified_artifact_from_result(result)
                 if artifact and artifact["artifact_id"] not in ready_artifacts:
                     ready_artifacts[artifact["artifact_id"]] = artifact
@@ -1067,11 +1082,13 @@ class ResponsesOrchestrator:
                 round_number += 1
                 if round_number > MAX_LOCAL_TOOL_ROUNDS:
                     raise RuntimeError("Local function recursion limit exceeded")
-                input_value = [{
-                    "type": "function_call_output",
-                    "call_id": call["call_id"],
-                    "output": json.dumps(public_result, default=str),
-                }]
+                input_value = [
+                    {
+                        "type": "function_call_output",
+                        "call_id": call["call_id"],
+                        "output": json.dumps(public_result, default=str),
+                    }
+                ]
                 previous_response_id = response_id
                 first = False
                 continue
@@ -1081,9 +1098,7 @@ class ResponsesOrchestrator:
                 raise RuntimeError("Local function recursion limit exceeded")
             tool_outputs = []
             for call in calls:
-                call_key = _tool_call_key(
-                    call["call_id"], "function_call", call["name"]
-                )
+                call_key = _tool_call_key(call["call_id"], "function_call", call["name"])
                 if call_key not in tool_calls_emitted:
                     tool_calls_emitted.add(call_key)
                     yield {
@@ -1094,11 +1109,7 @@ class ResponsesOrchestrator:
                         "tool_type": "function_call",
                     }
                 result = self._dispatch_call(call, approved=False)
-                public_result = (
-                    result
-                    if self.expose_local_paths
-                    else redact_server_paths(result)
-                )
+                public_result = result if self.expose_local_paths else redact_server_paths(result)
                 artifact = _verified_artifact_from_result(result)
                 if artifact and artifact["artifact_id"] not in ready_artifacts:
                     ready_artifacts[artifact["artifact_id"]] = artifact
@@ -1111,11 +1122,13 @@ class ResponsesOrchestrator:
                         "name": call["name"],
                         "result": public_result,
                     }
-                tool_outputs.append({
-                    "type": "function_call_output",
-                    "call_id": call["call_id"],
-                    "output": json.dumps(public_result, default=str),
-                })
+                tool_outputs.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": call["call_id"],
+                        "output": json.dumps(public_result, default=str),
+                    }
+                )
             input_value = tool_outputs
             previous_response_id = response_id
             first = False
@@ -1125,21 +1138,21 @@ def terminal_approval_handler(event):
     target = event.get("server_label") or event.get("name") or "tool"
     arguments = json.dumps(event.get("arguments") or {}, default=str)[:1000]
     answer = input(
-        f"\nApproval required for {target} with arguments {arguments}. "
-        "Type 'approve' to continue: "
+        f"\nApproval required for {target} with arguments {arguments}. Type 'approve' to continue: "
     )
     return answer.strip().lower() == "approve"
 
 
 def send_message(
-        client,
-        cfg,
-        state,
-        message,
-        text_format=None,
-        *,
-        echo=True,
-        approval_handler=terminal_approval_handler):
+    client,
+    cfg,
+    state,
+    message,
+    text_format=None,
+    *,
+    echo=True,
+    approval_handler=terminal_approval_handler,
+):
     orchestrator = ResponsesOrchestrator(
         client,
         cfg,
@@ -1175,8 +1188,7 @@ def send_message(
     return completion["text"]
 
 
-def send_structured_message(
-        client, cfg, state, message, schema_name, json_schema, strict=True):
+def send_structured_message(client, cfg, state, message, schema_name, json_schema, strict=True):
     raw = send_message(
         client,
         cfg,
@@ -1215,16 +1227,11 @@ def delegate_advanced_task(prompt, *, client=None, cfg=None):
             if event["type"] == "completion":
                 completion = event
             elif event["type"] == "approval.required":
-                approval = {
-                    key: value
-                    for key, value in event.items()
-                    if not key.startswith("_")
-                }
+                approval = {key: value for key, value in event.items() if not key.startswith("_")}
         if approval:
             return {
                 "error": (
-                    "This delegated task requires explicit owner approval in "
-                    "Full Power mode."
+                    "This delegated task requires explicit owner approval in Full Power mode."
                 ),
                 "approval": approval,
             }
@@ -1247,30 +1254,55 @@ def delegate_advanced_task(prompt, *, client=None, cfg=None):
         _delegation_active.reset(token)
 
 
-def dispatch_realtime_function(
-        name,
-        arguments,
-        *,
-        client=None,
-        cfg=None,
-        approval_granted=False):
-    if name == ADVANCED_DELEGATION_TOOL["name"]:
-        return delegate_advanced_task(
-            arguments.get("prompt") if isinstance(arguments, dict) else None,
-            client=client,
-            cfg=cfg,
-        )
-    from realtime_config import realtime_tool_schemas
-
-    allowed = {
-        tool.get("name")
-        for tool in realtime_tool_schemas()
-        if isinstance(tool, dict) and tool.get("type") == "function"
+def dispatch_realtime_function(name, arguments, *, client=None, cfg=None, approval_granted=False):
+    started_at = perf_counter()
+    fields = {
+        "approval_granted": approval_granted,
+        "tool_name": name,
+        "tool_surface": "realtime",
     }
-    if name not in allowed:
-        raise ValueError(f"Tool '{name}' is not available in Realtime mode.")
-    if approval_granted:
-        return redact_server_paths(
-            dispatch_approved_local_function(name, arguments)
+    _LOGGER.info("tool.execution.started", extra=fields)
+    try:
+        if name == ADVANCED_DELEGATION_TOOL["name"]:
+            result = delegate_advanced_task(
+                arguments.get("prompt") if isinstance(arguments, dict) else None,
+                client=client,
+                cfg=cfg,
+            )
+        else:
+            from realtime_config import realtime_tool_schemas
+
+            allowed = {
+                tool.get("name")
+                for tool in realtime_tool_schemas()
+                if isinstance(tool, dict) and tool.get("type") == "function"
+            }
+            if name not in allowed:
+                raise ValueError(f"Tool '{name}' is not available in Realtime mode.")
+            if approval_granted:
+                result = redact_server_paths(dispatch_approved_local_function(name, arguments))
+            else:
+                result = redact_server_paths(dispatch_local_function(name, arguments))
+    except Exception:
+        _LOGGER.exception(
+            "tool.execution.failed",
+            extra={
+                **fields,
+                "duration_ms": round(
+                    (perf_counter() - started_at) * 1000,
+                    3,
+                ),
+            },
         )
-    return redact_server_paths(dispatch_local_function(name, arguments))
+        raise
+    _LOGGER.info(
+        "tool.execution.completed",
+        extra={
+            **fields,
+            "duration_ms": round(
+                (perf_counter() - started_at) * 1000,
+                3,
+            ),
+        },
+    )
+    return result

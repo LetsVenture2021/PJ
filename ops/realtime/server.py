@@ -7,19 +7,22 @@ Provides:
   POST /execute-tool - executes local PJ tools for browser function calls
   POST /webhook    - SIP webhook for inbound phone calls
 """
+
 import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import os
 import re
 import secrets
 from pathlib import Path
-from uuid import uuid4
+from time import perf_counter
 
 import requests
 from flask import (
     Flask,
+    g,
     request,
     Response,
     send_file,
@@ -39,6 +42,14 @@ import promptops
 import skills
 from ops.shared.errors import APIError, map_exception
 from pj_contract import CONTRACT_VERSION
+from ops.shared.logging import (
+    bind_log_context,
+    clear_log_context,
+    configure_logging,
+    get_logger,
+    new_correlation_id,
+    set_log_context,
+)
 from realtime_config import realtime_session_config, realtime_tool_schemas
 from responses_runtime import (
     capability_manifest,
@@ -60,24 +71,66 @@ SCHEMA_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 ARTIFACT_ID_PATTERN = re.compile(r"^ART-[a-f0-9]{32}$")
 OPENAI_CLIENT_FACTORY = OpenAI
 
+configure_logging()
+_LOGGER = get_logger("realtime.server")
+
 
 class DurableExecutionOutcomeUnknown(RuntimeError):
     """Raised when replaying a tool or provider effect would be unsafe."""
 
 
 app = Flask(__name__, static_folder=str(BASE_DIR / "assets"), static_url_path="/assets")
-app.secret_key = (
-    os.getenv("PJ_LOCAL_WEB_SESSION_SECRET") or secrets.token_hex(32)
-)
+app.secret_key = os.getenv("PJ_LOCAL_WEB_SESSION_SECRET") or secrets.token_hex(32)
 app.config.update(
-    LOCAL_WEB_OWNER_SESSION_ENABLED=(
-        os.getenv("PJ_LOCAL_WEB_OWNER_SESSION_ENABLED") == "1"
-    ),
+    LOCAL_WEB_OWNER_SESSION_ENABLED=(os.getenv("PJ_LOCAL_WEB_OWNER_SESSION_ENABLED") == "1"),
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_NAME="pj_local_web_session",
     SESSION_COOKIE_SAMESITE="Strict",
 )
 CORS(app)  # allow local browser origins when running on localhost
+
+
+@app.before_request
+def _start_request_logging():
+    req_id = _request_id()
+    route_values = request.view_args or {}
+    session_id = route_values.get("session_id") or request.args.get("session_id") or ""
+    if not session_id and request.is_json:
+        payload = request.get_json(silent=True)
+        if isinstance(payload, dict):
+            session_id = payload.get("session_id") or ""
+    if not SESSION_ID_PATTERN.fullmatch(str(session_id)):
+        session_id = None
+    set_log_context(request_id=req_id, session_id=session_id)
+    g.request_started_at = perf_counter()
+    _LOGGER.info(
+        "http.request.started",
+        extra={"http_method": request.method, "http_path": request.path},
+    )
+
+
+@app.after_request
+def _finish_request_logging(response):
+    req_id = _request_id()
+    response.headers.setdefault("x-request-id", req_id)
+    started_at = getattr(g, "request_started_at", perf_counter())
+    level = logging.WARNING if response.status_code >= 500 else logging.INFO
+    _LOGGER.log(
+        level,
+        "http.request.completed",
+        extra={
+            "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+            "http_method": request.method,
+            "http_path": request.path,
+            "http_status": response.status_code,
+        },
+    )
+    return response
+
+
+@app.teardown_request
+def _clear_request_logging(_error=None):
+    clear_log_context()
 
 
 def _tool_policy_sha256():
@@ -86,15 +139,18 @@ def _tool_policy_sha256():
 
 
 def _request_id():
-    return request.headers.get("x-pj-client-request-id") or str(uuid4())
+    cached = getattr(g, "request_id", None)
+    if cached:
+        return cached
+    req_id = new_correlation_id(request.headers.get("x-pj-client-request-id"))
+    g.request_id = req_id
+    return req_id
 
 
 def _trim_detail(detail):
     if detail is None:
         return None
-    compact = sanitize_text_urls(
-        " ".join(str(redact_server_paths(str(detail))).split()).strip()
-    )
+    compact = sanitize_text_urls(" ".join(str(redact_server_paths(str(detail))).split()).strip())
     if not compact:
         return None
     if len(compact) <= MAX_ERROR_DETAIL_LENGTH:
@@ -177,9 +233,7 @@ def _same_origin_browser_request():
     if origin:
         return hmac.compare_digest(origin, expected_origin)
     referer = request.headers.get("Referer") or ""
-    return referer == expected_origin or referer.startswith(
-        f"{expected_origin}/"
-    )
+    return referer == expected_origin or referer.startswith(f"{expected_origin}/")
 
 
 def _local_web_session_authorized():
@@ -306,9 +360,8 @@ def _validate_and_link_artifacts(sid, artifact_ids, artifact_hashes):
     verified = []
     for artifact_id in artifact_ids or ():
         artifact = docops.resolve_export_artifact(artifact_id)
-        if (
-            artifact.get("status") != "ready"
-            or artifact.get("sha256") != artifact_hashes.get(artifact_id)
+        if artifact.get("status") != "ready" or artifact.get("sha256") != artifact_hashes.get(
+            artifact_id
         ):
             raise RuntimeError("A persisted tool artifact failed integrity validation")
         if not chatlog.link_session_artifact(sid, artifact_id):
@@ -335,20 +388,32 @@ def _result_with_linked_artifacts(sid, result):
 
 
 def _execute_durable_tool(
-        session,
-        *,
-        execution_key,
-        approval_id,
-        name,
-        arguments,
-        approval_granted):
-    reservation = chatlog.reserve_tool_execution(
-        session["id"],
-        execution_key,
-        name,
-        arguments,
-        approval_id=approval_id,
-    )
+    session, *, execution_key, approval_id, name, arguments, approval_granted
+):
+    started_at = perf_counter()
+    log_fields = {
+        "approval_granted": approval_granted,
+        "tool_call_id": execution_key,
+        "tool_name": name,
+    }
+    _LOGGER.info("tool.execution.started", extra=log_fields)
+    try:
+        reservation = chatlog.reserve_tool_execution(
+            session["id"],
+            execution_key,
+            name,
+            arguments,
+            approval_id=approval_id,
+        )
+    except Exception:
+        _LOGGER.exception(
+            "tool.execution.failed",
+            extra={
+                **log_fields,
+                "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+            },
+        )
+        raise
     state = reservation.get("state")
     if state == "completed":
         _validate_and_link_artifacts(
@@ -356,12 +421,27 @@ def _execute_durable_tool(
             reservation.get("artifact_ids") or [],
             reservation.get("artifact_hashes") or {},
         )
+        _LOGGER.info(
+            "tool.execution.replayed",
+            extra={
+                **log_fields,
+                "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+            },
+        )
         return (
             reservation["result"],
             list(reservation.get("artifact_ids") or []),
             dict(reservation.get("artifact_hashes") or {}),
         )
     if state != "reserved":
+        _LOGGER.error(
+            "tool.execution.failed",
+            extra={
+                **log_fields,
+                "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+                "failure_reason": "outcome_unknown",
+            },
+        )
         raise DurableExecutionOutcomeUnknown(
             "A prior tool execution did not durably record a safe outcome"
         )
@@ -372,8 +452,8 @@ def _execute_durable_tool(
             arguments,
             approval_granted=approval_granted,
         )
-        public_result, artifact_ids, artifact_hashes = (
-            _result_with_linked_artifacts(session["id"], result)
+        public_result, artifact_ids, artifact_hashes = _result_with_linked_artifacts(
+            session["id"], result
         )
         if not chatlog.complete_tool_execution(
             session["id"],
@@ -386,15 +466,32 @@ def _execute_durable_tool(
             raise DurableExecutionOutcomeUnknown(
                 "The tool outcome could not be committed exactly once"
             )
+        _LOGGER.info(
+            "tool.execution.completed",
+            extra={
+                **log_fields,
+                "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+            },
+        )
         return public_result, artifact_ids, artifact_hashes
     except DurableExecutionOutcomeUnknown:
-        chatlog.mark_tool_execution_unknown(
-            session["id"], execution_key, token
+        chatlog.mark_tool_execution_unknown(session["id"], execution_key, token)
+        _LOGGER.exception(
+            "tool.execution.failed",
+            extra={
+                **log_fields,
+                "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+            },
         )
         raise
     except Exception as exc:
-        chatlog.mark_tool_execution_unknown(
-            session["id"], execution_key, token
+        chatlog.mark_tool_execution_unknown(session["id"], execution_key, token)
+        _LOGGER.exception(
+            "tool.execution.failed",
+            extra={
+                **log_fields,
+                "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+            },
         )
         raise DurableExecutionOutcomeUnknown(
             "The tool may have executed, but its outcome was not durably recorded"
@@ -402,9 +499,7 @@ def _execute_durable_tool(
 
 
 def _approval_idempotency_prefix(session_id, approval_id):
-    digest = hashlib.sha256(
-        f"{session_id}\0{approval_id}".encode("utf-8")
-    ).hexdigest()
+    digest = hashlib.sha256(f"{session_id}\0{approval_id}".encode("utf-8")).hexdigest()
     return f"pj-approval-{digest[:32]}"
 
 
@@ -480,10 +575,7 @@ def _sse(event):
 @app.route("/", methods=["GET"])
 def web_client():
     """Serve the PJ web client."""
-    if (
-        not app.config["LOCAL_WEB_OWNER_SESSION_ENABLED"]
-        or not _is_loopback_request()
-    ):
+    if not app.config["LOCAL_WEB_OWNER_SESSION_ENABLED"] or not _is_loopback_request():
         return _error_response(
             "local_web_only",
             "The built-in web client is available only from the local host.",
@@ -552,9 +644,7 @@ def tool_schemas():
             "tools": tools,
             "tool_manifest_sha256": hashlib.sha256(tool_manifest).hexdigest(),
             "instructions": instructions,
-            "instructions_sha256": hashlib.sha256(
-                instructions.encode()
-            ).hexdigest(),
+            "instructions_sha256": hashlib.sha256(instructions.encode()).hexdigest(),
             "instruction_files": cfg["instruction_files"],
             "prompt_perfecting_version": promptops.PROMPT_PERFECTING_VERSION,
             "tool_policy_sha256": _tool_policy_sha256(),
@@ -631,9 +721,7 @@ def create_responses_session():
     auth_error = _check_bridge_auth(req_id)
     if auth_error:
         return auth_error
-    payload, error = _validated_json(
-        req_id, allowed={"title", "channel"}
-    )
+    payload, error = _validated_json(req_id, allowed={"title", "channel"})
     if error:
         return error
     title = payload.get("title", "")
@@ -653,6 +741,7 @@ def create_responses_session():
             req_id,
         )
     session = chatlog.new_session(title.strip(), channel=channel)
+    bind_log_context(session_id=session["id"])
     session.pop("last_response_id", None)
     return _json_response({"ok": True, "session": session}, 201, req_id)
 
@@ -725,9 +814,7 @@ def list_responses_session_artifacts(session_id):
     if auth_error:
         return auth_error
     if request.args:
-        return _error_response(
-            "invalid_query", "Unexpected query parameters.", 400, req_id
-        )
+        return _error_response("invalid_query", "Unexpected query parameters.", 400, req_id)
     session, error = _validated_session(session_id, req_id)
     if error:
         return error
@@ -797,12 +884,9 @@ def record_realtime_message(session_id):
                 400,
                 req_id,
             )
-    if (
-        "prompt_perfecting_version" in metadata
-        and (
-            not isinstance(metadata["prompt_perfecting_version"], str)
-            or len(metadata["prompt_perfecting_version"]) > 100
-        )
+    if "prompt_perfecting_version" in metadata and (
+        not isinstance(metadata["prompt_perfecting_version"], str)
+        or len(metadata["prompt_perfecting_version"]) > 100
     ):
         return _error_response(
             "invalid_realtime_message",
@@ -818,9 +902,7 @@ def record_realtime_message(session_id):
         or len(str(metadata.get("refined_prompt") or "")) > 4000
         or (
             metadata.get("refined_sha256") is not None
-            and not re.fullmatch(
-                r"[a-f0-9]{64}", str(metadata["refined_sha256"])
-            )
+            and not re.fullmatch(r"[a-f0-9]{64}", str(metadata["refined_sha256"]))
         )
     ):
         return _error_response(
@@ -842,9 +924,7 @@ def record_realtime_message(session_id):
             metadata=metadata,
         )
     except ValueError as exc:
-        return _error_response(
-            "invalid_realtime_message", str(exc), 400, req_id
-        )
+        return _error_response("invalid_realtime_message", str(exc), 400, req_id)
     return _json_response({"ok": True, "message": message}, req_id=req_id)
 
 
@@ -855,14 +935,10 @@ def download_responses_artifact(artifact_id):
     if auth_error:
         return auth_error
     if request.args or not ARTIFACT_ID_PATTERN.fullmatch(artifact_id):
-        return _error_response(
-            "artifact_not_found", "Artifact was not found.", 404, req_id
-        )
+        return _error_response("artifact_not_found", "Artifact was not found.", 404, req_id)
     artifact, snapshot = docops.open_export_artifact_snapshot(artifact_id)
     if artifact.get("status") == "not_found":
-        return _error_response(
-            "artifact_not_found", "Artifact was not found.", 404, req_id
-        )
+        return _error_response("artifact_not_found", "Artifact was not found.", 404, req_id)
     if artifact.get("status") != "ready":
         return _error_response(
             "artifact_unavailable",
@@ -906,20 +982,14 @@ def stream_responses_turn(session_id):
     if error:
         return error
     message = payload["message"]
-    if (
-        not isinstance(message, str)
-        or not message.strip()
-        or len(message) > MAX_MESSAGE_LENGTH
-    ):
+    if not isinstance(message, str) or not message.strip() or len(message) > MAX_MESSAGE_LENGTH:
         return _error_response(
             "invalid_message",
             f"message must be a non-empty string up to {MAX_MESSAGE_LENGTH} characters.",
             400,
             req_id,
         )
-    text_format, error = _validated_structured_output(
-        payload.get("structured_output"), req_id
-    )
+    text_format, error = _validated_structured_output(payload.get("structured_output"), req_id)
     if error:
         return error
     if "OPENAI_API_KEY" not in os.environ:
@@ -963,9 +1033,7 @@ def stream_responses_turn(session_id):
         prior_history = chatlog.history(session["id"], 21)[:-1]
         if prior_history:
             context_lines = [
-                (
-                    "PJ" if item["role"] == "assistant" else "User"
-                ) + ": " + item["content"]
+                ("PJ" if item["role"] == "assistant" else "User") + ": " + item["content"]
                 for item in prior_history
                 if item["role"] in {"user", "assistant"} and item["content"]
             ]
@@ -982,16 +1050,18 @@ def stream_responses_turn(session_id):
     }
 
     response = Response(
-        stream_with_context(_stream_session_response(
-            session,
-            turn_token,
-            input_value,
-            previous_response_id=session.get("last_response_id"),
-            text_format=text_format,
-            req_id=req_id,
-            prelude=(prompt_event,),
-            required_deliverable_format=requested_deliverable_format(message),
-        )),
+        stream_with_context(
+            _stream_session_response(
+                session,
+                turn_token,
+                input_value,
+                previous_response_id=session.get("last_response_id"),
+                text_format=text_format,
+                req_id=req_id,
+                prelude=(prompt_event,),
+                required_deliverable_format=requested_deliverable_format(message),
+            )
+        ),
         status=200,
         mimetype="text/event-stream",
     )
@@ -1003,45 +1073,45 @@ def stream_responses_turn(session_id):
 
 
 def _stream_session_response(
-        session,
-        turn_token,
-        input_value,
-        *,
-        previous_response_id,
-        text_format,
-        req_id,
-        required_deliverable_format=None,
-        ready_artifact_ids=(),
-        prelude=(),
-        approval_execution=None):
-    deliverable_format = (
-        required_deliverable_format
-        or requested_deliverable_format(input_value)
-    )
-    yield _sse({
-        "type": "session",
-        "session_id": session["id"],
-        "request_id": req_id,
-    })
-    for event in prelude:
-        yield _sse(event)
+    session,
+    turn_token,
+    input_value,
+    *,
+    previous_response_id,
+    text_format,
+    req_id,
+    required_deliverable_format=None,
+    ready_artifact_ids=(),
+    prelude=(),
+    approval_execution=None,
+):
+    set_log_context(request_id=req_id, session_id=session["id"])
     try:
+        deliverable_format = required_deliverable_format or requested_deliverable_format(
+            input_value
+        )
+        yield _sse(
+            {
+                "type": "session",
+                "session_id": session["id"],
+                "request_id": req_id,
+            }
+        )
+        for event in prelude:
+            yield _sse(event)
         idempotency_key_prefix = None
         tool_executor = None
         response_checkpoint = None
         if approval_execution:
             approval_id = approval_execution["approval_id"]
-            idempotency_key_prefix = _approval_idempotency_prefix(
-                session["id"], approval_id
-            )
+            idempotency_key_prefix = _approval_idempotency_prefix(session["id"], approval_id)
 
             def checkpoint(operation_key, provider_response_id):
                 if not chatlog.record_provider_response_checkpoint(
                     session["id"], operation_key, provider_response_id
                 ):
                     raise DurableExecutionOutcomeUnknown(
-                        "The provider returned conflicting response IDs for one "
-                        "idempotency key"
+                        "The provider returned conflicting response IDs for one idempotency key"
                     )
                 return True
 
@@ -1089,17 +1159,13 @@ def _stream_session_response(
                 artifact_id = public_event.get("artifact_id", "")
                 artifact = docops.resolve_export_artifact(artifact_id)
                 if artifact.get("status") != "ready":
-                    raise RuntimeError(
-                        "Generated artifact failed server-side integrity validation"
-                    )
+                    raise RuntimeError("Generated artifact failed server-side integrity validation")
                 if not chatlog.link_session_artifact(session["id"], artifact_id):
                     raise RuntimeError("Artifact could not be linked to the session")
                 public_event = {"type": "artifact.ready", **artifact}
             if public_event["type"] == "approval.required":
                 if not response_id or not provider_item_id:
-                    raise RuntimeError(
-                        "Approval request did not include provider continuity"
-                    )
+                    raise RuntimeError("Approval request did not include provider continuity")
                 pending = chatlog.pause_session_turn_for_approval(
                     session,
                     turn_token,
@@ -1113,48 +1179,42 @@ def _stream_session_response(
                     deliverable_format=deliverable_format,
                     artifact_ids=artifact_ids,
                     artifact_hashes={
-                        artifact_id: docops.resolve_export_artifact(
-                            artifact_id
-                        ).get("sha256", "")
+                        artifact_id: docops.resolve_export_artifact(artifact_id).get("sha256", "")
                         for artifact_id in artifact_ids
                     },
                     completed_approval_id=(
-                        approval_execution["approval_id"]
-                        if approval_execution else None
+                        approval_execution["approval_id"] if approval_execution else None
                     ),
                     completed_approval_decision=(
-                        approval_execution["approve"]
-                        if approval_execution else None
+                        approval_execution["approve"] if approval_execution else None
                     ),
                 )
                 if not pending:
-                    raise RuntimeError(
-                        "Session turn lease expired before approval was stored"
-                    )
-                public_event.update({
-                    "approval_id": pending["approval_id"],
-                    "expires_at": pending["expires_at"],
-                    "session_id": session["id"],
-                })
+                    raise RuntimeError("Session turn lease expired before approval was stored")
+                public_event.update(
+                    {
+                        "approval_id": pending["approval_id"],
+                        "expires_at": pending["expires_at"],
+                        "session_id": session["id"],
+                    }
+                )
                 if approval_execution:
-                    yield _sse({
-                        "type": "approval.resolved",
-                        "approval_id": approval_execution["approval_id"],
-                        "approval_kind": approval_execution["approval_kind"],
-                        "name": approval_execution["name"],
-                        "approved": approval_execution["approved"],
-                    })
+                    yield _sse(
+                        {
+                            "type": "approval.resolved",
+                            "approval_id": approval_execution["approval_id"],
+                            "approval_kind": approval_execution["approval_kind"],
+                            "name": approval_execution["name"],
+                            "approved": approval_execution["approved"],
+                        }
+                    )
                 yield _sse(public_event)
                 return
             if public_event["type"] == "artifact.ready":
-                artifact = docops.resolve_export_artifact(
-                    public_event.get("artifact_id", "")
-                )
+                artifact = docops.resolve_export_artifact(public_event.get("artifact_id", ""))
                 if artifact.get("status") != "ready":
                     raise RuntimeError("Document artifact failed integrity validation")
-                if not chatlog.link_session_artifact(
-                    session["id"], artifact["artifact_id"]
-                ):
+                if not chatlog.link_session_artifact(session["id"], artifact["artifact_id"]):
                     raise RuntimeError("Document artifact could not be linked to chat")
                 public_event = {"type": "artifact.ready", **artifact}
             if public_event["type"] == "completion":
@@ -1164,29 +1224,31 @@ def _stream_session_response(
                     public_event.get("text", ""),
                     response_id,
                     completed_approval_id=(
-                        approval_execution["approval_id"]
-                        if approval_execution else None
+                        approval_execution["approval_id"] if approval_execution else None
                     ),
                     completed_approval_decision=(
-                        approval_execution["approve"]
-                        if approval_execution else None
+                        approval_execution["approve"] if approval_execution else None
                     ),
                 )
                 if not stored:
-                    raise RuntimeError(
-                        "Session turn lease expired before completion"
-                    )
+                    raise RuntimeError("Session turn lease expired before completion")
                 if approval_execution:
-                    yield _sse({
-                        "type": "approval.resolved",
-                        "approval_id": approval_execution["approval_id"],
-                        "approval_kind": approval_execution["approval_kind"],
-                        "name": approval_execution["name"],
-                        "approved": approval_execution["approved"],
-                    })
+                    yield _sse(
+                        {
+                            "type": "approval.resolved",
+                            "approval_id": approval_execution["approval_id"],
+                            "approval_kind": approval_execution["approval_kind"],
+                            "name": approval_execution["name"],
+                            "approved": approval_execution["approved"],
+                        }
+                    )
                 public_event["session_id"] = session["id"]
             yield _sse(public_event)
     except DurableExecutionOutcomeUnknown as exc:
+        _LOGGER.exception(
+            "responses.turn.failed",
+            extra={"error_code": "approval_execution_outcome_unknown"},
+        )
         if approval_execution:
             chatlog.mark_pending_approval_execution_unknown(
                 session["id"],
@@ -1203,6 +1265,10 @@ def _stream_session_response(
             req_id,
         )
     except Exception as exc:
+        _LOGGER.exception(
+            "responses.turn.failed",
+            extra={"error_code": "responses_turn_failed"},
+        )
         yield _sse_error(
             APIError(
                 "Responses turn failed.",
@@ -1214,6 +1280,7 @@ def _stream_session_response(
         )
     finally:
         chatlog.release_session_turn(session["id"], turn_token)
+        clear_log_context()
 
 
 @app.route(
@@ -1229,12 +1296,8 @@ def resolve_responses_approval(session_id, approval_id):
     if error:
         return error
     if not SESSION_ID_PATTERN.fullmatch(approval_id):
-        return _error_response(
-            "approval_not_found", "Approval was not found.", 404, req_id
-        )
-    payload, error = _validated_json(
-        req_id, allowed={"approve"}, required={"approve"}
-    )
+        return _error_response("approval_not_found", "Approval was not found.", 404, req_id)
+    payload, error = _validated_json(req_id, allowed={"approve"}, required={"approve"})
     if error:
         return error
     approve = payload["approve"]
@@ -1254,12 +1317,8 @@ def resolve_responses_approval(session_id, approval_id):
         )
     pending = chatlog.get_pending_approval(session["id"], approval_id)
     if not pending:
-        return _error_response(
-            "approval_not_found", "Approval was not found.", 404, req_id
-        )
-    turn_token = chatlog.claim_session_turn(
-        session["id"], pending_approval_id=approval_id
-    )
+        return _error_response("approval_not_found", "Approval was not found.", 404, req_id)
+    turn_token = chatlog.claim_session_turn(session["id"], pending_approval_id=approval_id)
     if not turn_token:
         return _error_response(
             "session_turn_in_progress",
@@ -1267,9 +1326,7 @@ def resolve_responses_approval(session_id, approval_id):
             409,
             req_id,
         )
-    pending = chatlog.begin_pending_approval_execution(
-        session["id"], approval_id, approve
-    )
+    pending = chatlog.begin_pending_approval_execution(session["id"], approval_id, approve)
     if not pending:
         chatlog.release_session_turn(session["id"], turn_token)
         return _error_response(
@@ -1297,21 +1354,25 @@ def resolve_responses_approval(session_id, approval_id):
             detail=exc,
         )
 
-    prelude = [{
-        "type": "approval.executing",
-        "approval_id": approval_id,
-        "approval_kind": pending["approval_kind"],
-        "name": pending["name"],
-        "approved": approve,
-    }]
+    prelude = [
+        {
+            "type": "approval.executing",
+            "approval_id": approval_id,
+            "approval_kind": pending["approval_kind"],
+            "name": pending["name"],
+            "approved": approve,
+        }
+    ]
     ready_artifact_ids = list(pending.get("artifact_ids") or ())
     ready_artifact_hashes = dict(pending.get("artifact_hashes") or {})
     if pending["approval_kind"] == "mcp":
-        continuation = [{
-            "type": "mcp_approval_response",
-            "approval_request_id": pending["provider_item_id"],
-            "approve": approve,
-        }]
+        continuation = [
+            {
+                "type": "mcp_approval_response",
+                "approval_request_id": pending["provider_item_id"],
+                "approve": approve,
+            }
+        ]
     else:
         if pending.get("execution_result_recorded"):
             public_result = pending["execution_result"]
@@ -1345,17 +1406,13 @@ def resolve_responses_approval(session_id, approval_id):
                         detail=exc,
                     )
             else:
-                public_result = {
-                    "error": "The owner rejected this tool call."
-                }
+                public_result = {"error": "The owner rejected this tool call."}
                 produced_artifact_ids = []
                 produced_artifact_hashes = {}
         for artifact_id in produced_artifact_ids:
             if artifact_id not in ready_artifact_ids:
                 ready_artifact_ids.append(artifact_id)
-                ready_artifact_hashes[artifact_id] = (
-                    produced_artifact_hashes[artifact_id]
-                )
+                ready_artifact_hashes[artifact_id] = produced_artifact_hashes[artifact_id]
                 artifact = docops.resolve_export_artifact(artifact_id)
                 prelude.append({"type": "artifact.ready", **artifact})
         if not chatlog.store_pending_approval_execution(
@@ -1373,37 +1430,43 @@ def resolve_responses_approval(session_id, approval_id):
                 409,
                 req_id,
             )
-        prelude.append({
-            "type": "tool.result",
-            "call_id": pending["provider_item_id"],
-            "name": pending["name"],
-            "result": public_result,
-        })
-        continuation = [{
-            "type": "function_call_output",
-            "call_id": pending["provider_item_id"],
-            "output": json.dumps(public_result, default=str),
-        }]
+        prelude.append(
+            {
+                "type": "tool.result",
+                "call_id": pending["provider_item_id"],
+                "name": pending["name"],
+                "result": public_result,
+            }
+        )
+        continuation = [
+            {
+                "type": "function_call_output",
+                "call_id": pending["provider_item_id"],
+                "output": json.dumps(public_result, default=str),
+            }
+        ]
 
     response = Response(
-        stream_with_context(_stream_session_response(
-            session,
-            turn_token,
-            continuation,
-            previous_response_id=pending["provider_response_id"],
-            text_format=pending["text_format"],
-            req_id=req_id,
-            required_deliverable_format=pending.get("deliverable_format"),
-            ready_artifact_ids=ready_artifact_ids,
-            prelude=prelude,
-            approval_execution={
-                "approval_id": approval_id,
-                "approval_kind": pending["approval_kind"],
-                "name": pending["name"],
-                "approved": approve,
-                "approve": approve,
-            },
-        )),
+        stream_with_context(
+            _stream_session_response(
+                session,
+                turn_token,
+                continuation,
+                previous_response_id=pending["provider_response_id"],
+                text_format=pending["text_format"],
+                req_id=req_id,
+                required_deliverable_format=pending.get("deliverable_format"),
+                ready_artifact_ids=ready_artifact_ids,
+                prelude=prelude,
+                approval_execution={
+                    "approval_id": approval_id,
+                    "approval_kind": pending["approval_kind"],
+                    "name": pending["name"],
+                    "approved": approve,
+                    "approve": approve,
+                },
+            )
+        ),
         status=200,
         mimetype="text/event-stream",
     )
@@ -1427,8 +1490,7 @@ def webrtc_session():
         or (
             session_id
             and (
-                not SESSION_ID_PATTERN.fullmatch(session_id)
-                or not chatlog.get_session(session_id)
+                not SESSION_ID_PATTERN.fullmatch(session_id) or not chatlog.get_session(session_id)
             )
         )
     ):
@@ -1617,9 +1679,7 @@ def mint_realtime_token():
         )
 
     value = (
-        ((raw.get("client_secret") or {}).get("value"))
-        if isinstance(raw, dict)
-        else None
+        ((raw.get("client_secret") or {}).get("value")) if isinstance(raw, dict) else None
     ) or (raw.get("value") if isinstance(raw, dict) else None)
     if not value:
         return _error_response(
@@ -1637,7 +1697,8 @@ def mint_realtime_token():
             "client_secret": {
                 "value": value,
                 "expires_at": ((raw.get("client_secret") or {}).get("expires_at"))
-                if isinstance(raw, dict) else None,
+                if isinstance(raw, dict)
+                else None,
             },
             "tool_count": len(_function_tool_schemas()),
         },
@@ -1679,6 +1740,8 @@ def execute_tool():
             404,
             req_id,
         )
+    if session_id:
+        bind_log_context(session_id=session_id)
 
     arguments = payload.get("arguments") or {}
     if isinstance(arguments, str):
@@ -1718,22 +1781,16 @@ def execute_tool():
             detail=exc,
         )
 
-    artifact = (
-        result.get("artifact") if isinstance(result, dict) else None
-    )
+    artifact = result.get("artifact") if isinstance(result, dict) else None
     if session_id and isinstance(artifact, dict) and artifact.get("status") == "ready":
-        if not chatlog.link_session_artifact(
-            session_id, str(artifact.get("artifact_id") or "")
-        ):
+        if not chatlog.link_session_artifact(session_id, str(artifact.get("artifact_id") or "")):
             return _error_response(
                 "artifact_link_failed",
                 "The tool artifact could not be linked to the chat session.",
                 500,
                 req_id,
             )
-    return _json_response(
-        redact_server_paths(result), status=200, req_id=req_id
-    )
+    return _json_response(redact_server_paths(result), status=200, req_id=req_id)
 
 
 @app.route("/webhook", methods=["POST"])
@@ -1793,11 +1850,13 @@ def run():
         raise SystemExit("OPENAI_API_KEY not set - source ~/.env first")
     bind_host = os.getenv("PJ_REALTIME_BIND_HOST", "127.0.0.1")
     try:
-        app.config["LOCAL_WEB_OWNER_SESSION_ENABLED"] = (
-            ipaddress.ip_address(bind_host).is_loopback
-        )
+        app.config["LOCAL_WEB_OWNER_SESSION_ENABLED"] = ipaddress.ip_address(bind_host).is_loopback
     except ValueError:
         app.config["LOCAL_WEB_OWNER_SESSION_ENABLED"] = False
+    _LOGGER.info(
+        "realtime.server.started",
+        extra={"bind_host": bind_host, "port": 3001},
+    )
     app.run(host=bind_host, port=3001)
 
 
