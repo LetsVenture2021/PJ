@@ -16,6 +16,14 @@ export function shorten(value, max = 300) {
 
 export function parseErrorBody(rawText) {
   if (!rawText) return "";
+  if (/(?:<!doctype html|<html\b)/i.test(rawText)) {
+    const title = rawText.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1]
+      ?.replace(/\s+/g, " ")
+      .trim();
+    return title
+      ? `Server returned an HTML error page (${title})`
+      : "Server returned an HTML error page";
+  }
   try {
     const parsed = JSON.parse(rawText);
     const err = parsed.error || {};

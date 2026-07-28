@@ -4,8 +4,12 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const workerSource = await readFile(new URL("../pj_realtime_backend_worker.js", import.meta.url), "utf8");
+const webUtilsSource = await readFile(new URL("../assets/pj_web_utils.js", import.meta.url), "utf8");
 const workerModule = await import(
   `data:text/javascript;base64,${Buffer.from(workerSource).toString("base64")}`
+);
+const webUtilsModule = await import(
+  `data:text/javascript;base64,${Buffer.from(webUtilsSource).toString("base64")}`
 );
 
 const {
@@ -15,18 +19,22 @@ const {
   createSessionConfig,
   default: worker,
   deriveResponsesBridgeBaseUrl,
+  fetchTextWithTimeout,
   handleSession,
   handleResponsesProxy,
   isPublicRoute,
   isResponsesRoute,
   normalizeFunctionTools,
   resolveRealtimeTools,
+  requestRealtimeCall,
+  requestRealtimeClientSecret,
   responseHeaders,
   safeAttachmentDisposition,
   stableJson,
   toolBridgeTimeoutMs,
   validateAccessIdentity,
 } = workerModule;
+const { parseErrorBody } = webUtilsModule;
 
 const TEAM_DOMAIN = "pj-owner-tests.cloudflareaccess.com";
 const ISSUER = `https://${TEAM_DOMAIN}`;
@@ -543,6 +551,111 @@ test("browser and Worker advertise the same contract version", async () => {
   assert.equal(match[1], CONTRACT_VERSION);
 });
 
+test("realtime upstream transport and body-read failures return typed results", async () => {
+  const failingFetch = async () => {
+    throw new Error("upstream socket closed");
+  };
+  const call = await requestRealtimeCall(
+    "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+    "gpt-realtime",
+    { OPENAI_API_KEY: "test-key" },
+    [],
+    "full_power",
+    "Authoritative test instructions",
+    failingFetch,
+  );
+  assert.equal(call.ok, false);
+  assert.equal(call.status, 502);
+  assert.equal(call.transportError, true);
+  assert.match(call.text, /upstream socket closed/);
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = failingFetch;
+  try {
+    const response = await handleSession(
+      new Request(
+        "https://pj-assistant.ai/session"
+          + "?session_id=session_transport_123&voice_mode=full_power",
+        {
+          method: "POST",
+          headers: { "content-type": "application/sdp" },
+          body: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+        },
+      ),
+      {
+        OPENAI_API_KEY: "test-key",
+        PJ_REALTIME_INSTRUCTIONS: "Authoritative test instructions",
+        PJ_REALTIME_TOOL_SCHEMAS_JSON: "[]",
+      },
+      "https://pj-assistant.ai",
+      "request-session-transport",
+    );
+    assert.equal(response.status, 502);
+    assert.match(response.headers.get("content-type"), /^application\/json/);
+    const payload = await response.json();
+    assert.equal(payload.error.code, "openai_realtime_unreachable");
+    assert.equal(payload.error.request_id, "request-session-transport");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const unreadableResponseFetch = async () => ({
+    ok: true,
+    status: 200,
+    async text() {
+      throw new Error("response body stream failed");
+    },
+  });
+  const token = await requestRealtimeClientSecret(
+    "gpt-realtime",
+    { OPENAI_API_KEY: "test-key" },
+    [],
+    "fast",
+    "Authoritative test instructions",
+    unreadableResponseFetch,
+  );
+  assert.equal(token.ok, false);
+  assert.equal(token.status, 502);
+  assert.equal(token.transportError, true);
+  assert.match(token.text, /response body stream failed/);
+
+  await assert.rejects(
+    fetchTextWithTimeout(
+      "https://api.openai.com/v1/realtime/calls",
+      {},
+      10,
+      async () => ({
+        async text() {
+          return new Promise(() => {});
+        },
+      }),
+    ),
+    /timeout/,
+  );
+});
+
+test("HTML infrastructure errors are summarized without leaking markup", () => {
+  const detail = parseErrorBody(
+    "<!DOCTYPE html><html><head><title>Internal Server Error</title></head><body>failure</body></html>",
+  );
+  assert.equal(detail, "Server returned an HTML error page (Internal Server Error)");
+  assert.doesNotMatch(detail, /<!DOCTYPE|<html/);
+  assert.equal(
+    parseErrorBody("<html><body>no title</body></html>"),
+    "Server returned an HTML error page",
+  );
+  assert.equal(
+    parseErrorBody(JSON.stringify({
+      error: {
+        message: "Realtime signaling failed.",
+        detail: "sdp_length=42; <!DOCTYPE html><html><head>"
+          + "<title>Bad Gateway</title></head><body>failure</body></html>",
+      },
+    })),
+    "Server returned an HTML error page (Bad Gateway)",
+  );
+});
+
 test("browser module initializes with Full Power helpers in shared scope", async () => {
   const html = await readFile(
     new URL("../webrtc_client.html", import.meta.url),
@@ -637,6 +750,7 @@ test("browser module initializes with Full Power helpers in shared scope", async
        renderArtifactCard,
        runFunctionCall,
        seedRealtimeConversation,
+      shouldUseEphemeralSignalingFallback,
      };`,
   );
 
@@ -647,6 +761,12 @@ test("browser module initializes with Full Power helpers in shared scope", async
     navigator,
   );
   assert.ok(hooks);
+  assert.equal(hooks.shouldUseEphemeralSignalingFallback(500, ""), true);
+  assert.equal(hooks.shouldUseEphemeralSignalingFallback(503, "gateway unavailable"), true);
+  assert.equal(hooks.shouldUseEphemeralSignalingFallback(599, "upstream failure"), true);
+  assert.equal(hooks.shouldUseEphemeralSignalingFallback(400, "invalid_offer"), true);
+  assert.equal(hooks.shouldUseEphemeralSignalingFallback(400, "invalid model"), false);
+  assert.equal(hooks.shouldUseEphemeralSignalingFallback(429, "rate limited"), false);
   assert.equal(typeof listeners.get("startBtn:click"), "function");
   assert.equal(typeof listeners.get("fullPowerModeBtn:click"), "function");
   assert.equal(typeof listeners.get("fullPowerVoiceModeBtn:click"), "function");

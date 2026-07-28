@@ -1030,7 +1030,10 @@
     }
 
     function shouldUseEphemeralSignalingFallback(status, detail) {
-      if (status !== 400 && status !== 502) {
+      if (status >= 500 && status <= 599) {
+        return true;
+      }
+      if (status !== 400) {
         return false;
       }
       const lowered = (detail || "").toLowerCase();
