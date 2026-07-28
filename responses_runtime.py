@@ -513,9 +513,25 @@ def requested_deliverable_format(message):
     text = message.casefold()
     checks = (
         ("pptx", (r"\bpower\s*point\b", r"\bpowerpoint\b", r"\.pptx\b", r"\bpptx\b")),
+        ("pdf", (r"\bportable document format\b", r"\.pdf\b", r"\bpdf\b")),
+        (
+            "xlsx",
+            (
+                r"\bexcel (?:file|spreadsheet|workbook)\b",
+                r"\.xlsx\b",
+                r"\bxlsx\b",
+            ),
+        ),
         ("docx", (r"\bword document\b", r"\.docx\b", r"\bdocx\b")),
-        ("rtf", (r"\brich text format\b", r"\.rtf\b")),
+        ("rtf", (r"\brich text format\b", r"\.rtf\b", r"\brtf\b")),
         ("html", (r"\bhtml file\b", r"\.html\b")),
+        (
+            "md",
+            (
+                r"\bmarkdown (?:file|document)\b",
+                r"\.md\b",
+            ),
+        ),
     )
     for format_name, patterns in checks:
         if any(re.search(pattern, text) for pattern in patterns):
@@ -691,7 +707,16 @@ class ResponsesOrchestrator:
         required_format = (
             required_deliverable_format or requested_deliverable_format(message)
         )
-        if required_format not in {None, "pptx", "docx", "rtf", "html"}:
+        if required_format not in {
+            None,
+            "md",
+            "html",
+            "pdf",
+            "docx",
+            "rtf",
+            "pptx",
+            "xlsx",
+        }:
             raise ValueError("unsupported required deliverable format")
         repair_attempts = 0
 

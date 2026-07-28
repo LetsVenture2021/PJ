@@ -773,7 +773,7 @@ def download_responses_artifact(artifact_id):
         )
     response = send_file(
         snapshot,
-        mimetype=artifact["mime_type"],
+        mimetype=artifact["mime_type"].split(";", 1)[0],
         as_attachment=True,
         download_name=artifact["filename"],
         conditional=False,

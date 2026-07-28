@@ -1537,10 +1537,362 @@ def _brand_header() -> str:
 _EXPORT_MIME_TYPES = {
     "md": "text/markdown; charset=utf-8",
     "html": "text/html; charset=utf-8",
+    "pdf": "application/pdf",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "rtf": "application/rtf",
     "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
+
+
+def _export_sections(source: str) -> list[tuple[str, str]]:
+    matches = list(
+        re.finditer(
+            r"^## (.+?)\s*\n(.*?)(?=^## |\Z)",
+            source,
+            re.S | re.M,
+        )
+    )
+    sections = []
+    leading = source[:matches[0].start()].strip() if matches else source.strip()
+    if leading:
+        sections.append(("Overview", leading))
+    sections.extend(
+        (match.group(1).strip(), match.group(2).strip())
+        for match in matches
+    )
+    return sections
+
+
+def _plain_markdown(value: str) -> str:
+    rendered = _markdown.markdown(
+        value,
+        extensions=["tables", "fenced_code"],
+    )
+    rendered = re.sub(r"<li(?:\s[^>]*)?>", "\n- ", rendered, flags=re.I)
+    rendered = re.sub(
+        r"</(?:p|div|li|h[1-6]|tr|blockquote|pre)>",
+        "\n",
+        rendered,
+        flags=re.I,
+    )
+    rendered = re.sub(r"<br\s*/?>", "\n", rendered, flags=re.I)
+    rendered = re.sub(r"<[^>]+>", " ", rendered)
+    lines = [
+        re.sub(r"[ \t]+", " ", _html.unescape(line)).strip()
+        for line in rendered.splitlines()
+    ]
+    return "\n".join(line for line in lines if line).strip()
+
+
+def _atomic_binary_export(out_path: Path, writer) -> None:
+    with tempfile.NamedTemporaryFile(
+        dir=EXPORTS_DIR,
+        prefix=f".{out_path.stem}.",
+        suffix=f"{out_path.suffix}.tmp",
+        delete=False,
+    ) as handle:
+        temporary_output = Path(handle.name)
+    try:
+        writer(temporary_output)
+        if (
+            not temporary_output.is_file()
+            or temporary_output.stat().st_size == 0
+        ):
+            raise OSError(
+                f"{out_path.suffix} renderer produced no output"
+            )
+        temporary_output.chmod(0o600)
+        temporary_output.replace(out_path)
+    finally:
+        temporary_output.unlink(missing_ok=True)
+
+
+def _write_pdf_export(
+        out_path: Path,
+        title: str,
+        sections,
+        metadata: dict) -> None:
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import inch
+    from reportlab.pdfgen import canvas as pdf_canvas
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+
+    primary = colors.HexColor(_BRAND["primary"])
+    ink = colors.HexColor(_BRAND["ink"])
+    muted = colors.HexColor(_BRAND["muted"])
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "PJTitle",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=23,
+        leading=28,
+        textColor=ink,
+        alignment=TA_CENTER,
+        spaceAfter=8,
+    )
+    meta_style = ParagraphStyle(
+        "PJMeta",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=9,
+        leading=12,
+        textColor=muted,
+        alignment=TA_CENTER,
+        spaceAfter=24,
+    )
+    heading_style = ParagraphStyle(
+        "PJHeading",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=14,
+        leading=18,
+        textColor=primary,
+        spaceBefore=13,
+        spaceAfter=7,
+    )
+    body_style = ParagraphStyle(
+        "PJBody",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=10.5,
+        leading=15,
+        textColor=ink,
+        spaceAfter=9,
+    )
+
+    def decorate_page(canvas, document):
+        canvas.saveState()
+        width, height = LETTER
+        canvas.setStrokeColor(primary)
+        canvas.setLineWidth(2)
+        canvas.line(
+            0.72 * inch,
+            height - 0.55 * inch,
+            width - 0.72 * inch,
+            height - 0.55 * inch,
+        )
+        canvas.setFillColor(ink)
+        canvas.setFont("Helvetica-Bold", 9)
+        canvas.drawString(
+            0.72 * inch,
+            height - 0.42 * inch,
+            "AIMHI",
+        )
+        canvas.setFillColor(muted)
+        canvas.setFont("Helvetica", 7)
+        canvas.drawRightString(
+            width - 0.72 * inch,
+            height - 0.42 * inch,
+            "PRYCELESS VENTURES",
+        )
+        canvas.drawString(
+            0.72 * inch,
+            0.42 * inch,
+            f"{metadata['doc_id']} v{metadata['version']} · "
+            f"{'Final' if metadata['is_final'] else 'Working draft'}",
+        )
+        canvas.drawRightString(
+            width - 0.72 * inch,
+            0.42 * inch,
+            f"Page {document.page} · integrity "
+            f"{metadata['sha256'][:12]}",
+        )
+        if not metadata["is_final"]:
+            canvas.setFillColor(
+                colors.Color(0.88, 0.1, 0.4, alpha=0.08)
+            )
+            canvas.setFont("Helvetica-Bold", 68)
+            canvas.translate(width / 2, height / 2)
+            canvas.rotate(28)
+            canvas.drawCentredString(0, 0, "DRAFT")
+        canvas.restoreState()
+
+    class InvariantCanvas(pdf_canvas.Canvas):
+        def __init__(self, *args, **kwargs):
+            kwargs["invariant"] = 1
+            super().__init__(*args, **kwargs)
+
+    def render(path):
+        document = SimpleDocTemplate(
+            str(path),
+            pagesize=LETTER,
+            title=title,
+            author="PJ",
+            leftMargin=0.82 * inch,
+            rightMargin=0.82 * inch,
+            topMargin=0.82 * inch,
+            bottomMargin=0.72 * inch,
+        )
+        story = [
+            Paragraph(_html.escape(title), title_style),
+            Paragraph(
+                f"{metadata['date']} · "
+                f"{'FINAL' if metadata['is_final'] else 'DRAFT'}",
+                meta_style,
+            ),
+        ]
+        for heading, markdown_body in sections:
+            story.append(
+                Paragraph(_html.escape(heading), heading_style)
+            )
+            plain = _plain_markdown(markdown_body)
+            for paragraph in re.split(r"\n{2,}", plain):
+                if paragraph.strip():
+                    story.append(
+                        Paragraph(
+                            _html.escape(paragraph).replace(
+                                "\n",
+                                "<br/>",
+                            ),
+                            body_style,
+                        )
+                    )
+            story.append(Spacer(1, 3))
+        document.build(
+            story,
+            onFirstPage=decorate_page,
+            onLaterPages=decorate_page,
+            canvasmaker=InvariantCanvas,
+        )
+
+    _atomic_binary_export(out_path, render)
+
+
+def _write_excel_export(
+        out_path: Path,
+        title: str,
+        sections,
+        metadata: dict) -> None:
+    from openpyxl import Workbook
+    from openpyxl.styles import (
+        Alignment,
+        Border,
+        Font,
+        PatternFill,
+        Side,
+    )
+    from openpyxl.utils import get_column_letter
+
+    primary = _BRAND["primary"].lstrip("#")
+    ink = _BRAND["ink"].lstrip("#")
+    muted = _BRAND["muted"].lstrip("#")
+    paper = _BRAND["paper"].lstrip("#")
+    line = _BRAND["line"].lstrip("#")
+
+    def string_cell(sheet, row, column, value):
+        cell = sheet.cell(row=row, column=column)
+        cell.value = str(value)
+        cell.data_type = "s"
+        return cell
+
+    def render(path):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Document"
+        sheet.sheet_view.showGridLines = False
+        sheet.merge_cells("A1:B1")
+        title_cell = string_cell(sheet, 1, 1, title)
+        title_cell.font = Font(
+            name="Aptos Display",
+            size=20,
+            bold=True,
+            color=ink,
+        )
+        title_cell.alignment = Alignment(vertical="center")
+        sheet.row_dimensions[1].height = 34
+
+        metadata_rows = [
+            ("Document", f"{metadata['doc_id']} v{metadata['version']}"),
+            ("Status", "FINAL" if metadata["is_final"] else "DRAFT"),
+            ("Integrity", metadata["sha256"]),
+            ("Exported", metadata["date"]),
+        ]
+        for row_index, (label, value) in enumerate(
+                metadata_rows,
+                start=2):
+            label_cell = string_cell(sheet, row_index, 1, label)
+            label_cell.font = Font(
+                name="Aptos",
+                bold=True,
+                color=muted,
+            )
+            value_cell = string_cell(sheet, row_index, 2, value)
+            value_cell.font = Font(
+                name="Aptos",
+                color=ink if metadata["is_final"] else "E21A66",
+            )
+
+        header_row = 7
+        for column, value in enumerate(
+                ("Section", "Content"),
+                start=1):
+            cell = string_cell(sheet, header_row, column, value)
+            cell.font = Font(
+                name="Aptos",
+                bold=True,
+                color="FFFFFF",
+            )
+            cell.fill = PatternFill("solid", fgColor=primary)
+            cell.alignment = Alignment(vertical="center")
+
+        thin = Side(style="thin", color=line)
+        for row_index, (heading, markdown_body) in enumerate(
+                sections,
+                start=header_row + 1):
+            heading_cell = string_cell(
+                sheet,
+                row_index,
+                1,
+                heading,
+            )
+            body_cell = string_cell(
+                sheet,
+                row_index,
+                2,
+                _plain_markdown(markdown_body),
+            )
+            for cell in (heading_cell, body_cell):
+                cell.font = Font(name="Aptos", color=ink)
+                cell.fill = PatternFill(
+                    "solid",
+                    fgColor=(
+                        paper if row_index % 2 == 0 else "FFFFFF"
+                    ),
+                )
+                cell.border = Border(bottom=thin)
+                cell.alignment = Alignment(
+                    vertical="top",
+                    wrap_text=True,
+                )
+            heading_cell.font = Font(
+                name="Aptos",
+                bold=True,
+                color=primary,
+            )
+            sheet.row_dimensions[row_index].height = 60
+
+        sheet.column_dimensions[get_column_letter(1)].width = 28
+        sheet.column_dimensions[get_column_letter(2)].width = 95
+        sheet.freeze_panes = f"A{header_row + 1}"
+        sheet.auto_filter.ref = (
+            f"A{header_row}:B{header_row + len(sections)}"
+        )
+        sheet.print_title_rows = f"1:{header_row}"
+        sheet.sheet_properties.pageSetUpPr.fitToPage = True
+        sheet.page_setup.fitToWidth = 1
+        sheet.page_setup.fitToHeight = 0
+        sheet.page_margins.left = 0.35
+        sheet.page_margins.right = 0.35
+        workbook.properties.title = title
+        workbook.properties.creator = "PJ"
+        workbook.save(str(path))
+
+    _atomic_binary_export(out_path, render)
 
 
 def _hash_file(path: Path) -> str:
@@ -1887,14 +2239,28 @@ def export_document(doc_id: str, format: str = "html",
                     version: int = 0) -> dict:
     """Render an audience-ready deliverable of a document.
 
-    Formats: html, docx, rtf, and native pptx for governed presentation
-    specifications. Every successful export is registered under an opaque,
-    integrity-checked artifact ID.
+    Formats: md, html, pdf, docx, rtf, xlsx, and native pptx for governed
+    presentation specifications. Every successful export is registered under
+    an opaque, integrity-checked artifact ID.
     """
     format = str(format or "html").strip().lower()
-    if format not in ("html", "docx", "rtf", "pptx"):
-        return {"error": "format must be one of: html, docx, rtf, pptx"}
-    if format != "pptx" and _markdown is None:
+    supported_formats = (
+        "md",
+        "html",
+        "pdf",
+        "docx",
+        "rtf",
+        "pptx",
+        "xlsx",
+    )
+    if format not in supported_formats:
+        return {
+            "error": (
+                "format must be one of: "
+                + ", ".join(supported_formats)
+            )
+        }
+    if format not in {"md", "pptx"} and _markdown is None:
         return {"error": "python 'markdown' package not installed in venv"}
     with _db() as conn:
         history = conn.execute(
@@ -1924,6 +2290,41 @@ def export_document(doc_id: str, format: str = "html",
 
     is_final = status == "final"
     stem = f"{doc_id}-{_slug(title)}-v{ver}" + ("" if is_final else "-DRAFT")
+    if format == "md":
+        try:
+            with _export_lock(doc_id, ver, format):
+                out_path = EXPORTS_DIR / "sources" / p.name
+                _atomic_copy(p, out_path)
+                if _hash(out_path.read_text()) != sha:
+                    raise ValueError(
+                        "source artifact copy failed governed-hash validation"
+                    )
+                artifact = _register_export(
+                    doc_id,
+                    ver,
+                    format,
+                    out_path,
+                    audience_ready=is_final,
+                )
+        except (OSError, ValueError) as exc:
+            return {
+                "status": "blocked",
+                "error": f"Markdown export failed: {exc}",
+            }
+        return {
+            "doc_id": doc_id,
+            "version": ver,
+            "format": format,
+            "audience_ready": is_final,
+            "watermarked_draft": not is_final,
+            "path": str(out_path),
+            "artifact": artifact,
+            "note": (
+                "governed final Markdown source"
+                if is_final
+                else "governed draft Markdown source"
+            ),
+        }
     if format == "pptx":
         spec_row = next(
             (row for row in presentation_rows if row[0] == ver), None
@@ -1981,6 +2382,7 @@ def export_document(doc_id: str, format: str = "html",
     # Strip internal metadata banner and title (re-rendered cleanly).
     body_md = re.sub(r"^# .*?\n+> \*\*Doc:\*\*.*?\n+", "", text, count=1,
                      flags=re.S)
+    sections = _export_sections(body_md)
     body_html = _markdown.markdown(body_md,
                                    extensions=["tables", "fenced_code"])
     date = datetime.now(timezone.utc).strftime("%B %d, %Y")
@@ -2016,7 +2418,7 @@ def export_document(doc_id: str, format: str = "html",
                 out_path = html_path
                 if format == "html":
                     html_temporary.replace(html_path)
-                else:
+                elif format in ("docx", "rtf"):
                     out_path = EXPORTS_DIR / f"{stem}.{format}"
                     descriptor, temporary_name = tempfile.mkstemp(
                         dir=EXPORTS_DIR,
@@ -2053,12 +2455,40 @@ def export_document(doc_id: str, format: str = "html",
                         out_temporary.replace(out_path)
                     finally:
                         out_temporary.unlink(missing_ok=True)
+                else:
+                    out_path = EXPORTS_DIR / f"{stem}.{format}"
+                    metadata = {
+                        "doc_id": doc_id,
+                        "version": ver,
+                        "sha256": sha,
+                        "date": date,
+                        "is_final": is_final,
+                    }
+                    if format == "pdf":
+                        _write_pdf_export(
+                            out_path,
+                            title,
+                            sections,
+                            metadata,
+                        )
+                    else:
+                        _write_excel_export(
+                            out_path,
+                            title,
+                            sections,
+                            metadata,
+                        )
             finally:
                 html_temporary.unlink(missing_ok=True)
             artifact = _register_export(
                 doc_id, ver, format, out_path, audience_ready=is_final
             )
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+    except (
+        ImportError,
+        OSError,
+        ValueError,
+        subprocess.SubprocessError,
+    ) as exc:
         return {
             "status": "blocked",
             "error": f"artifact export failed: {exc}",
@@ -2182,13 +2612,18 @@ DOCOPS_SCHEMAS = [
          "doc_id": {"type": "string"}}, "required": ["doc_id"]}},
     {"type": "function", "name": "export_document",
      "description": ("Render and register the exact requested deliverable. "
-                     "Use format=pptx for PowerPoint requests, which succeeds "
-                     "only for a validated structured presentation. A file is "
-                     "not complete until this returns artifact.status=ready. "
-                     "Finals export clean; drafts are watermarked."),
+                     "Supports Markdown, HTML, PDF, DOCX, RTF, native "
+                     "PowerPoint, and Excel. Use format=pptx for PowerPoint "
+                     "requests, which succeeds only for a validated structured "
+                     "presentation. A file is not complete until this returns "
+                     "artifact.status=ready. Finals export clean; drafts are "
+                     "watermarked."),
      "parameters": {"type": "object", "properties": {
          "doc_id": {"type": "string"},
-         "format": {"type": "string", "enum": ["html", "docx", "rtf", "pptx"],
+         "format": {"type": "string",
+                    "enum": [
+                        "md", "html", "pdf", "docx", "rtf", "pptx", "xlsx"
+                    ],
                     "description": "Output format (default html)"},
          "version": {"type": "integer",
                      "description": "Specific version (default latest)"}},
@@ -2200,7 +2635,9 @@ DOCOPS_SCHEMAS = [
          "doc_id": {"type": "string"},
          "version": {"type": "integer"},
          "format": {"type": "string",
-                   "enum": ["", "html", "docx", "rtf", "pptx"]}},
+                   "enum": [
+                       "", "md", "html", "pdf", "docx", "rtf", "pptx", "xlsx"
+                   ]}},
          "required": []}},
     {"type": "function", "name": "list_documents",
      "description": "List documents in the DocOps registry by status (draft/final/superseded/all) and keyword.",
