@@ -15,6 +15,7 @@ const {
   createSessionConfig,
   default: worker,
   deriveResponsesBridgeBaseUrl,
+  handleSession,
   handleResponsesProxy,
   isPublicRoute,
   isResponsesRoute,
@@ -168,6 +169,54 @@ test("voice policies keep Fast Voice automatic and Full Power Voice explicit", (
     ),
     true,
   );
+});
+
+test("successful session signaling returns the durable session id", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url, "https://api.openai.com/v1/realtime/calls");
+    assert.equal(options.method, "POST");
+    assert.match(options.headers.Authorization, /^Bearer /);
+    return new Response(
+      "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+      {
+        status: 200,
+        headers: { "content-type": "application/sdp" },
+      },
+    );
+  };
+  try {
+    const response = await handleSession(
+      new Request(
+        "https://pj-assistant.ai/session"
+          + "?session_id=session_voice_123&voice_mode=full_power",
+        {
+          method: "POST",
+          headers: { "content-type": "application/sdp" },
+          body: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+        },
+      ),
+      {
+        OPENAI_API_KEY: "test-openai-key",
+        PJ_REALTIME_TOOL_SCHEMAS_JSON: "[]",
+      },
+      "https://pj-assistant.ai",
+      "request-session-success",
+    );
+
+    assert.equal(response.status, 200);
+    assert.equal(
+      response.headers.get("x-pj-session-id"),
+      "session_voice_123",
+    );
+    assert.equal(
+      response.headers.get("content-type"),
+      "application/sdp",
+    );
+    assert.match(await response.text(), /^v=0/m);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("Realtime bridge validates contract, tool manifest, and instructions", async () => {

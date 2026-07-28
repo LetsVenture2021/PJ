@@ -1203,7 +1203,7 @@ async function handleSession(request, env, corsOrigin, requestId) {
 
   logEvent(requestId, "session.success", { model: selectedModel });
   const headers = responseHeaders(corsOrigin, requestId, "application/sdp");
-  if (sessionId) headers.set("x-pj-session-id", sessionId);
+  if (sessionId) headers["x-pj-session-id"] = sessionId;
   return new Response(result.text, {
     status: 200,
     headers,
@@ -1508,6 +1508,7 @@ export {
   buildAccessConfig,
   createSessionConfig,
   deriveResponsesBridgeBaseUrl,
+  handleSession,
   handleResponsesProxy,
   isPublicRoute,
   isResponsesRoute,
