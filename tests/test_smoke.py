@@ -567,6 +567,116 @@ required_sections:
         self.assertIsNone(file_state["synchronized_at"])
         self.assertEqual(file_state["last_attempt_status"], "failed")
 
+    def test_transient_metadata_failure_does_not_absent_a_present_n8n_source(self):
+        n8n_entry = {
+            "id": "vs-file-n8n-present",
+            "file_id": "file-n8n-present",
+            "created_at": 100,
+            "attributes": {"version": "1", "corpus_type": "n8n"},
+        }
+        skillops._record_n8n_source_census(
+            "vs-test",
+            "file-n8n-present",
+            "vs-file-n8n-present",
+            "n8n-capability-corpus.md",
+            "prior-run",
+            "synchronized",
+            terminal=False,
+            content_sha256="a" * 64,
+            content_chars=500,
+            entry=n8n_entry,
+            metadata={"filename": "n8n-capability-corpus.md"},
+        )
+
+        with (
+            mock.patch.object(skillops, "_SYNC_LOCK_PATH", self.lock_path),
+            mock.patch.object(
+                skillops, "_VECTOR_SOURCE_CACHE_DIR", self.cache_path
+            ),
+            mock.patch.object(
+                skillops, "_require_vector_store_id", return_value="vs-test"
+            ),
+            mock.patch.object(
+                skillops, "_require_openai_api_key", return_value="test-key"
+            ),
+            mock.patch.object(
+                skillops, "_list_vector_store_files", return_value=[n8n_entry]
+            ),
+            mock.patch.object(
+                skillops, "_list_openai_file_metadata", return_value={}
+            ),
+            mock.patch.object(
+                skillops,
+                "_get_openai_file_metadata",
+                side_effect=RuntimeError("transient metadata fetch failure"),
+            ),
+        ):
+            result = skillops.sync_vector_store(force=True)
+
+        self.assertEqual(result["status"], "partial_failed")
+        self.assertEqual(result["files_failed"], 1)
+        with skillops._db() as conn:
+            row = conn.execute(
+                "SELECT disposition_status, terminal FROM "
+                "skillops_n8n_source_census WHERE source_file_id=?",
+                ("file-n8n-present",),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], "synchronized")
+        self.assertEqual(row[1], 0)
+
+    def test_genuinely_removed_n8n_source_is_still_marked_absent(self):
+        n8n_entry = {
+            "id": "vs-file-n8n-gone",
+            "file_id": "file-n8n-gone",
+            "created_at": 100,
+            "attributes": {"version": "1", "corpus_type": "n8n"},
+        }
+        skillops._record_n8n_source_census(
+            "vs-test",
+            "file-n8n-gone",
+            "vs-file-n8n-gone",
+            "n8n-capability-corpus-gone.md",
+            "prior-run",
+            "synchronized",
+            terminal=False,
+            content_sha256="b" * 64,
+            content_chars=500,
+            entry=n8n_entry,
+            metadata={"filename": "n8n-capability-corpus-gone.md"},
+        )
+
+        with (
+            mock.patch.object(skillops, "_SYNC_LOCK_PATH", self.lock_path),
+            mock.patch.object(
+                skillops, "_VECTOR_SOURCE_CACHE_DIR", self.cache_path
+            ),
+            mock.patch.object(
+                skillops, "_require_vector_store_id", return_value="vs-test"
+            ),
+            mock.patch.object(
+                skillops, "_require_openai_api_key", return_value="test-key"
+            ),
+            mock.patch.object(
+                skillops, "_list_vector_store_files", return_value=[]
+            ),
+            mock.patch.object(
+                skillops, "_list_openai_file_metadata", return_value={}
+            ),
+        ):
+            result = skillops.sync_vector_store(force=True)
+
+        self.assertEqual(result["status"], "completed")
+        with skillops._db() as conn:
+            row = conn.execute(
+                "SELECT disposition_status, terminal FROM "
+                "skillops_n8n_source_census WHERE source_file_id=?",
+                ("file-n8n-gone",),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], "absent")
+        self.assertEqual(row[1], 1)
+
     def test_non_downloadable_file_is_classified_without_repeated_failure(self):
         self.metadata["purpose"] = "assistants"
         first = self._run_sync()

@@ -300,15 +300,46 @@ TOOL_SCHEMAS.extend(_codeops.CODEOPS_SCHEMAS)
 DISPATCH_TABLE.update(_codeops.CODEOPS_DISPATCH)
 
 
+# --- ImageOps: governed image assets and opt-in generation -------------------
+import imageops as _imageops
+
+TOOL_SCHEMAS.extend(_imageops.IMAGEOPS_SCHEMAS)
+DISPATCH_TABLE.update(_imageops.IMAGEOPS_DISPATCH)
+
+
 def get_pj_capability_snapshot() -> dict:
-    """Return bounded local registry and synchronization state."""
+    """Return a bounded, secret-safe inventory for evidence-grounded work."""
+    import responses_runtime as _responses_runtime
+    from pj_contract import CONTRACT_VERSION
+    from realtime_config import realtime_tool_schemas
+
+    manifest = _responses_runtime.capability_manifest(
+        _responses_runtime.load_config()
+    )
+    docops_inventory = _docops.docops_inventory_summary()
     coding = _skillops.list_coding_capabilities(limit=100)
     n8n = _skillops.get_n8n_corpus_status(include_census=False)
+    guides = _codeops.list_codeops_guides(limit=50)
     sync = _skillops.get_vector_sync_status(limit=1)
     latest_sync = sync.get("runs", [{}])[0] if sync.get("runs") else None
     return {
         "verified_at": datetime.now(timezone.utc).isoformat(),
-        "verification_scope": "local_durable_registry",
+        "verification_scope": "local_runtime_and_durable_registry",
+        "contract_version": CONTRACT_VERSION,
+        "model": manifest["model"],
+        "native_capabilities": manifest["native"],
+        "local_function_count": manifest["local_functions"]["count"],
+        "realtime_function_count": len(realtime_tool_schemas()),
+        "mcp_servers": [
+            {
+                "label": server["label"],
+                "status": server["status"],
+                "runtime_enabled": server["runtime_enabled"],
+                "approval_flow": server["approval_flow"],
+            }
+            for server in manifest["mcp_servers"]
+        ],
+        "docops": docops_inventory,
         "coding_capabilities": coding.get("count", 0),
         "n8n_capabilities": {
             "count": n8n.get("capability_count", 0),
@@ -318,6 +349,8 @@ def get_pj_capability_snapshot() -> dict:
             "blocked_reasons": n8n.get("blocked_reasons", []),
             "release_gates": n8n.get("release_gates", {}),
         },
+        "codeops_guides": guides.get("count", 0),
+        "imageops": _imageops.get_image_capability_status(),
         "vector_sync": (
             {
                 key: latest_sync.get(key)
@@ -343,8 +376,9 @@ TOOL_SCHEMAS.append({
     "type": "function",
     "name": "get_pj_capability_snapshot",
     "description": (
-        "Return bounded, secret-safe coding, n8n corpus, and vector "
-        "synchronization state from PJ's durable local registry."
+        "Return a current, bounded, secret-safe PJ capability and corpus "
+        "inventory for evidence-grounded briefs and presentations. Use this "
+        "instead of inferring production facts from the protected homepage."
     ),
     "parameters": {
         "type": "object",
@@ -367,6 +401,10 @@ _BUILTIN_APPROVAL_TOOLS = {
     "run_codeops_validation",
     "run_shortcut",
     "sync_vector_store",
+    "generate_image_asset",
+    "edit_image_asset",
+    "create_image_variation",
+    "delete_image_asset",
 }
 
 

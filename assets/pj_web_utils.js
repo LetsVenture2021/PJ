@@ -1,4 +1,4 @@
-export const CONTRACT_VERSION = "2026-07-28.5";
+export const CONTRACT_VERSION = "2026-07-28.6";
 
 export function createRequestId() {
   if (window.crypto && typeof window.crypto.randomUUID === "function") {
@@ -16,6 +16,14 @@ export function shorten(value, max = 300) {
 
 export function parseErrorBody(rawText) {
   if (!rawText) return "";
+  if (/(?:<!doctype html|<html\b)/i.test(rawText)) {
+    const title = rawText.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1]
+      ?.replace(/\s+/g, " ")
+      .trim();
+    return title
+      ? `Server returned an HTML error page (${shorten(title, 160)})`
+      : "Server returned an HTML error page";
+  }
   try {
     const parsed = JSON.parse(rawText);
     const err = parsed.error || {};

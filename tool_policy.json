@@ -6,6 +6,10 @@
     "learn_from_vector_store": "approval",
     "run_codeops_validation": "approval",
     "run_shortcut": "approval",
-    "sync_vector_store": "approval"
+    "sync_vector_store": "approval",
+    "generate_image_asset": "approval",
+    "edit_image_asset": "approval",
+    "create_image_variation": "approval",
+    "delete_image_asset": "approval"
   }
 }

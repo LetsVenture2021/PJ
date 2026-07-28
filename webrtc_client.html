@@ -124,7 +124,7 @@
 
     .mode-switch {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: repeat(3, 1fr);
       gap: 6px;
       padding: 4px;
       border: 1px solid var(--line);
@@ -308,20 +308,49 @@
       padding: 7px 12px;
     }
 
+    .bubble.tool-status {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      align-items: center;
+      gap: 8px;
+      width: min(92%, 680px);
+    }
+
+    .tool-status-indicator {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: var(--warn);
+    }
+
+    .tool-status.completed .tool-status-indicator {
+      background: var(--ok);
+    }
+
     .artifact-card {
       align-self: flex-start;
-      width: min(520px, 92%);
-      display: grid;
-      gap: 8px;
-      padding: 12px;
+      width: min(92%, 680px);
+      padding: 14px;
       border: 1px solid #2b5d95;
       border-radius: 12px;
-      background: #10233c;
+      background: linear-gradient(135deg, #142a47, #102036);
+      display: grid;
+      gap: 9px;
     }
 
     .artifact-card-title {
       font-weight: 700;
       word-break: break-word;
+      color: #fff;
+    }
+
+    .artifact-image-preview {
+      display: block;
+      width: 100%;
+      max-height: 360px;
+      object-fit: contain;
+      border-radius: 8px;
+      background: #0b1422;
     }
 
     .artifact-card-meta {
@@ -335,10 +364,11 @@
       color: #fff;
       background: var(--brand);
       border: 1px solid #4f93ff;
-      border-radius: 8px;
-      padding: 7px 12px;
+      border-radius: 9px;
+      padding: 8px 12px;
       text-decoration: none;
       font-weight: 700;
+      font-size: 13px;
     }
 
     .composer {
@@ -400,8 +430,9 @@
       </div>
 
       <div class="mode-switch" aria-label="Assistant mode">
-        <button id="realtimeModeBtn" class="active" type="button">Realtime</button>
-        <button id="fullPowerModeBtn" type="button">Full Power</button>
+        <button id="realtimeModeBtn" class="active" type="button">Fast Voice</button>
+        <button id="fullPowerVoiceModeBtn" type="button">Full Power Voice</button>
+        <button id="fullPowerModeBtn" type="button">Full Power Text</button>
       </div>
 
       <div class="field">
@@ -487,8 +518,9 @@
       STOPPING: "stopping",
     };
     const MODE = {
-      REALTIME: "realtime",
-      FULL_POWER: "full_power",
+      REALTIME: "fast_voice",
+      FULL_POWER_VOICE: "full_power_voice",
+      FULL_POWER: "full_power_text",
     };
 
     const el = {
@@ -507,6 +539,7 @@
       capabilityStatus: document.getElementById("capabilityStatus"),
       toolSummary: document.getElementById("toolSummary"),
       realtimeModeBtn: document.getElementById("realtimeModeBtn"),
+      fullPowerVoiceModeBtn: document.getElementById("fullPowerVoiceModeBtn"),
       fullPowerModeBtn: document.getElementById("fullPowerModeBtn"),
       modeNote: document.getElementById("modeNote"),
       fullPowerControls: document.getElementById("fullPowerControls"),
@@ -531,11 +564,24 @@
       toolCatalog: null,
       mode: MODE.REALTIME,
       fullPowerSessionId: null,
+      activeSessionId: null,
       fullPowerBusy: false,
       responsesAbortController: null,
       capabilityManifest: null,
       pendingApprovals: {},
+      fullPowerToolRows: new Map(),
       artifactCards: new Map(),
+      realtimeItems: new Map(),
+      responseItems: new Map(),
+      activeAssistantItemId: null,
+      activeResponseId: null,
+      pendingSeedHistory: [],
+      seededSessionIds: new Set(),
+      perfectedInputItems: new Set(),
+      processedRealtimeEventIds: new Set(),
+      persistedRealtimeStates: new Map(),
+      missingRealtimeIds: new Set(),
+      activePlaybackStartSeconds: null,
     };
 
     const savedBase = localStorage.getItem(STORAGE_KEY);
@@ -591,28 +637,43 @@
 
     function setMode(mode) {
       if (!Object.values(MODE).includes(mode) || state.mode === mode) return;
-      if (state.mode === MODE.REALTIME) {
+      if (state.mode !== MODE.FULL_POWER) {
         stopSession({ announce: false });
       } else {
-        stopFullPowerSession({ announce: false });
+        stopFullPowerSession({ announce: false, preserveSession: true });
       }
       state.mode = mode;
       el.realtimeModeBtn.classList.toggle("active", mode === MODE.REALTIME);
+      el.fullPowerVoiceModeBtn.classList.toggle(
+        "active", mode === MODE.FULL_POWER_VOICE
+      );
       el.fullPowerModeBtn.classList.toggle("active", mode === MODE.FULL_POWER);
       el.fullPowerControls.classList.toggle("hidden", mode !== MODE.FULL_POWER);
-      el.startBtn.textContent = mode === MODE.REALTIME
+      el.startBtn.textContent = mode !== MODE.FULL_POWER
         ? "Start Session"
         : "New Conversation";
-      el.stopBtn.textContent = mode === MODE.REALTIME
+      el.stopBtn.textContent = mode !== MODE.FULL_POWER
         ? "End Session"
         : "Close Conversation";
       el.modeNote.textContent = mode === MODE.REALTIME
-        ? "Voice mode requires microphone permission. You can still send text messages once connected."
-        : "Full Power uses PJ's terminal-equivalent Responses runtime: web and file search, MCP, local tools, citations, structured output, and shared history.";
-      setPhase(PHASE.IDLE, mode === MODE.REALTIME ? "Realtime idle" : "Full Power idle");
-      appendBubble("system", mode === MODE.REALTIME
-        ? "Realtime mode selected."
-        : "Full Power mode selected. Start or resume a conversation.");
+        ? "Fast Voice responds immediately through Realtime and stores finalized transcripts."
+        : mode === MODE.FULL_POWER_VOICE
+          ? "Full Power Voice refines each completed transcript before PJ responds and preserves the original wording in shared history."
+          : "Full Power Text uses PJ's terminal-equivalent Responses runtime: web and file search, MCP, local tools, citations, structured output, and shared history.";
+      const idleText = mode === MODE.REALTIME
+        ? "Fast Voice idle"
+        : mode === MODE.FULL_POWER_VOICE
+          ? "Full Power Voice idle"
+          : "Full Power Text idle";
+      setPhase(PHASE.IDLE, idleText);
+      appendBubble(
+        "system",
+        mode === MODE.REALTIME
+          ? "Fast Voice selected."
+          : mode === MODE.FULL_POWER_VOICE
+            ? "Full Power Voice selected."
+            : "Full Power Text selected. Start or resume a conversation.",
+      );
       refreshCurrentCapabilities({ forceRefresh: false });
       if (mode === MODE.FULL_POWER) refreshFullPowerSessions();
     }
@@ -638,6 +699,11 @@
 
     function finalizeAssistantBubble() {
       state.activeAssistantBubble = null;
+    }
+
+    function resetFullPowerRenderState() {
+      state.fullPowerToolRows.clear();
+      state.artifactCards.clear();
     }
 
     function scrollMessagesToBottom() {
@@ -734,6 +800,163 @@
       return parsed;
     }
 
+    async function ensureActiveSession(channel = "realtime") {
+      if (state.activeSessionId) return state.activeSessionId;
+      const parsed = await fetchJson(`${apiBase()}/responses/sessions`, {
+        method: "POST",
+        headers: requestHeaders(createRequestId(), "application/json"),
+        body: JSON.stringify({ title: "", channel }),
+      });
+      const sessionId = parsed.session?.id;
+      if (!sessionId) throw new Error("Session response did not include an ID.");
+      state.activeSessionId = sessionId;
+      state.fullPowerSessionId = sessionId;
+      state.pendingSeedHistory = [];
+      return sessionId;
+    }
+
+    function upsertRealtimeBubble(
+      externalId,
+      role,
+      text,
+      {
+        append = false,
+        status = "streaming",
+        responseId = null,
+        source = null,
+      } = {},
+    ) {
+      if (!externalId) return null;
+      let item = state.realtimeItems.get(externalId);
+      if (!item) {
+        const bubble = appendBubble(role, "");
+        finalizeAssistantBubble();
+        item = {
+          bubble,
+          role,
+          text: "",
+          status,
+          responseId,
+          source,
+        };
+        state.realtimeItems.set(externalId, item);
+      }
+      item.text = append ? `${item.text}${text || ""}` : String(text || "");
+      item.status = status;
+      item.responseId = responseId || item.responseId;
+      item.source = source || item.source;
+      item.bubble.textContent = item.text;
+      item.bubble.dataset.externalId = externalId;
+      item.bubble.dataset.status = status;
+      scrollMessagesToBottom();
+      return item;
+    }
+
+    async function persistRealtimeMessage({
+      externalId,
+      role,
+      content,
+      source,
+      responseId = null,
+      status = "completed",
+      playbackMs = null,
+      metadata = {},
+    }) {
+      if (!state.activeSessionId || !externalId) return;
+      await fetchJson(
+        `${apiBase()}/responses/sessions/${encodeURIComponent(state.activeSessionId)}/realtime-messages`,
+        {
+          method: "POST",
+          headers: requestHeaders(createRequestId(), "application/json"),
+          body: JSON.stringify({
+            external_id: externalId,
+            role,
+            content,
+            source,
+            response_id: responseId,
+            status,
+            playback_ms: playbackMs,
+            metadata,
+          }),
+        },
+      );
+    }
+
+    async function loadSharedSessionHistory(sessionId, { clear = true } = {}) {
+      const parsed = await fetchJson(
+        `${apiBase()}/responses/sessions/${encodeURIComponent(sessionId)}/resume`,
+        {
+          method: "POST",
+          headers: requestHeaders(createRequestId(), "application/json"),
+          body: "{}",
+        },
+      );
+      const session = parsed.session;
+      if (!session?.id) throw new Error("Resume response did not include a session.");
+      state.activeSessionId = session.id;
+      state.fullPowerSessionId = session.id;
+      state.pendingSeedHistory = (session.history || []).slice(-20);
+      if (clear) {
+        el.messages.innerHTML = "";
+        state.realtimeItems.clear();
+        resetFullPowerRenderState();
+        finalizeAssistantBubble();
+      }
+      for (const item of session.history || []) {
+        if (item.external_id) {
+          upsertRealtimeBubble(
+            item.external_id,
+            item.role === "assistant" ? "assistant" : "user",
+            item.content || "",
+            {
+              status: item.status || "completed",
+              responseId: item.response_id || null,
+            },
+          );
+        } else {
+          appendBubble(
+            item.role === "assistant" ? "assistant" : "user",
+            item.content || "",
+          );
+          finalizeAssistantBubble();
+        }
+      }
+      for (const artifact of session.artifacts || []) {
+        renderArtifactCard(artifact);
+      }
+      return session;
+    }
+
+    function seedRealtimeConversation() {
+      if (
+        !state.activeSessionId ||
+        state.seededSessionIds.has(state.activeSessionId) ||
+        !state.dataChannel ||
+        state.dataChannel.readyState !== "open"
+      ) {
+        return;
+      }
+      for (const item of state.pendingSeedHistory) {
+        if (
+          !["user", "assistant"].includes(item.role)
+          || !item.content
+          || (item.status && item.status !== "completed")
+        ) continue;
+        state.dataChannel.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "message",
+            role: item.role,
+            content: [{
+              type: item.role === "assistant" ? "output_text" : "input_text",
+              text: item.content,
+            }],
+          },
+        }));
+      }
+      state.seededSessionIds.add(state.activeSessionId);
+    }
+
     function capabilityNames(manifest) {
       const native = Object.entries(manifest?.native || {})
         .filter(([, value]) => value?.status === "active")
@@ -810,7 +1033,10 @@
     }
 
     function shouldUseEphemeralSignalingFallback(status, detail) {
-      if (status !== 400 && status !== 502) {
+      if (status >= 500 && status <= 599) {
+        return true;
+      }
+      if (status !== 400) {
         return false;
       }
       const lowered = (detail || "").toLowerCase();
@@ -830,7 +1056,12 @@
           "x-pj-client-request-id": requestId,
           "x-pj-contract-version": CONTRACT_VERSION,
         },
-        body: "{}",
+        body: JSON.stringify({
+          session_id: state.activeSessionId,
+          voice_mode: state.mode === MODE.FULL_POWER_VOICE
+            ? "full_power"
+            : "fast",
+        }),
         credentials: "include",
       }, 15000);
 
@@ -878,6 +1109,7 @@
 
     function markSessionLive() {
       setPhase(PHASE.LIVE, "Live");
+      seedRealtimeConversation();
       if (!state.liveAnnounced) {
         appendBubble("system", "Session connected. You can speak or type.");
         state.liveAnnounced = true;
@@ -901,9 +1133,20 @@
 
       try {
         setPhase(PHASE.CONNECTING, "Checking backend...");
-        appendBubble("system", "Starting realtime session...");
+        appendBubble(
+          "system",
+          state.mode === MODE.FULL_POWER_VOICE
+            ? "Starting Full Power Voice session..."
+            : "Starting Fast Voice session...",
+        );
         const health = await checkBackendHealth(apiBase, requestId);
         await refreshCapabilities(apiBase, requestId, { health, forceRefresh: false });
+        const hadSession = Boolean(state.activeSessionId);
+        const sessionId = await ensureActiveSession("realtime");
+        if (hadSession) {
+          await loadSharedSessionHistory(sessionId, { clear: true });
+        }
+        state.seededSessionIds.delete(sessionId);
         if (state.activeStartRequestId !== requestId) return;
 
         setStatus("Requesting microphone...");
@@ -960,7 +1203,13 @@
         }
 
         setStatus("Negotiating realtime session...");
-        const response = await fetchWithTimeout(`${apiBase}/session`, {
+        const voiceMode = state.mode === MODE.FULL_POWER_VOICE
+          ? "full_power"
+          : "fast";
+        const signalingUrl = new URL(`${apiBase}/session`);
+        signalingUrl.searchParams.set("session_id", state.activeSessionId);
+        signalingUrl.searchParams.set("voice_mode", voiceMode);
+        const response = await fetchWithTimeout(signalingUrl.href, {
           method: "POST",
           headers: {
             "Content-Type": "application/sdp",
@@ -1025,6 +1274,7 @@
       state.micStream = null;
       state.pendingCalls = {};
       state.liveAnnounced = false;
+      state.activePlaybackStartSeconds = null;
       finalizeAssistantBubble();
 
       setPhase(PHASE.IDLE, "Idle");
@@ -1033,24 +1283,62 @@
       }
     }
 
-    function sendTextMessage() {
+    async function sendTextMessage() {
       const message = el.textInput.value.trim();
       if (!message || state.phase !== PHASE.LIVE || !state.dataChannel || state.dataChannel.readyState !== "open") {
         return;
       }
 
-      appendBubble("user", message);
+      const externalId = `item_${crypto.randomUUID().replaceAll("-", "")}`;
+      upsertRealtimeBubble(
+        externalId,
+        "user",
+        message,
+        { status: "completed" },
+      );
       el.textInput.value = "";
-
-      state.dataChannel.send(JSON.stringify({
-        type: "conversation.item.create",
-        item: {
-          type: "message",
+      try {
+        let submitted = message;
+        let metadata = {};
+        if (state.mode === MODE.FULL_POWER_VOICE) {
+          setStatus("Refining prompt...", "live");
+          const perfected = await perfectPrompt(
+            message, "full_power_voice"
+          );
+          submitted = perfected.refined_prompt;
+          metadata = {
+            prompt_perfecting_version: perfected.version,
+            refined_prompt: perfected.refined_prompt.slice(0, 4000),
+            refined_prompt_truncated: perfected.refined_prompt.length > 4000,
+            refined_sha256: perfected.refined_sha256,
+            changed: perfected.changed,
+          };
+        }
+        await persistRealtimeMessage({
+          externalId,
           role: "user",
-          content: [{ type: "input_text", text: message }],
-        },
-      }));
-      state.dataChannel.send(JSON.stringify({ type: "response.create" }));
+          content: message,
+          source: "typed",
+          metadata,
+        });
+        state.dataChannel.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            id: externalId,
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: submitted }],
+          },
+        }));
+        state.dataChannel.send(JSON.stringify({ type: "response.create" }));
+        setStatus("Live", "live");
+      } catch (error) {
+        appendBubble(
+          "system",
+          `Message was not submitted: ${shorten(String(error), 260)}`,
+        );
+        setStatus("Live", "live");
+      }
     }
 
     async function refreshFullPowerSessions() {
@@ -1092,6 +1380,10 @@
         try {
           await checkBackendHealth(base, createRequestId());
           await refreshFullPowerCapabilities(base, createRequestId());
+          if (state.activeSessionId) {
+            await resumeFullPowerSession(state.activeSessionId);
+            return;
+          }
           const parsed = await fetchJson(`${base}/responses/sessions`, {
             method: "POST",
             headers: requestHeaders(createRequestId(), "application/json"),
@@ -1099,8 +1391,9 @@
           });
           state.fullPowerSessionId = parsed.session?.id || null;
           if (!state.fullPowerSessionId) throw new Error("Session response did not include an ID.");
+          state.activeSessionId = state.fullPowerSessionId;
           el.messages.innerHTML = "";
-          state.artifactCards.clear();
+          resetFullPowerRenderState();
           finalizeAssistantBubble();
           setPhase(PHASE.LIVE, "Full Power live");
           appendBubble("system", "Full Power conversation started.");
@@ -1113,15 +1406,23 @@
         }
       }
 
-      function stopFullPowerSession({ announce = true } = {}) {
+      function stopFullPowerSession({
+        announce = true,
+        preserveSession = false,
+      } = {}) {
         if (state.responsesAbortController) {
           state.responsesAbortController.abort();
         }
         const hadSession = Boolean(state.fullPowerSessionId);
         state.responsesAbortController = null;
-        state.fullPowerSessionId = null;
+        if (!preserveSession) {
+          state.fullPowerSessionId = null;
+          state.activeSessionId = null;
+          state.pendingSeedHistory = [];
+        }
         state.fullPowerBusy = false;
         state.pendingApprovals = {};
+        resetFullPowerRenderState();
         finalizeAssistantBubble();
         setPhase(PHASE.IDLE, "Full Power idle");
         el.sessionSelect.value = "";
@@ -1130,7 +1431,7 @@
 
       async function resumeFullPowerSession(sessionId) {
         if (!sessionId) return;
-        stopFullPowerSession({ announce: false });
+        stopFullPowerSession({ announce: false, preserveSession: true });
         setPhase(PHASE.CONNECTING, "Resuming conversation...");
         try {
           const parsed = await fetchJson(
@@ -1144,8 +1445,10 @@
           const session = parsed.session;
           if (!session?.id) throw new Error("Resume response did not include a session.");
           state.fullPowerSessionId = session.id;
+          state.activeSessionId = session.id;
+          state.pendingSeedHistory = (session.history || []).slice(-20);
           el.messages.innerHTML = "";
-          state.artifactCards.clear();
+          resetFullPowerRenderState();
           finalizeAssistantBubble();
           for (const item of session.history || []) {
             appendBubble(item.role === "assistant" ? "assistant" : "user", item.content || "");
@@ -1187,7 +1490,6 @@
 
       function renderFullPowerApproval(event) {
         if (!event.approval_id || state.pendingApprovals[event.approval_id]) return;
-        state.pendingApprovals[event.approval_id] = true;
         const target = event.server_label || event.name || "tool";
         const argumentsText = shorten(JSON.stringify(event.arguments || {}), 700);
         const bubble = appendBubble(
@@ -1202,7 +1504,16 @@
         const rejectButton = document.createElement("button");
         rejectButton.type = "button";
         rejectButton.textContent = "Reject";
+        const approvalState = {
+          approveButton,
+          rejectButton,
+          decision: typeof event.execution_decision === "boolean"
+            ? event.execution_decision
+            : null,
+        };
+        state.pendingApprovals[event.approval_id] = approvalState;
         const decide = async (approve) => {
+          approvalState.decision = approve;
           approveButton.disabled = true;
           rejectButton.disabled = true;
           await resolveFullPowerApproval(event.approval_id, approve);
@@ -1212,11 +1523,46 @@
         controls.appendChild(approveButton);
         controls.appendChild(rejectButton);
         bubble.appendChild(controls);
+        if (approvalState.decision !== null) {
+          approveButton.disabled = !approvalState.decision;
+          rejectButton.disabled = approvalState.decision;
+        }
+      }
+
+      function fullPowerToolKey(event) {
+        return String(
+          event.call_id ||
+          `${event.tool_type || "tool"}:${event.name || "unnamed"}`,
+        );
+      }
+
+      function renderFullPowerTool(event, completed) {
+        const key = fullPowerToolKey(event);
+        const tool = event.name || event.tool_type || "tool";
+        let row = state.fullPowerToolRows.get(key);
+        if (!row) {
+          row = document.createElement("div");
+          row.className = "bubble system tool-status";
+          const indicator = document.createElement("span");
+          indicator.className = "tool-status-indicator";
+          const label = document.createElement("span");
+          label.className = "tool-status-label";
+          row.append(indicator, label);
+          el.messages.appendChild(row);
+          state.fullPowerToolRows.set(key, row);
+        }
+        row.classList.toggle("completed", completed);
+        const label = row.querySelector(".tool-status-label");
+        const result = event.result ?? event.output ?? event.status;
+        label.textContent = completed
+          ? `${tool} completed${result === undefined ? "" : `: ${shorten(JSON.stringify(result), 500)}`}`
+          : `${tool} running...`;
+        scrollMessagesToBottom();
       }
 
       function formatArtifactBytes(value) {
         const bytes = Number(value);
-        if (!Number.isFinite(bytes) || bytes < 0) return "unknown size";
+        if (!Number.isFinite(bytes) || bytes < 0) return "size unavailable";
         if (bytes < 1024) return `${bytes} B`;
         if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
         return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -1253,29 +1599,58 @@
         const link = card.querySelector(".artifact-download");
         link.href = downloadUrl.href;
         link.download = artifact.filename;
-        el.messages.scrollTop = el.messages.scrollHeight;
+        let preview = card.querySelector(".artifact-image-preview");
+        if (String(artifact.mime_type || "").startsWith("image/")) {
+          if (!preview) {
+            preview = document.createElement("img");
+            preview.className = "artifact-image-preview";
+            preview.loading = "lazy";
+            card.prepend(preview);
+          }
+          preview.alt = artifact.filename;
+          preview.src = downloadUrl.href;
+        } else {
+          preview?.remove();
+        }
+        scrollMessagesToBottom();
       }
 
       function renderFullPowerEvent(event) {
         if (event.type === "text.delta") {
           appendBubble("assistant", event.delta || "", true);
         } else if (event.type === "tool.call") {
-          const tool = event.name || event.tool_type || "tool";
-          appendBubble("system", `Running ${tool}...`);
+          renderFullPowerTool(event, false);
         } else if (event.type === "tool.result") {
-          const tool = event.name || event.tool_type || "tool";
-          const result = event.result ?? event.output ?? event.status ?? "completed";
-          appendBubble("system", `${tool} -> ${shorten(JSON.stringify(result), 700)}`);
+          renderFullPowerTool(event, true);
         } else if (event.type === "artifact.ready") {
           renderArtifactCard(event);
+        } else if (event.type === "deliverable.incomplete") {
+          appendBubble(
+            "system",
+            `Requested ${String(event.requested_format || "file").toUpperCase()} deliverable is incomplete.`,
+          );
         } else if (event.type === "citation") {
           const citation = event.citation || {};
           appendBubble("system", `Citation: ${citation.title || citation.filename || "source"}${citation.url ? ` — ${citation.url}` : ""}`);
         } else if (event.type === "source") {
           const source = event.source || {};
           appendBubble("system", `Source: ${source.filename || source.query || source.url || source.type || "retrieved evidence"}${source.text ? `\n${shorten(source.text, 500)}` : ""}`);
+        } else if (event.type === "prompt.perfected") {
+          appendBubble(
+            "system",
+            event.changed
+              ? "Prompt refined for Full Power while preserving the original chat message."
+              : "Prompt was already clear; original wording was retained.",
+          );
         } else if (event.type === "approval.required") {
           renderFullPowerApproval(event);
+        } else if (event.type === "approval.executing") {
+          const approval = state.pendingApprovals[event.approval_id];
+          if (approval) approval.decision = event.approved;
+          appendBubble(
+            "system",
+            `${event.name || "Tool"} ${event.approved ? "approved" : "rejected"}; saving continuation state.`,
+          );
         } else if (event.type === "approval.resolved") {
           delete state.pendingApprovals[event.approval_id];
           appendBubble(
@@ -1350,6 +1725,20 @@
         await consumeFullPowerStream(response);
       }
 
+      async function perfectPrompt(prompt, surface) {
+        const parsed = await fetchJson(`${apiBase()}/responses/prompt-perfect`, {
+          method: "POST",
+          credentials: "include",
+          headers: requestHeaders(createRequestId(), "application/json"),
+          body: JSON.stringify({ prompt, surface }),
+        });
+        const refined = parsed.prompt?.refined_prompt;
+        if (typeof refined !== "string" || !refined.trim()) {
+          throw new Error("Prompt perfecting did not return refined text.");
+        }
+        return parsed.prompt;
+      }
+
       async function resolveFullPowerApproval(approvalId, approve) {
         if (!state.fullPowerSessionId || state.fullPowerBusy) return;
         const controller = new AbortController();
@@ -1377,6 +1766,11 @@
           }
           setStatus("Full Power live", "live");
         } finally {
+          const approval = state.pendingApprovals[approvalId];
+          if (approval) {
+            approval.approveButton.disabled = approval.decision === false;
+            approval.rejectButton.disabled = approval.decision === true;
+          }
           state.fullPowerBusy = false;
           state.responsesAbortController = null;
           if (state.phase === PHASE.LIVE) el.sendBtn.disabled = false;
@@ -1429,23 +1823,301 @@
         return state.mode === MODE.FULL_POWER ? sendFullPowerMessage() : sendTextMessage();
       }
 
+    function realtimeItemId(event, prefix) {
+      return (
+        event.item_id ||
+        event.item?.id ||
+        (
+          event.response_id
+            ? `${prefix}_${event.response_id}_${event.output_index || 0}`
+            : null
+        )
+      );
+    }
+
+    function requireRealtimeItemId(event, prefix) {
+      const externalId = realtimeItemId(event, prefix);
+      if (externalId) return externalId;
+      if (!state.missingRealtimeIds.has(event.type)) {
+        state.missingRealtimeIds.add(event.type);
+        appendBubble(
+          "system",
+          `Realtime event ${event.type || "unknown"} omitted its item identifier.`,
+        );
+      }
+      return null;
+    }
+
+    async function handleCompletedAudioTranscript(event) {
+      const externalId = requireRealtimeItemId(event, "input");
+      if (!externalId) return;
+      if (state.perfectedInputItems.has(externalId)) return;
+      state.perfectedInputItems.add(externalId);
+      const transcript = String(event.transcript || "").trim();
+      if (!transcript) {
+        state.perfectedInputItems.delete(externalId);
+        appendBubble(
+          "system",
+          "Audio transcription was unavailable, so no response was requested.",
+        );
+        return;
+      }
+      upsertRealtimeBubble(
+        externalId,
+        "user",
+        transcript,
+        { status: "completed" },
+      );
+      let metadata = {};
+      try {
+        if (state.mode === MODE.FULL_POWER_VOICE) {
+          setStatus("Refining transcript...", "live");
+          const perfected = await perfectPrompt(
+            transcript, "full_power_voice"
+          );
+          metadata = {
+            prompt_perfecting_version: perfected.version,
+            refined_prompt: perfected.refined_prompt.slice(0, 4000),
+            refined_prompt_truncated: perfected.refined_prompt.length > 4000,
+            refined_sha256: perfected.refined_sha256,
+            changed: perfected.changed,
+          };
+          await persistRealtimeMessage({
+            externalId,
+            role: "user",
+            content: transcript,
+            source: "input_audio",
+            metadata,
+          });
+          if (!state.dataChannel || state.dataChannel.readyState !== "open") {
+            throw new Error("Realtime channel closed before transcript replacement.");
+          }
+          state.dataChannel.send(JSON.stringify({
+            type: "conversation.item.delete",
+            item_id: externalId,
+          }));
+          state.dataChannel.send(JSON.stringify({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: "user",
+              content: [{
+                type: "input_text",
+                text: perfected.refined_prompt,
+              }],
+            },
+          }));
+          state.dataChannel.send(JSON.stringify({ type: "response.create" }));
+          setStatus("Live", "live");
+          return;
+        }
+        await persistRealtimeMessage({
+          externalId,
+          role: "user",
+          content: transcript,
+          source: "input_audio",
+        });
+      } catch (error) {
+        state.perfectedInputItems.delete(externalId);
+        appendBubble(
+          "system",
+          `Transcript was preserved but PJ did not respond: ${shorten(String(error), 280)}`,
+        );
+        setStatus("Live", "live");
+      }
+    }
+
+    function persistAssistantRealtimeItem(item, status, playbackMs = null) {
+      if (!item || !item.text) return;
+      const signature = JSON.stringify([
+        status,
+        playbackMs,
+        item.responseId || null,
+        item.text,
+      ]);
+      if (state.persistedRealtimeStates.get(item.externalId) === signature) return;
+      state.persistedRealtimeStates.set(item.externalId, signature);
+      persistRealtimeMessage({
+        externalId: item.externalId,
+        role: "assistant",
+        content: item.text,
+        source: item.source || "output_audio",
+        responseId: item.responseId,
+        status,
+        playbackMs,
+      }).catch((error) => {
+        if (state.persistedRealtimeStates.get(item.externalId) === signature) {
+          state.persistedRealtimeStates.delete(item.externalId);
+        }
+        appendBubble(
+          "system",
+          `Transcript persistence failed: ${shorten(String(error), 220)}`,
+        );
+      });
+    }
+
     function handleRealtimeEvent(event, apiBase) {
+      const realtimeEventId =
+        typeof event?.event_id === "string" ? event.event_id : "";
+      if (realtimeEventId) {
+        if (state.processedRealtimeEventIds.has(realtimeEventId)) return;
+        state.processedRealtimeEventIds.add(realtimeEventId);
+        if (state.processedRealtimeEventIds.size > 2000) {
+          const oldest = state.processedRealtimeEventIds.values().next().value;
+          state.processedRealtimeEventIds.delete(oldest);
+        }
+      }
       if (event.type === "error") {
         appendBubble("system", `Realtime error: ${event.error?.message || "Unknown error"}`);
         return;
       }
 
+      if (event.type === "response.created") {
+        state.activeResponseId = event.response?.id || event.response_id || null;
+        state.activePlaybackStartSeconds = Number(el.pjAudio.currentTime || 0);
+        el.pjAudio.play().catch(() => {});
+        return;
+      }
+
+      if (event.type === "input_audio_buffer.speech_started") {
+        const item = state.realtimeItems.get(state.activeAssistantItemId);
+        if (
+          item &&
+          state.dataChannel &&
+          state.dataChannel.readyState === "open"
+        ) {
+          const playbackStart = Number(
+            state.activePlaybackStartSeconds
+            ?? el.pjAudio.currentTime
+            ?? 0,
+          );
+          const playbackMs = Math.max(
+            0,
+            Math.floor(
+              (Number(el.pjAudio.currentTime || 0) - playbackStart) * 1000,
+            ),
+          );
+          el.pjAudio.pause();
+          state.dataChannel.send(JSON.stringify({
+            type: "conversation.item.truncate",
+            item_id: state.activeAssistantItemId,
+            content_index: 0,
+            audio_end_ms: playbackMs,
+          }));
+          state.dataChannel.send(JSON.stringify({ type: "response.cancel" }));
+          item.status = "interrupted";
+          item.playbackMs = playbackMs;
+          item.bubble.dataset.status = "interrupted";
+          persistAssistantRealtimeItem(item, "interrupted", playbackMs);
+        }
+        finalizeAssistantBubble();
+        return;
+      }
+
+      if (
+        event.type ===
+        "conversation.item.input_audio_transcription.delta"
+      ) {
+        const externalId = requireRealtimeItemId(event, "input");
+        if (!externalId) return;
+        upsertRealtimeBubble(
+          externalId,
+          "user",
+          event.delta || "",
+          { append: true, status: "streaming" },
+        );
+        return;
+      }
+
       if (event.type === "conversation.item.input_audio_transcription.completed") {
-        appendBubble("user", event.transcript || "(audio transcription unavailable)");
+        handleCompletedAudioTranscript(event);
         return;
       }
 
-      if (event.type === "response.output_text.delta") {
-        appendBubble("assistant", event.delta || "", true);
+      if (
+        event.type === "response.output_text.delta" ||
+        event.type === "response.output_audio_transcript.delta"
+      ) {
+        const externalId = requireRealtimeItemId(event, "output");
+        if (!externalId) return;
+        const item = upsertRealtimeBubble(
+          externalId,
+          "assistant",
+          event.delta || "",
+          {
+            append: true,
+            status: "streaming",
+            responseId: event.response_id || state.activeResponseId,
+            source: event.type.includes("output_audio")
+              ? "output_audio"
+              : "output_text",
+          },
+        );
+        item.externalId = externalId;
+        state.activeAssistantItemId = externalId;
+        if (item.responseId) {
+          state.responseItems.set(item.responseId, externalId);
+        }
         return;
       }
 
-      if (event.type === "response.output_text.done" || event.type === "response.done") {
+      if (
+        event.type === "response.output_text.done" ||
+        event.type === "response.output_audio_transcript.done"
+      ) {
+        const externalId = requireRealtimeItemId(event, "output");
+        if (!externalId) return;
+        const finalText = event.transcript ?? event.text;
+        const item = upsertRealtimeBubble(
+          externalId,
+          "assistant",
+          finalText ?? state.realtimeItems.get(externalId)?.text ?? "",
+          {
+            status: "awaiting_response_status",
+            responseId: event.response_id || state.activeResponseId,
+            source: event.type.includes("output_audio")
+              ? "output_audio"
+              : "output_text",
+          },
+        );
+        item.externalId = externalId;
+        state.activeAssistantItemId = externalId;
+        finalizeAssistantBubble();
+        return;
+      }
+
+      if (event.type === "response.done") {
+        const response = event.response || {};
+        const status = response.status === "completed"
+          ? "completed"
+          : response.status === "cancelled"
+            ? "interrupted"
+            : "failed";
+        const outputIds = (response.output || [])
+          .map((item) => item?.id)
+          .filter(Boolean);
+        if (!outputIds.length && state.activeAssistantItemId) {
+          outputIds.push(state.activeAssistantItemId);
+        }
+        for (const externalId of outputIds) {
+          const item = state.realtimeItems.get(externalId);
+          if (!item) continue;
+          const finalStatus = item.status === "interrupted"
+            ? "interrupted"
+            : status;
+          item.status = finalStatus;
+          item.bubble.dataset.status = finalStatus;
+          persistAssistantRealtimeItem(
+            { ...item, externalId },
+            finalStatus,
+            finalStatus === "interrupted"
+              ? item.playbackMs ?? 0
+              : null,
+          );
+        }
+        state.activeAssistantItemId = null;
+        state.activeResponseId = null;
+        state.activePlaybackStartSeconds = null;
         finalizeAssistantBubble();
         return;
       }
@@ -1459,7 +2131,12 @@
         call.args += event.delta || "";
         if (!call.started) {
           call.started = true;
-          appendBubble("system", `Running tool: ${event.name || call.name}(...)`);
+          renderFullPowerTool({
+            type: "tool.call",
+            call_id: event.call_id,
+            name: event.name || call.name,
+            tool_type: "function_call",
+          }, false);
         }
         return;
       }
@@ -1504,7 +2181,11 @@
             "x-pj-client-request-id": requestId,
             "x-pj-contract-version": CONTRACT_VERSION,
           },
-          body: JSON.stringify({ name, arguments: args }),
+          body: JSON.stringify({
+            name,
+            arguments: args,
+            session_id: state.fullPowerSessionId || undefined,
+          }),
         }, name === "delegate_advanced_task" ? 290000 : 90000);
         const raw = await resp.text();
         if (!resp.ok) {
@@ -1519,14 +2200,20 @@
         output = JSON.stringify({ error: String(error) });
       }
 
-      appendBubble("system", `${name} -> ${shorten(output, 700)}`);
+      let parsedOutput = output;
       try {
-        const parsedOutput = JSON.parse(output);
-        if (parsedOutput?.artifact) {
-          renderArtifactCard(parsedOutput.artifact);
-        }
+        parsedOutput = JSON.parse(output);
       } catch (_) {
-        // Non-JSON tool output is still returned to the Realtime conversation.
+        // Keep non-JSON tool output as text.
+      }
+      renderFullPowerTool({
+        type: "tool.result",
+        call_id: callId,
+        name,
+        result: parsedOutput,
+      }, true);
+      if (parsedOutput?.artifact) {
+        renderArtifactCard(parsedOutput.artifact);
       }
 
       if (state.dataChannel && state.dataChannel.readyState === "open") {
@@ -1552,7 +2239,7 @@
 
     function clearTranscript() {
       el.messages.innerHTML = "";
-      state.artifactCards.clear();
+      resetFullPowerRenderState();
       finalizeAssistantBubble();
     }
 
@@ -1575,6 +2262,10 @@
       }
     });
     el.realtimeModeBtn.addEventListener("click", () => setMode(MODE.REALTIME));
+    el.fullPowerVoiceModeBtn.addEventListener(
+      "click",
+      () => setMode(MODE.FULL_POWER_VOICE),
+    );
     el.fullPowerModeBtn.addEventListener("click", () => setMode(MODE.FULL_POWER));
     el.refreshSessionsBtn.addEventListener("click", refreshFullPowerSessions);
     el.sessionSelect.addEventListener("change", () => {

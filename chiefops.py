@@ -20,8 +20,10 @@ business state lives in pj_data.sqlite3. macOS integration uses
 AppleScript with timeouts; failures degrade to structured errors.
 """
 import json
+import re
 import sqlite3
 import subprocess
+import urllib.parse
 import urllib.request
 import uuid
 from contextlib import contextmanager
@@ -521,9 +523,61 @@ def log_risk(risk: str, severity: str = "medium", mitigation: str = "",
 
 
 # ------------------------------------------- digital property (§18)
+def _sanitized_url(url: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(str(url or ""))
+    except ValueError:
+        return ""
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return ""
+    host = parsed.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    if port:
+        host = f"{host}:{port}"
+    return urllib.parse.urlunsplit(
+        (parsed.scheme, host, parsed.path or "/", "", "")
+    )
+
+
+def _sanitized_web_error(exc) -> str:
+    message = " ".join(str(exc).split())
+
+    def replace(match):
+        return _sanitized_url(match.group(0).rstrip(".,);")) or "[redacted URL]"
+
+    return re.sub(r"https?://[^\s]+", replace, message)[:300]
+
+
+def _is_access_interstitial(final_url: str, body: str = "") -> bool:
+    try:
+        parsed = urllib.parse.urlsplit(final_url)
+    except ValueError:
+        return False
+    path = parsed.path.casefold()
+    host = (parsed.hostname or "").casefold()
+    body_prefix = body[:20000].casefold()
+    return (
+        (
+            host.endswith(".cloudflareaccess.com")
+            and "/cdn-cgi/access/" in path
+        )
+        or "/cdn-cgi/challenge-platform/" in path
+        or (
+            "cloudflare access" in body_prefix
+            and ("send login code" in body_prefix or "sign in" in body_prefix)
+        )
+    )
+
+
 def fetch_url(url: str, max_chars: int = 4000) -> dict:
     """Fetch a web page and return its visible text (tags stripped)."""
-    if not url.startswith(("http://", "https://")):
+    safe_url = _sanitized_url(url)
+    if not safe_url:
         return {"error": "url must start with http(s)://"}
     import re as _re
     try:
@@ -531,20 +585,39 @@ def fetch_url(url: str, max_chars: int = 4000) -> dict:
         with urllib.request.urlopen(req, timeout=20) as resp:
             raw = resp.read(1_500_000).decode("utf-8", "replace")
             status = resp.status
+            final_url = resp.geturl()
     except Exception as exc:
-        return {"error": str(exc)[:300], "url": url}
+        return {"error": _sanitized_web_error(exc), "url": safe_url}
     text = _re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", raw,
                    flags=_re.S | _re.I)
     text = _re.sub(r"<[^>]+>", " ", text)
     text = _re.sub(r"\s+", " ", text).strip()
-    return {"url": url, "http_status": status,
-            "text": text[:max(500, min(int(max_chars), 12000))]}
+    access_required = _is_access_interstitial(final_url, raw)
+    return {
+        "url": safe_url,
+        "final_url": _sanitized_url(final_url),
+        "http_status": status,
+        "transport_reachable": True,
+        "access_login_required": access_required,
+        "application_content_verified": not access_required,
+        "text": text[:max(500, min(int(max_chars), 12000))],
+    }
 
 
 def check_website(url: str) -> dict:
-    """Health-check a website: HTTP status, latency, and redirect target."""
+    """Separate transport reachability, Access gating, and application health."""
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
+    safe_url = _sanitized_url(url)
+    if not safe_url:
+        return {
+            "url": "",
+            "up": False,
+            "transport_reachable": False,
+            "application_healthy": False,
+            "status": "invalid_url",
+            "error": "url must be a valid HTTP(S) URL",
+        }
     import time as _t
     start = _t.monotonic()
     try:
@@ -552,11 +625,44 @@ def check_website(url: str) -> dict:
                                      headers={"User-Agent": "PJ/1.0"})
         with urllib.request.urlopen(req, timeout=15) as resp:
             latency = int((_t.monotonic() - start) * 1000)
-            return {"url": url, "up": True, "http_status": resp.status,
-                    "latency_ms": latency, "final_url": resp.url}
+            raw = resp.read(100_000).decode("utf-8", "replace")
+            final_url = resp.geturl()
+            access_required = _is_access_interstitial(final_url, raw)
+            application_healthy = (
+                200 <= int(resp.status) < 400 and not access_required
+            )
+            return {
+                "url": safe_url,
+                "up": application_healthy,
+                "transport_reachable": True,
+                "application_healthy": application_healthy,
+                "access_login_required": access_required,
+                "status": (
+                    "access_login_required"
+                    if access_required
+                    else ("healthy" if application_healthy else "http_error")
+                ),
+                "http_status": resp.status,
+                "latency_ms": latency,
+                "final_url": _sanitized_url(final_url),
+                "redirected": safe_url != _sanitized_url(final_url),
+            }
     except Exception as exc:
-        return {"url": url, "up": False, "error": str(exc)[:300],
-                "latency_ms": int((_t.monotonic() - start) * 1000)}
+        status = getattr(exc, "code", None)
+        transport_reachable = isinstance(status, int)
+        final_url = _sanitized_url(getattr(exc, "url", "") or url)
+        return {
+            "url": safe_url,
+            "up": False,
+            "transport_reachable": transport_reachable,
+            "application_healthy": False,
+            "access_login_required": _is_access_interstitial(final_url),
+            "status": "http_error" if transport_reachable else "transport_error",
+            "http_status": status,
+            "final_url": final_url,
+            "error": _sanitized_web_error(exc),
+            "latency_ms": int((_t.monotonic() - start) * 1000),
+        }
 
 
 # ------------------------------------------- proactive cadence (§24)
@@ -692,10 +798,12 @@ CHIEFOPS_SCHEMAS = [
          "severity": {**_S, "enum": ["low", "medium", "high", "critical"]},
          "mitigation": _S, "project_id": _S}, ["risk"]),
     _fn("fetch_url",
-        "Fetch a web page and return its visible text (for research and digital-property checks).",
+        "Fetch visible page text with sanitized URLs. Treat "
+        "access_login_required=true as gated content, not verified application content.",
         {"url": _S, "max_chars": _I}, ["url"]),
     _fn("check_website",
-        "Health-check a website: up/down, HTTP status, latency, redirect target.",
+        "Distinguish network reachability, application health, and Cloudflare "
+        "Access login requirements. A login-page HTTP 200 is not healthy-app proof.",
         {"url": _S}, ["url"]),
     _fn("daily_brief",
         "Generate the executive daily brief: tasks, commitments (overdue first), "

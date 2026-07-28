@@ -24,6 +24,12 @@ REALTIME_EXCLUDED_TOOL_NAMES = {
     "run_codeops_validation",
     "run_shortcut",
     "sync_vector_store",
+    "generate_image_asset",
+    "edit_image_asset",
+    "create_image_variation",
+    "create_controlled_image",
+    "register_vector_image",
+    "delete_image_asset",
 }
 
 
@@ -39,7 +45,9 @@ def realtime_tool_schemas():
     ] + [ADVANCED_DELEGATION_TOOL]
 
 
-def realtime_session_config(extra_instructions=""):
+def realtime_session_config(extra_instructions="", *, voice_mode="fast"):
+    if voice_mode not in {"fast", "full_power"}:
+        raise ValueError("voice_mode must be fast or full_power")
     _, instructions = load_pj_instructions()
     return {
         "type": "realtime",
@@ -51,6 +59,8 @@ def realtime_session_config(extra_instructions=""):
                 "turn_detection": {
                     "type": "server_vad",  # server-side voice activity detection
                     "silence_duration_ms": 500,
+                    "create_response": voice_mode == "fast",
+                    "interrupt_response": True,
                 },
             },
             "output": {"voice": VOICE},

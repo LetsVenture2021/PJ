@@ -18,10 +18,11 @@ adapted from production document-pipeline practice:
                draft_document(finalize=True) produces a sealed FINAL in
                one pass when content is complete (same marker gate).
   PUBLISH    — export_document renders an audience-ready deliverable
-               (styled HTML/PDF, DOCX/RTF, PowerPoint, or Excel) with
-               clean typography and no internal metadata banner.
-               Non-final versions are marked DRAFT; finals render clean
-               with discreet integrity metadata.
+               (governed Markdown source, styled HTML/PDF, DOCX/RTF,
+               native PowerPoint, or Excel) with clean typography and no
+               internal metadata banner. Non-final versions are
+               watermarked DRAFT; finals render clean with discreet
+               integrity metadata.
   AUDIT      — registry + full version history in SQLite; files are
                never edited in place — revisions create new versions
                that supersede the old.
@@ -46,6 +47,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import fcntl
+import presentationops
 
 try:
     import markdown as _markdown
@@ -97,6 +99,11 @@ _SEED_TEMPLATES = {
                      "Next Period Plan"],
         "optional_sections": ["Notes"],
     },
+    "slide_presentation": {
+        "description": "Native presentation governed by a structured slide specification",
+        "sections": ["Presentation"],
+        "optional_sections": [],
+    },
 }
 
 
@@ -104,7 +111,7 @@ def _normalize_alias_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (value or "").lower()).strip("-")
 
 
-def _hash_file(path: Path) -> str:
+def _hash_file_path(path: Path) -> str:
     digest = hashlib.sha256()
     with Path(path).open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -130,6 +137,71 @@ def _atomic_copy(source: Path, destination: Path):
         temporary.replace(destination)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _ensure_immutable_artifacts(conn):
+    conn.execute("""CREATE TABLE IF NOT EXISTS docops_artifacts (
+        artifact_id TEXT PRIMARY KEY,
+        doc_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        format TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        path TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        byte_size INTEGER NOT NULL,
+        sha256 TEXT NOT NULL,
+        status TEXT NOT NULL,
+        audience_ready INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    )""")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_docops_artifacts_document "
+        "ON docops_artifacts(doc_id, version, format, created_at)"
+    )
+    legacy_rows = conn.execute(
+        "SELECT artifact_id, doc_id, version, format, filename, path, "
+        "mime_type, byte_size, sha256, status, audience_ready, created_at "
+        "FROM docops_exports WHERE artifact_id NOT IN "
+        "(SELECT artifact_id FROM docops_artifacts)"
+    ).fetchall()
+    export_root = EXPORTS_DIR.resolve()
+    for row in legacy_rows:
+        source = Path(row[5])
+        target = EXPORTS_DIR / ".artifacts" / row[0] / row[4]
+        try:
+            resolved = source.resolve(strict=True)
+            resolved.relative_to(export_root)
+            if (
+                source.is_symlink()
+                or not resolved.is_file()
+                or resolved.stat().st_size != row[7]
+                or _hash_file_path(resolved) != row[8]
+            ):
+                raise ValueError("legacy artifact integrity mismatch")
+            if (
+                not target.exists()
+                or target.stat().st_size != row[7]
+                or _hash_file_path(target) != row[8]
+            ):
+                _atomic_copy(resolved, target)
+            migrated = target.resolve(strict=True)
+            migrated.relative_to(export_root)
+            if (
+                target.is_symlink()
+                or not migrated.is_file()
+                or migrated.stat().st_size != row[7]
+                or _hash_file_path(migrated) != row[8]
+            ):
+                raise ValueError("legacy artifact migration verification failed")
+        except (OSError, ValueError):
+            continue
+        conn.execute(
+            "INSERT OR IGNORE INTO docops_artifacts "
+            "(artifact_id, doc_id, version, format, filename, path, mime_type, "
+            "byte_size, sha256, status, audience_ready, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (*row[:5], str(migrated), *row[6:]),
+        )
 
 
 @contextmanager
@@ -169,7 +241,18 @@ def _db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )""")
-        conn.execute("""CREATE TABLE IF NOT EXISTS docops_artifacts (
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_presentation_specs (
+            doc_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            schema_version TEXT NOT NULL,
+            spec_json TEXT NOT NULL,
+            spec_sha256 TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (doc_id, version),
+            FOREIGN KEY (doc_id, version)
+                REFERENCES docops_documents(doc_id, version)
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_exports (
             artifact_id TEXT PRIMARY KEY,
             doc_id TEXT NOT NULL,
             version INTEGER NOT NULL,
@@ -179,14 +262,15 @@ def _db():
             mime_type TEXT NOT NULL,
             byte_size INTEGER NOT NULL,
             sha256 TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'ready',
+            status TEXT NOT NULL,
             audience_ready INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (doc_id, version, format),
+            FOREIGN KEY (doc_id, version)
+                REFERENCES docops_documents(doc_id, version)
         )""")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_docops_artifacts_document "
-            "ON docops_artifacts(doc_id, version, format, created_at)"
-        )
+        _ensure_immutable_artifacts(conn)
         # Seed starter templates once.
         have = {r[0] for r in conn.execute(
             "SELECT name FROM docops_templates").fetchall()}
@@ -597,25 +681,81 @@ def create_doc_template(name: str, description: str, sections_json: str,
             "required_sections": sections, "optional_sections": optional}
 
 
-def list_doc_templates() -> dict:
-    """List available document templates with their required sections."""
+def list_doc_templates(query: str = "", limit: int = 50,
+                       summary_only: bool = False) -> dict:
+    """List or summarize templates without flooding tool context."""
+    query = str(query or "").strip()
+    limit = max(1, min(int(limit or 50), 100))
+    like = f"%{query}%"
     with _db() as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM docops_templates"
+        ).fetchone()[0]
+        matched = conn.execute(
+            "SELECT COUNT(*) FROM docops_templates "
+            "WHERE name LIKE ? OR description LIKE ?",
+            (like, like),
+        ).fetchone()[0]
+        if summary_only:
+            return {
+                "count": total,
+                "matched_count": matched,
+                "query": query or None,
+                "templates": [],
+            }
         rows = conn.execute(
             "SELECT name, version, description, sections, optional_sections "
-            "FROM docops_templates ORDER BY name").fetchall()
+            "FROM docops_templates "
+            "WHERE name LIKE ? OR description LIKE ? "
+            "ORDER BY name LIMIT ?",
+            (like, like, limit),
+        ).fetchall()
         alias_rows = conn.execute(
             "SELECT template_name, alias_raw FROM docops_template_aliases "
-            "ORDER BY template_name, alias_raw"
+            "WHERE template_name IN ("
+            "SELECT name FROM docops_templates "
+            "WHERE name LIKE ? OR description LIKE ? ORDER BY name LIMIT ?"
+            ") ORDER BY template_name, alias_raw",
+            (like, like, limit),
         ).fetchall()
     alias_map = {}
     for template_name, alias_raw in alias_rows:
         alias_map.setdefault(template_name, []).append(alias_raw)
-    return {"count": len(rows), "templates": [
+    return {"count": total, "matched_count": matched,
+            "returned_count": len(rows), "query": query or None,
+            "templates": [
         {"name": r[0], "version": r[1], "description": r[2],
          "required_sections": json.loads(r[3]),
          "optional_sections": json.loads(r[4]),
          "aliases": alias_map.get(r[0], [])}
         for r in rows]}
+
+
+def docops_inventory_summary() -> dict:
+    """Return bounded aggregate counts for evidence snapshots."""
+    with _db() as conn:
+        template_count = conn.execute(
+           "SELECT COUNT(*) FROM docops_templates"
+        ).fetchone()[0]
+        alias_count = conn.execute(
+           "SELECT COUNT(*) FROM docops_template_aliases"
+        ).fetchone()[0]
+        document_count = conn.execute(
+           "SELECT COUNT(DISTINCT doc_id) FROM docops_documents"
+        ).fetchone()[0]
+        presentation_count = conn.execute(
+           "SELECT COUNT(DISTINCT doc_id) FROM docops_presentation_specs"
+        ).fetchone()[0]
+        artifact_count = conn.execute(
+           "SELECT COUNT(*) FROM docops_artifacts WHERE status='ready'"
+        ).fetchone()[0]
+    return {
+        "templates": template_count,
+        "aliases": alias_count,
+        "documents": document_count,
+        "presentations": presentation_count,
+        "ready_artifacts": artifact_count,
+    }
 
 
 def import_doc_templates_from_knowledge_pack_text(
@@ -983,10 +1123,216 @@ def revise_document(doc_id: str, sections_json: str,
         conn.execute(
             "UPDATE docops_documents SET status='superseded' "
             "WHERE doc_id=? AND version=?", (doc_id, version))
-        result = _write_version(conn, doc_id, version + 1, title, template,
-                                tpl_version, current, tags,
-                                change_note or "revision")
+        result = _write_version(
+            conn,
+            doc_id,
+            version + 1,
+            title,
+            template,
+            tpl_version,
+            current,
+            tags,
+            change_note or "revision",
+        )
     return _attach_source_artifact(result)
+
+
+def _presentation_spec(title: str, audience: str, slides_json: str,
+                       subtitle: str = "", fallback_spec: dict | None = None) -> dict:
+    try:
+        parsed = json.loads(slides_json)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise presentationops.PresentationValidationError(
+            f"slides_json must be valid JSON: {exc}"
+        ) from exc
+    if isinstance(parsed, list):
+        raw = {"slides": parsed}
+    elif isinstance(parsed, dict):
+        raw = dict(parsed)
+    else:
+        raise presentationops.PresentationValidationError(
+            "slides_json must be a slide array or presentation object"
+        )
+    fallback_spec = fallback_spec or {}
+    raw["title"] = str(title or raw.get("title") or "").strip()
+    raw["audience"] = str(
+        audience or raw.get("audience") or fallback_spec.get("audience") or ""
+    ).strip()
+    raw["subtitle"] = str(
+        subtitle
+        or raw.get("subtitle")
+        or fallback_spec.get("subtitle")
+        or ""
+    ).strip()
+    return presentationops.normalize_spec(raw)
+
+
+def _presentation_markdown_body(spec: dict) -> str:
+    companion = presentationops.spec_to_markdown(spec)
+    return re.sub(r"^# .*?\n+", "", companion, count=1)
+
+
+def _presentation_companion_matches(content: str, spec: dict) -> bool:
+    parts = content.split("\n\n", 2)
+    return (
+        len(parts) == 3
+        and parts[2].strip() == _presentation_markdown_body(spec).strip()
+    )
+
+
+def _write_presentation_version(conn, doc_id: str, version: int, title: str,
+                                spec: dict, tags: str, change_note: str) -> dict:
+    template = "slide_presentation"
+    tpl = conn.execute(
+        "SELECT version FROM docops_templates WHERE name=?", (template,)
+    ).fetchone()
+    if not tpl:
+        raise RuntimeError("slide_presentation template is unavailable")
+    body = _presentation_markdown_body(spec)
+    content = (
+        f"# {title}\n\n"
+        f"> **Doc:** {doc_id} v{version} · **Template:** {template} · "
+        f"**Status:** DRAFT · **Created:** {_now()}"
+        + (f" · **Tags:** {tags}" if tags else "")
+        + "\n\n"
+        + body
+    )
+    path = DOCS_DIR / f"{doc_id}-{_slug(title)}-v{version}.md"
+    path.write_text(content)
+    sha = _hash(content)
+    canonical_spec = json.dumps(
+        spec, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    spec_sha = _hash(canonical_spec)
+    conn.execute(
+        "INSERT INTO docops_documents (doc_id, version, title, template, "
+        "template_version, path, sha256, tags, change_note) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (
+            doc_id, version, title, template, tpl[0], str(path), sha, tags,
+            change_note,
+        ),
+    )
+    conn.execute(
+        "INSERT INTO docops_presentation_specs "
+        "(doc_id, version, schema_version, spec_json, spec_sha256) "
+        "VALUES (?,?,?,?,?)",
+        (doc_id, version, spec["schema_version"], canonical_spec, spec_sha),
+    )
+    return {
+        "doc_id": doc_id,
+        "version": version,
+        "status": "draft",
+        "path": str(path),
+        "sha256": sha,
+        "presentation_spec_sha256": spec_sha,
+        "slide_count": len(spec["slides"]),
+        "unresolved_markers": None,
+        "next": "finalize_document when approved, then export_document as pptx",
+    }
+
+
+def draft_presentation(title: str, audience: str, slides_json: str,
+                       subtitle: str = "", tags: str = "",
+                       finalize: bool = False) -> dict:
+    """Create a governed presentation from an authoritative slide specification."""
+    try:
+        spec = _presentation_spec(title, audience, slides_json, subtitle)
+    except presentationops.PresentationValidationError as exc:
+        return {"status": "rejected", "error": str(exc)}
+    doc_id = "DOC-" + str(uuid.uuid4())[:8]
+    with _db() as conn:
+        result = _write_presentation_version(
+            conn, doc_id, 1, spec["title"], spec, tags, "initial presentation"
+        )
+    if finalize:
+        sealed = finalize_document(doc_id)
+        if sealed.get("status") in {"final", "already_final"}:
+            result.update(
+                status="final",
+                sha256=sealed.get("sha256", result["sha256"]),
+                next="export_document with format pptx",
+            )
+    return _attach_source_artifact(result)
+
+
+def revise_presentation(doc_id: str, slides_json: str, audience: str = "",
+                        subtitle: str = "", change_note: str = "",
+                        finalize: bool = False) -> dict:
+    """Issue a complete new structured presentation version."""
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT version, title, tags FROM docops_documents "
+            "WHERE doc_id=? ORDER BY version DESC LIMIT 1",
+            (doc_id,),
+        ).fetchone()
+        if not row:
+            return {"error": f"unknown doc_id '{doc_id}'"}
+        version, title, tags = row
+        prior_row = conn.execute(
+            "SELECT spec_json FROM docops_presentation_specs "
+            "WHERE doc_id=? AND version=?",
+            (doc_id, version),
+        ).fetchone()
+        prior_spec = json.loads(prior_row[0]) if prior_row else {}
+        try:
+            spec = _presentation_spec(
+                title, audience, slides_json, subtitle, fallback_spec=prior_spec
+            )
+        except presentationops.PresentationValidationError as exc:
+            return {"status": "rejected", "error": str(exc)}
+        conn.execute(
+            "UPDATE docops_documents SET status='superseded' "
+            "WHERE doc_id=? AND version=?",
+            (doc_id, version),
+        )
+        result = _write_presentation_version(
+            conn,
+            doc_id,
+            version + 1,
+            title,
+            spec,
+            tags,
+            change_note or "presentation revision",
+        )
+    if finalize:
+        sealed = finalize_document(doc_id)
+        if sealed.get("status") in {"final", "already_final"}:
+            result.update(
+                status="final",
+                sha256=sealed.get("sha256", result["sha256"]),
+                next="export_document with format pptx",
+            )
+    return _attach_source_artifact(result)
+
+
+def get_presentation_spec(doc_id: str, version: int = 0) -> dict:
+    """Return the normalized slide specification for a governed presentation."""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT p.version, p.schema_version, p.spec_json, p.spec_sha256, "
+            "d.status FROM docops_presentation_specs p "
+            "JOIN docops_documents d "
+            "ON d.doc_id=p.doc_id AND d.version=p.version "
+            "WHERE p.doc_id=? ORDER BY p.version",
+            (doc_id,),
+        ).fetchall()
+    if not rows:
+        return {"error": f"no presentation specification for '{doc_id}'"}
+    target = next((row for row in rows if row[0] == version), None)
+    if version and target is None:
+        return {"error": f"presentation version {version} not found"}
+    target = target or rows[-1]
+    if _hash(target[2]) != target[3]:
+        return {"status": "blocked", "reason": "presentation specification hash mismatch"}
+    return {
+        "doc_id": doc_id,
+        "version": target[0],
+        "schema_version": target[1],
+        "status": target[4],
+        "spec_sha256": target[3],
+        "presentation": json.loads(target[2]),
+    }
 
 
 def finalize_document(doc_id: str) -> dict:
@@ -995,55 +1341,93 @@ def finalize_document(doc_id: str) -> dict:
     Blocks if unresolved [TBD]/[VERIFY CURRENT]/{{placeholder}}/TODO
     markers remain, or if the file was modified outside DocOps.
     """
-    already_final = None
     with _db() as conn:
         row = conn.execute(
             "SELECT version, path, sha256, status FROM docops_documents "
             "WHERE doc_id=? ORDER BY version DESC LIMIT 1",
-            (doc_id,)).fetchone()
+            (doc_id,),
+        ).fetchone()
         if not row:
             return {"error": f"unknown doc_id '{doc_id}'"}
         version, path, sha, status = row
+        p = Path(path)
+        if not p.exists():
+            return {"error": f"file missing: {path}"}
+        content = p.read_text()
+        if _hash(content) != sha:
+            return {
+                "status": "blocked",
+                "reason": (
+                    "file was modified outside DocOps; use "
+                    "revise_document to issue a new version"
+                ),
+            }
+        spec_row = conn.execute(
+            "SELECT spec_json, spec_sha256 "
+            "FROM docops_presentation_specs "
+            "WHERE doc_id=? AND version=?",
+            (doc_id, version),
+        ).fetchone()
+        if spec_row:
+            if _hash(spec_row[0]) != spec_row[1]:
+                return {
+                    "status": "blocked",
+                    "reason": "presentation specification hash mismatch",
+                }
+            try:
+                normalized_spec = presentationops.normalize_spec(
+                    json.loads(spec_row[0])
+                )
+            except presentationops.PresentationValidationError as exc:
+                return {
+                    "status": "blocked",
+                    "reason": f"invalid presentation specification: {exc}",
+                }
+            if not _presentation_companion_matches(content, normalized_spec):
+                return {
+                    "status": "blocked",
+                    "reason": (
+                        "presentation companion diverges from the "
+                        "authoritative slide specification"
+                    ),
+                }
+
         if status == "final":
-            already_final = {
+            result = {
                 "doc_id": doc_id,
                 "version": version,
                 "status": "already_final",
                 "sha256": sha,
                 "path": path,
             }
-        if already_final is not None:
-            pass
         else:
-            p = Path(path)
-            if not p.exists():
-                return {"error": f"file missing: {path}"}
-            content = p.read_text()
-            if _hash(content) != sha:
-                return {"status": "blocked",
-                        "reason": "file was modified outside DocOps; "
-                                  "use revise_document to issue a new version"}
-            markers = sorted({m for m in BLOCKING_MARKERS if m in content})
+            markers = sorted({
+                marker for marker in BLOCKING_MARKERS if marker in content
+            })
             if markers:
-                return {"status": "blocked", "unresolved_markers": markers,
-                        "reason": "resolve markers via revise_document first"}
-            content = content.replace("**Status:** DRAFT",
-                                      "**Status:** FINAL", 1)
+                return {
+                    "status": "blocked",
+                    "unresolved_markers": markers,
+                    "reason": "resolve markers via revise_document first",
+                }
+            content = content.replace(
+                "**Status:** DRAFT", "**Status:** FINAL", 1
+            )
             p.write_text(content)
             new_sha = _hash(content)
             conn.execute(
                 "UPDATE docops_documents SET status='final', sha256=?, "
                 "finalized_at=? WHERE doc_id=? AND version=?",
-                (new_sha, _now(), doc_id, version))
-    if already_final is not None:
-        return _attach_source_artifact(already_final)
-    return _attach_source_artifact({
-        "doc_id": doc_id,
-        "version": version,
-        "status": "final",
-        "sha256": new_sha,
-        "path": path,
-    })
+                (new_sha, _now(), doc_id, version),
+            )
+            result = {
+                "doc_id": doc_id,
+                "version": version,
+                "status": "final",
+                "sha256": new_sha,
+                "path": path,
+            }
+    return _attach_source_artifact(result)
 
 
 def list_documents(status: str = "all", query: str = "") -> dict:
@@ -1159,25 +1543,34 @@ _EXPORT_MIME_TYPES = {
     "pdf": "application/pdf",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "rtf": "application/rtf",
-    "pptx": (
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-    ),
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 }
 
 
 def _export_sections(source: str) -> list[tuple[str, str]]:
-    return [
-        (match.group(1).strip(), match.group(2).strip())
-        for match in re.finditer(
-            r"^## (.+?)\s*\n(.*?)(?=^## |\Z)", source, re.S | re.M
+    matches = list(
+        re.finditer(
+            r"^## (.+?)\s*\n(.*?)(?=^## |\Z)",
+            source,
+            re.S | re.M,
         )
-    ]
+    )
+    sections = []
+    leading = source[:matches[0].start()].strip() if matches else source.strip()
+    if leading:
+        sections.append(("Overview", leading))
+    sections.extend(
+        (match.group(1).strip(), match.group(2).strip())
+        for match in matches
+    )
+    return sections
 
 
 def _plain_markdown(value: str) -> str:
     rendered = _markdown.markdown(
-        value, extensions=["tables", "fenced_code"]
+        value,
+        extensions=["tables", "fenced_code"],
     )
     rendered = re.sub(r"<li(?:\s[^>]*)?>", "\n- ", rendered, flags=re.I)
     rendered = re.sub(
@@ -1205,15 +1598,24 @@ def _atomic_binary_export(out_path: Path, writer) -> None:
         temporary_output = Path(handle.name)
     try:
         writer(temporary_output)
-        if not temporary_output.is_file() or temporary_output.stat().st_size == 0:
-            raise OSError(f"{out_path.suffix} renderer produced no output")
+        if (
+            not temporary_output.is_file()
+            or temporary_output.stat().st_size == 0
+        ):
+            raise OSError(
+                f"{out_path.suffix} renderer produced no output"
+            )
         temporary_output.chmod(0o600)
         temporary_output.replace(out_path)
     finally:
         temporary_output.unlink(missing_ok=True)
 
 
-def _write_pdf_export(out_path: Path, title: str, sections, metadata: dict) -> None:
+def _write_pdf_export(
+        out_path: Path,
+        title: str,
+        sections,
+        metadata: dict) -> None:
     from reportlab.lib import colors
     from reportlab.lib.enums import TA_CENTER
     from reportlab.lib.pagesizes import LETTER
@@ -1271,15 +1673,25 @@ def _write_pdf_export(out_path: Path, title: str, sections, metadata: dict) -> N
         width, height = LETTER
         canvas.setStrokeColor(primary)
         canvas.setLineWidth(2)
-        canvas.line(0.72 * inch, height - 0.55 * inch,
-                    width - 0.72 * inch, height - 0.55 * inch)
+        canvas.line(
+            0.72 * inch,
+            height - 0.55 * inch,
+            width - 0.72 * inch,
+            height - 0.55 * inch,
+        )
         canvas.setFillColor(ink)
         canvas.setFont("Helvetica-Bold", 9)
-        canvas.drawString(0.72 * inch, height - 0.42 * inch, "AIMHI")
+        canvas.drawString(
+            0.72 * inch,
+            height - 0.42 * inch,
+            "AIMHI",
+        )
         canvas.setFillColor(muted)
         canvas.setFont("Helvetica", 7)
         canvas.drawRightString(
-            width - 0.72 * inch, height - 0.42 * inch, "PRYCELESS VENTURES"
+            width - 0.72 * inch,
+            height - 0.42 * inch,
+            "PRYCELESS VENTURES",
         )
         canvas.drawString(
             0.72 * inch,
@@ -1290,10 +1702,13 @@ def _write_pdf_export(out_path: Path, title: str, sections, metadata: dict) -> N
         canvas.drawRightString(
             width - 0.72 * inch,
             0.42 * inch,
-            f"Page {document.page} · integrity {metadata['sha256'][:12]}",
+            f"Page {document.page} · integrity "
+            f"{metadata['sha256'][:12]}",
         )
         if not metadata["is_final"]:
-            canvas.setFillColor(colors.Color(0.88, 0.1, 0.4, alpha=0.08))
+            canvas.setFillColor(
+                colors.Color(0.88, 0.1, 0.4, alpha=0.08)
+            )
             canvas.setFont("Helvetica-Bold", 68)
             canvas.translate(width / 2, height / 2)
             canvas.rotate(28)
@@ -1325,13 +1740,18 @@ def _write_pdf_export(out_path: Path, title: str, sections, metadata: dict) -> N
             ),
         ]
         for heading, markdown_body in sections:
-            story.append(Paragraph(_html.escape(heading), heading_style))
+            story.append(
+                Paragraph(_html.escape(heading), heading_style)
+            )
             plain = _plain_markdown(markdown_body)
             for paragraph in re.split(r"\n{2,}", plain):
                 if paragraph.strip():
                     story.append(
                         Paragraph(
-                            _html.escape(paragraph).replace("\n", "<br/>"),
+                            _html.escape(paragraph).replace(
+                                "\n",
+                                "<br/>",
+                            ),
                             body_style,
                         )
                     )
@@ -1473,10 +1893,18 @@ def _write_powerpoint_export(
 
 
 def _write_excel_export(
-    out_path: Path, title: str, sections, metadata: dict
-) -> None:
+        out_path: Path,
+        title: str,
+        sections,
+        metadata: dict) -> None:
     from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.styles import (
+        Alignment,
+        Border,
+        Font,
+        PatternFill,
+        Side,
+    )
     from openpyxl.utils import get_column_letter
 
     primary = _BRAND["primary"].lstrip("#")
@@ -1498,7 +1926,12 @@ def _write_excel_export(
         sheet.sheet_view.showGridLines = False
         sheet.merge_cells("A1:B1")
         title_cell = string_cell(sheet, 1, 1, title)
-        title_cell.font = Font(name="Aptos Display", size=20, bold=True, color=ink)
+        title_cell.font = Font(
+            name="Aptos Display",
+            size=20,
+            bold=True,
+            color=ink,
+        )
         title_cell.alignment = Alignment(vertical="center")
         sheet.row_dimensions[1].height = 34
 
@@ -1508,9 +1941,15 @@ def _write_excel_export(
             ("Integrity", metadata["sha256"]),
             ("Exported", metadata["date"]),
         ]
-        for row_index, (label, value) in enumerate(metadata_rows, start=2):
+        for row_index, (label, value) in enumerate(
+                metadata_rows,
+                start=2):
             label_cell = string_cell(sheet, row_index, 1, label)
-            label_cell.font = Font(name="Aptos", bold=True, color=muted)
+            label_cell.font = Font(
+                name="Aptos",
+                bold=True,
+                color=muted,
+            )
             value_cell = string_cell(sheet, row_index, 2, value)
             value_cell.font = Font(
                 name="Aptos",
@@ -1518,37 +1957,60 @@ def _write_excel_export(
             )
 
         header_row = 7
-        for column, value in enumerate(("Section", "Content"), start=1):
+        for column, value in enumerate(
+                ("Section", "Content"),
+                start=1):
             cell = string_cell(sheet, header_row, column, value)
-            cell.font = Font(name="Aptos", bold=True, color="FFFFFF")
+            cell.font = Font(
+                name="Aptos",
+                bold=True,
+                color="FFFFFF",
+            )
             cell.fill = PatternFill("solid", fgColor=primary)
             cell.alignment = Alignment(vertical="center")
 
         thin = Side(style="thin", color=line)
         for row_index, (heading, markdown_body) in enumerate(
-            sections, start=header_row + 1
-        ):
-            heading_cell = string_cell(sheet, row_index, 1, heading)
+                sections,
+                start=header_row + 1):
+            heading_cell = string_cell(
+                sheet,
+                row_index,
+                1,
+                heading,
+            )
             body_cell = string_cell(
-                sheet, row_index, 2, _plain_markdown(markdown_body)
+                sheet,
+                row_index,
+                2,
+                _plain_markdown(markdown_body),
             )
             for cell in (heading_cell, body_cell):
                 cell.font = Font(name="Aptos", color=ink)
                 cell.fill = PatternFill(
                     "solid",
-                    fgColor=paper if row_index % 2 == 0 else "FFFFFF",
+                    fgColor=(
+                        paper if row_index % 2 == 0 else "FFFFFF"
+                    ),
                 )
                 cell.border = Border(bottom=thin)
                 cell.alignment = Alignment(
-                    vertical="top", wrap_text=True
+                    vertical="top",
+                    wrap_text=True,
                 )
-            heading_cell.font = Font(name="Aptos", bold=True, color=primary)
+            heading_cell.font = Font(
+                name="Aptos",
+                bold=True,
+                color=primary,
+            )
             sheet.row_dimensions[row_index].height = 60
 
         sheet.column_dimensions[get_column_letter(1)].width = 28
         sheet.column_dimensions[get_column_letter(2)].width = 95
         sheet.freeze_panes = f"A{header_row + 1}"
-        sheet.auto_filter.ref = f"A{header_row}:B{header_row + len(sections)}"
+        sheet.auto_filter.ref = (
+            f"A{header_row}:B{header_row + len(sections)}"
+        )
         sheet.print_title_rows = f"1:{header_row}"
         sheet.sheet_properties.pageSetUpPr.fitToPage = True
         sheet.page_setup.fitToWidth = 1
@@ -1560,6 +2022,14 @@ def _write_excel_export(
         workbook.save(str(path))
 
     _atomic_binary_export(out_path, render)
+
+
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 @contextmanager
@@ -1601,6 +2071,11 @@ def _verified_export_path(path_value: str | Path) -> Path:
         raise ValueError("artifact path is outside the export root") from exc
     if not resolved.is_file():
         raise ValueError("artifact target is not a file")
+    current = resolved.parent
+    while current != root:
+        if current.is_symlink():
+            raise ValueError("artifact parent may not be a symlink")
+        current = current.parent
     return resolved
 
 
@@ -1621,7 +2096,7 @@ def _register_export(doc_id: str, version: int, format: str, path: Path,
         "1" if audience_ready else "0",
     ))
     artifact_id = "ART-" + hashlib.sha256(identity.encode()).hexdigest()[:32]
-    immutable_path = ARTIFACTS_DIR / artifact_id / resolved.name
+    immutable_path = EXPORTS_DIR / ".artifacts" / artifact_id / resolved.name
     if (
         not immutable_path.exists()
         or immutable_path.stat().st_size != byte_size
@@ -1685,6 +2160,54 @@ def _register_export(doc_id: str, version: int, format: str, path: Path,
     }
 
 
+def register_external_artifact(
+        doc_id: str,
+        version: int,
+        format: str,
+        path: str | Path,
+        *,
+        audience_ready: bool = True) -> dict:
+    """Register validated bytes produced by another governed capability."""
+    if not isinstance(doc_id, str) or not doc_id.strip():
+        raise ValueError("artifact document ID is required")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        raise ValueError("artifact version must be a positive integer")
+    if not isinstance(format, str) or not re.fullmatch(r"[a-z0-9]{2,12}", format):
+        raise ValueError("artifact format is invalid")
+    return _register_export(
+        doc_id.strip(),
+        version,
+        format,
+        Path(path),
+        audience_ready=bool(audience_ready),
+    )
+
+
+def tombstone_export_artifact(
+        artifact_id: str,
+        *,
+        connection: sqlite3.Connection | None = None) -> bool:
+    """Disable delivery without deleting immutable artifact bytes or lineage."""
+    if not isinstance(artifact_id, str) or not re.fullmatch(
+        r"ART-[a-f0-9]{32}", artifact_id
+    ):
+        return False
+    if connection is not None:
+        cursor = connection.execute(
+            "UPDATE docops_artifacts SET status='tombstoned' "
+            "WHERE artifact_id=? AND status='ready'",
+            (artifact_id,),
+        )
+        return cursor.rowcount == 1
+    with _db() as conn:
+        cursor = conn.execute(
+            "UPDATE docops_artifacts SET status='tombstoned' "
+            "WHERE artifact_id=? AND status='ready'",
+            (artifact_id,),
+        )
+        return cursor.rowcount == 1
+
+
 def _attach_source_artifact(result: dict) -> dict:
     if (
         not isinstance(result, dict)
@@ -1707,18 +2230,21 @@ def _attach_source_artifact(result: dict) -> dict:
                 )
             staging = EXPORTS_DIR / "sources" / source.name
             _atomic_copy(source, staging)
-            artifact = _register_export(
+            if _hash(staging.read_text()) != expected_sha:
+                raise ValueError(
+                    "source artifact copy failed governed-hash validation"
+                )
+            result["artifact"] = _register_export(
                 doc_id,
                 version,
                 "md",
                 staging,
                 audience_ready=audience_ready,
             )
-            if artifact["sha256"] != expected_sha:
+            if result["artifact"]["sha256"] != expected_sha:
                 raise ValueError(
                     "source artifact bytes do not match the governed SHA-256"
                 )
-            result["artifact"] = artifact
     except (OSError, ValueError) as exc:
         result["artifact_error"] = f"source artifact registration failed: {exc}"
     return result
@@ -1743,8 +2269,13 @@ def resolve_export_artifact(artifact_id: str, *, include_path: bool = False) -> 
         return {"error": str(exc), "status": "blocked"}
     actual_size = path.stat().st_size
     actual_sha = _hash_file(path)
-    if actual_size != row[7] or actual_sha != row[8] or row[9] != "ready":
-        return {"error": "artifact integrity mismatch", "status": "blocked"}
+    if actual_size != row[7] or actual_sha != row[8]:
+        return {
+            "error": "artifact integrity mismatch",
+            "status": "blocked",
+            "expected_sha256": row[8],
+            "actual_sha256": actual_sha,
+        }
     result = {
         "artifact_id": row[0],
         "doc_id": row[1],
@@ -1790,7 +2321,8 @@ def open_export_artifact_snapshot(artifact_id: str):
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
             snapshot.write(chunk)
-        if opened.st_size != artifact["byte_size"] or digest.hexdigest() != artifact["sha256"]:
+        actual_sha = digest.hexdigest()
+        if opened.st_size != artifact["byte_size"] or actual_sha != artifact["sha256"]:
             raise ValueError("artifact snapshot integrity mismatch")
         snapshot.seek(0)
         source.close()
@@ -1798,32 +2330,85 @@ def open_export_artifact_snapshot(artifact_id: str):
     except (OSError, ValueError) as exc:
         source.close()
         snapshot.close()
-        return {"status": "blocked", "error": str(exc)}, None
+        return {
+            "status": "blocked",
+            "error": str(exc),
+            "expected_sha256": artifact.get("sha256"),
+        }, None
+
+
+def list_export_artifacts(doc_id: str = "", version: int = 0,
+                          format: str = "") -> dict:
+    """List verified artifact metadata without exposing server paths."""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT artifact_id FROM docops_artifacts "
+            "WHERE (?='' OR doc_id=?) AND (?=0 OR version=?) "
+            "AND (?='' OR format=?) ORDER BY created_at DESC LIMIT 100",
+            (doc_id, doc_id, version, version, format, format),
+        ).fetchall()
+    artifacts = []
+    blocked = []
+    for (artifact_id,) in rows:
+        artifact = resolve_export_artifact(artifact_id)
+        if artifact.get("status") == "ready":
+            artifacts.append(artifact)
+        else:
+            blocked.append({
+                "artifact_id": artifact_id,
+                "status": artifact.get("status"),
+                "error": artifact.get("error"),
+            })
+    return {
+        "count": len(artifacts),
+        "artifacts": artifacts,
+        "blocked": blocked,
+    }
 
 
 def export_document(doc_id: str, format: str = "html",
                     version: int = 0) -> dict:
     """Render an audience-ready deliverable of a document.
 
-    Formats: html, pdf, docx, rtf, pptx, xlsx. The internal metadata banner
-    is removed; finals get discreet integrity metadata, while non-final
-    versions are visibly marked DRAFT.
+    Formats: md, html, pdf, docx, rtf, xlsx, and native pptx for governed
+    presentation specifications. Every successful export is registered under
+    an opaque, integrity-checked artifact ID.
     """
-    supported_formats = ("html", "pdf", "docx", "rtf", "pptx", "xlsx")
+    format = str(format or "html").strip().lower()
+    supported_formats = (
+        "md",
+        "html",
+        "pdf",
+        "docx",
+        "rtf",
+        "pptx",
+        "xlsx",
+    )
     if format not in supported_formats:
         return {
-            "error": "format must be one of: " + ", ".join(supported_formats)
+            "error": (
+                "format must be one of: "
+                + ", ".join(supported_formats)
+            )
         }
-    if _markdown is None:
+    if format not in {"md", "pptx"} and _markdown is None:
         return {"error": "python 'markdown' package not installed in venv"}
     with _db() as conn:
         history = conn.execute(
             "SELECT version, status, path, title, sha256 "
             "FROM docops_documents WHERE doc_id=? ORDER BY version",
             (doc_id,)).fetchall()
+        presentation_rows = conn.execute(
+            "SELECT version, spec_json, spec_sha256 "
+            "FROM docops_presentation_specs WHERE doc_id=? ORDER BY version",
+            (doc_id,),
+        ).fetchall()
     if not history:
         return {"error": f"unknown doc_id '{doc_id}'"}
-    target = next((h for h in history if h[0] == version), history[-1])
+    target = next((h for h in history if h[0] == version), None)
+    if version and target is None:
+        return {"error": f"document version {version} not found"}
+    target = target or history[-1]
     ver, status, path, title, sha = target
     p = Path(path)
     if not p.exists():
@@ -1834,14 +2419,105 @@ def export_document(doc_id: str, format: str = "html",
                 "reason": "file was modified outside DocOps; "
                           "revise_document to issue a clean version"}
 
+    is_final = status == "final"
+    stem = f"{doc_id}-{_slug(title)}-v{ver}" + ("" if is_final else "-DRAFT")
+    if format == "md":
+        try:
+            with _export_lock(doc_id, ver, format):
+                out_path = EXPORTS_DIR / "sources" / p.name
+                _atomic_copy(p, out_path)
+                if _hash(out_path.read_text()) != sha:
+                    raise ValueError(
+                        "source artifact copy failed governed-hash validation"
+                    )
+                artifact = _register_export(
+                    doc_id,
+                    ver,
+                    format,
+                    out_path,
+                    audience_ready=is_final,
+                )
+        except (OSError, ValueError) as exc:
+            return {
+                "status": "blocked",
+                "error": f"Markdown export failed: {exc}",
+            }
+        return {
+            "doc_id": doc_id,
+            "version": ver,
+            "format": format,
+            "audience_ready": is_final,
+            "watermarked_draft": not is_final,
+            "path": str(out_path),
+            "artifact": artifact,
+            "note": (
+                "governed final Markdown source"
+                if is_final
+                else "governed draft Markdown source"
+            ),
+        }
+    if format == "pptx":
+        spec_row = next(
+            (row for row in presentation_rows if row[0] == ver), None
+        )
+        if not spec_row:
+            return {
+                "status": "rejected",
+                "error": (
+                    "native PPTX requires a governed presentation "
+                    "specification; use draft_presentation or "
+                    "revise_presentation"
+                ),
+            }
+        if _hash(spec_row[1]) != spec_row[2]:
+            return {
+                "status": "blocked",
+                "reason": "presentation specification hash mismatch",
+            }
+        try:
+            spec = presentationops.normalize_spec(json.loads(spec_row[1]))
+            with _export_lock(doc_id, ver, format):
+                out_path = EXPORTS_DIR / f"{stem}.pptx"
+                render = presentationops.render_pptx(
+                    spec,
+                    out_path,
+                    doc_id=doc_id,
+                    version=ver,
+                    status=status,
+                    source_sha256=sha,
+                )
+                preview_dir = EXPORTS_DIR / f"{stem}-previews"
+                previews = presentationops.render_previews(spec, preview_dir)
+                artifact = _register_export(
+                    doc_id, ver, format, out_path, audience_ready=is_final
+                )
+        except (OSError, ValueError, presentationops.PresentationValidationError) as exc:
+            return {"status": "blocked", "error": f"PPTX export failed: {exc}"}
+        return {
+            "doc_id": doc_id,
+            "version": ver,
+            "format": format,
+            "audience_ready": is_final,
+            "watermarked_draft": not is_final,
+            "path": str(out_path),
+            "artifact": artifact,
+            "validation": render["validation"],
+            "slide_count": render["slides"],
+            "preview_count": len(previews),
+            "note": (
+                "validated native PowerPoint export"
+                if is_final
+                else "validated native PowerPoint export with DRAFT watermark"
+            ),
+        }
+
     # Strip internal metadata banner and title (re-rendered cleanly).
     body_md = re.sub(r"^# .*?\n+> \*\*Doc:\*\*.*?\n+", "", text, count=1,
                      flags=re.S)
-    sections = _export_sections(text)
+    sections = _export_sections(body_md)
     body_html = _markdown.markdown(body_md,
                                    extensions=["tables", "fenced_code"])
     date = datetime.now(timezone.utc).strftime("%B %d, %Y")
-    is_final = status == "final"
     watermark = "" if is_final else '<div class="watermark">DRAFT</div>'
     meta = f'<p class="docmeta">{date}</p>'
     footer = (f"<footer><span>{_html.escape(title)} · {doc_id} v{ver} · "
@@ -1854,110 +2530,124 @@ def export_document(doc_id: str, format: str = "html",
             f"<h1>{_html.escape(title)}</h1>{meta}{body_html}{footer}"
             f"</body></html>")
 
-    stem = f"{doc_id}-{_slug(title)}-v{ver}" + ("" if is_final else "-DRAFT")
-    with _export_lock(doc_id, ver, format):
-        html_path = EXPORTS_DIR / f"{stem}.html"
-        with tempfile.NamedTemporaryFile(
-            dir=EXPORTS_DIR,
-            prefix=f".{stem}.",
-            suffix=".html.tmp",
-            delete=False,
-            mode="w",
-            encoding="utf-8",
-        ) as handle:
-            temporary_html = Path(handle.name)
-            handle.write(page)
-            handle.flush()
-            os.fsync(handle.fileno())
-        try:
-            temporary_html.chmod(0o600)
-            temporary_html.replace(html_path)
-        finally:
-            temporary_html.unlink(missing_ok=True)
-
-        out_path = html_path
-        if format in ("docx", "rtf"):
-            out_path = EXPORTS_DIR / f"{stem}.{format}"
+    try:
+        with _export_lock(doc_id, ver, format):
+            html_path = EXPORTS_DIR / f"{stem}.html"
             with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
                 dir=EXPORTS_DIR,
-                prefix=f".{stem}.",
-                suffix=f".{format}.tmp",
+                prefix=f".{html_path.name}.",
+                suffix=".tmp",
                 delete=False,
             ) as handle:
-                temporary_output = Path(handle.name)
-            temporary_output.unlink(missing_ok=True)
+                html_temporary = Path(handle.name)
+                handle.write(page)
+                handle.flush()
+                os.fsync(handle.fileno())
             try:
-                conv = subprocess.run(
-                    ["textutil", "-convert", format, str(html_path),
-                     "-output", str(temporary_output)],
-                    capture_output=True, text=True, timeout=60)
-                if conv.returncode != 0 or not temporary_output.exists():
-                    return {
-                        "error": "textutil conversion failed",
-                        "detail": conv.stderr.strip()[:300],
-                    }
-                temporary_output.chmod(0o600)
-                temporary_output.replace(out_path)
-            finally:
-                temporary_output.unlink(missing_ok=True)
-        elif format in ("pdf", "pptx", "xlsx"):
-            out_path = EXPORTS_DIR / f"{stem}.{format}"
-            metadata = {
-                "doc_id": doc_id,
-                "version": ver,
-                "sha256": sha,
-                "date": date,
-                "is_final": is_final,
-            }
-            try:
-                if format == "pdf":
-                    _write_pdf_export(
-                        out_path, title, sections, metadata
+                html_temporary.chmod(0o600)
+                out_path = html_path
+                if format == "html":
+                    html_temporary.replace(html_path)
+                elif format in ("docx", "rtf"):
+                    out_path = EXPORTS_DIR / f"{stem}.{format}"
+                    descriptor, temporary_name = tempfile.mkstemp(
+                        dir=EXPORTS_DIR,
+                        prefix=f".{out_path.name}.",
+                        suffix=f".{format}",
                     )
-                elif format == "pptx":
-                    _write_powerpoint_export(
-                        out_path, title, sections, metadata
-                    )
+                    os.close(descriptor)
+                    out_temporary = Path(temporary_name)
+                    out_temporary.unlink(missing_ok=True)
+                    try:
+                        conv = subprocess.run(
+                            [
+                                "textutil",
+                                "-convert",
+                                format,
+                                str(html_temporary),
+                                "-output",
+                                str(out_temporary),
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=60,
+                        )
+                        if (
+                            conv.returncode != 0
+                            or not out_temporary.is_file()
+                            or out_temporary.stat().st_size == 0
+                        ):
+                            return {
+                                "error": "textutil conversion failed",
+                                "detail": conv.stderr.strip()[:300],
+                            }
+                        out_temporary.chmod(0o600)
+                        out_temporary.replace(out_path)
+                    finally:
+                        out_temporary.unlink(missing_ok=True)
                 else:
-                    _write_excel_export(
-                        out_path, title, sections, metadata
-                    )
-            except ImportError:
-                return {
-                    "error": f"{format} export dependency is not installed"
-                }
-
-        try:
+                    out_path = EXPORTS_DIR / f"{stem}.{format}"
+                    metadata = {
+                        "doc_id": doc_id,
+                        "version": ver,
+                        "sha256": sha,
+                        "date": date,
+                        "is_final": is_final,
+                    }
+                    if format == "pdf":
+                        _write_pdf_export(
+                            out_path,
+                            title,
+                            sections,
+                            metadata,
+                        )
+                    else:
+                        _write_excel_export(
+                            out_path,
+                            title,
+                            sections,
+                            metadata,
+                        )
+            finally:
+                html_temporary.unlink(missing_ok=True)
             artifact = _register_export(
-                doc_id,
-                ver,
-                format,
-                out_path,
-                audience_ready=is_final,
+                doc_id, ver, format, out_path, audience_ready=is_final
             )
-        except (OSError, ValueError) as exc:
-            return {"error": "artifact registration failed", "detail": str(exc)}
-    return {
-        "doc_id": doc_id,
-        "version": ver,
-        "format": format,
-        "audience_ready": is_final,
-        "watermarked_draft": not is_final,
-        "artifact": artifact,
-        "note": (
-            "clean final export" if is_final else
-            "non-final version exported with DRAFT watermark; "
-            "finalize_document first for a clean deliverable"
-        ),
-    }
+    except (
+        ImportError,
+        OSError,
+        ValueError,
+        subprocess.SubprocessError,
+    ) as exc:
+        return {
+            "status": "blocked",
+            "error": f"artifact export failed: {exc}",
+        }
+    return {"doc_id": doc_id, "version": ver, "format": format,
+            "audience_ready": is_final,
+            "watermarked_draft": not is_final,
+            "path": str(out_path),
+            "artifact": artifact,
+            "note": ("clean final export" if is_final else
+                     "non-final version exported with DRAFT watermark; "
+                     "finalize_document first for a clean deliverable")}
 
 
 # ------------------------------------------------------------ tool schemas
 DOCOPS_SCHEMAS = [
     {"type": "function", "name": "list_doc_templates",
-     "description": ("List DocOps document templates (name, required and "
-                     "optional sections). Always check before drafting."),
-     "parameters": {"type": "object", "properties": {}, "required": []}},
+     "description": ("Search or summarize DocOps templates. Use "
+                     "summary_only=true for counts; never request the entire "
+                     "catalog when a count or narrow lookup is sufficient."),
+     "parameters": {"type": "object", "properties": {
+         "query": {"type": "string",
+                   "description": "Optional template name/description filter"},
+         "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+         "summary_only": {"type": "boolean",
+                          "description": "Return counts without template records"}},
+         "required": []}},
     {"type": "function", "name": "create_doc_template",
      "description": ("Create or upgrade a versioned document template that "
                      "defines the required sections for a class of "
@@ -1980,7 +2670,7 @@ DOCOPS_SCHEMAS = [
                      "finalize=true to produce a sealed FINAL in one pass "
                      "when the user wants an audience-ready document and "
                      "all content is complete. Returns a versioned, hashed "
-                     "file and a downloadable artifact."),
+                     "file."),
      "parameters": {"type": "object", "properties": {
          "template": {"type": "string", "description": "Template name"},
          "title": {"type": "string", "description": "Document title"},
@@ -2002,6 +2692,49 @@ DOCOPS_SCHEMAS = [
          "change_note": {"type": "string",
                          "description": "What changed and why"}},
          "required": ["doc_id", "sections_json"]}},
+    {"type": "function", "name": "draft_presentation",
+     "description": ("Create a reusable native-presentation source from a "
+                     "strict structured slide specification. Use this tool, "
+                     "not draft_document, whenever the requested deliverable "
+                     "is PowerPoint/PPTX. Supported layouts: title, hero, "
+                     "bullets, two_column, comparison, metrics, process, "
+                     "cards, table, risk_matrix, timeline, bar_chart, sources, "
+                     "closing. Do not substitute DOCX for PPTX."),
+     "parameters": {"type": "object", "properties": {
+         "title": {"type": "string"},
+         "audience": {"type": "string"},
+         "subtitle": {"type": "string"},
+         "slides_json": {
+             "type": "string",
+             "description": (
+                 "JSON array of slide objects or a full presentation object. "
+                 "Every slide requires layout and title."
+             ),
+         },
+         "tags": {"type": "string"},
+         "finalize": {
+             "type": "boolean",
+             "description": "Seal as FINAL when content and evidence are complete",
+         }},
+         "required": ["title", "audience", "slides_json"]}},
+    {"type": "function", "name": "revise_presentation",
+     "description": ("Issue a complete new structured presentation version. "
+                     "Use this to correct or upgrade an existing governed "
+                     "presentation while preserving prior versions."),
+     "parameters": {"type": "object", "properties": {
+         "doc_id": {"type": "string"},
+         "slides_json": {"type": "string"},
+         "audience": {"type": "string"},
+         "subtitle": {"type": "string"},
+         "change_note": {"type": "string"},
+         "finalize": {"type": "boolean"}},
+         "required": ["doc_id", "slides_json"]}},
+    {"type": "function", "name": "get_presentation_spec",
+     "description": "Read the normalized slide specification and integrity hash.",
+     "parameters": {"type": "object", "properties": {
+         "doc_id": {"type": "string"},
+         "version": {"type": "integer"}},
+         "required": ["doc_id"]}},
     {"type": "function", "name": "finalize_document",
      "description": ("Review gate: seal the latest version as FINAL. Blocks "
                      "on unresolved [TBD]/[VERIFY CURRENT] markers or "
@@ -2010,19 +2743,34 @@ DOCOPS_SCHEMAS = [
      "parameters": {"type": "object", "properties": {
          "doc_id": {"type": "string"}}, "required": ["doc_id"]}},
     {"type": "function", "name": "export_document",
-     "description": ("Render an audience-ready deliverable of a document: "
-                     "professionally styled HTML, PDF, DOCX, RTF, PowerPoint, "
-                     "or Excel. Finals export clean; non-final versions are "
-                     "marked DRAFT. Use after finalize_document to hand the "
-                     "user a shareable file."),
+     "description": ("Render and register the exact requested deliverable. "
+                     "Supports Markdown, HTML, PDF, DOCX, RTF, native "
+                     "PowerPoint, and Excel. Use format=pptx for PowerPoint "
+                     "requests, which succeeds only for a validated structured "
+                     "presentation. A file is not complete until this returns "
+                     "artifact.status=ready. Finals export clean; drafts are "
+                     "watermarked."),
      "parameters": {"type": "object", "properties": {
          "doc_id": {"type": "string"},
          "format": {"type": "string",
-                    "enum": ["html", "pdf", "docx", "rtf", "pptx", "xlsx"],
+                    "enum": [
+                        "md", "html", "pdf", "docx", "rtf", "pptx", "xlsx"
+                    ],
                     "description": "Output format (default html)"},
          "version": {"type": "integer",
                      "description": "Specific version (default latest)"}},
          "required": ["doc_id"]}},
+    {"type": "function", "name": "list_export_artifacts",
+     "description": ("List registered, integrity-verified document artifacts "
+                    "without exposing server filesystem paths."),
+     "parameters": {"type": "object", "properties": {
+         "doc_id": {"type": "string"},
+         "version": {"type": "integer"},
+         "format": {"type": "string",
+                   "enum": [
+                       "", "md", "html", "pdf", "docx", "rtf", "pptx", "xlsx"
+                   ]}},
+         "required": []}},
     {"type": "function", "name": "list_documents",
      "description": "List documents in the DocOps registry by status (draft/final/superseded/all) and keyword.",
      "parameters": {"type": "object", "properties": {
@@ -2045,8 +2793,12 @@ DOCOPS_DISPATCH = {
     "create_doc_template": create_doc_template,
     "draft_document": draft_document,
     "revise_document": revise_document,
+    "draft_presentation": draft_presentation,
+    "revise_presentation": revise_presentation,
+    "get_presentation_spec": get_presentation_spec,
     "finalize_document": finalize_document,
     "export_document": export_document,
+    "list_export_artifacts": list_export_artifacts,
     "list_documents": list_documents,
     "get_document": get_document,
 }

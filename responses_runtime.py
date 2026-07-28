@@ -42,6 +42,7 @@ ADVANCED_DELEGATION_TOOL = {
 }
 
 _ENV_REF = re.compile(r"\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))")
+_URL_IN_TEXT = re.compile(r"https?://[^\s<>'\"]+")
 _delegation_active = contextvars.ContextVar("pj_delegation_active", default=False)
 
 
@@ -55,12 +56,43 @@ def load_config(base_dir=BASE_DIR):
     base_dir = Path(base_dir)
     with (base_dir / "config.json").open() as f:
         cfg = json.load(f)
-    instructions_file = cfg.get("instructions_file")
-    if not isinstance(instructions_file, str) or not instructions_file:
-        raise ValueError("config.json must define instructions_file")
-    instructions_path = base_dir / instructions_file
-    cfg["instructions"] = instructions_path.read_text()
-    cfg["instructions_source"] = instructions_file
+    instruction_files = cfg.get("instruction_files")
+    if instruction_files is None:
+        instruction_files = [cfg.get("instructions_file")]
+    if (
+        not isinstance(instruction_files, list)
+        or not instruction_files
+        or any(not isinstance(item, str) or not item.strip() for item in instruction_files)
+    ):
+        raise ValueError(
+            "config.json must define instruction_files or legacy instructions_file"
+        )
+    instruction_files = list(dict.fromkeys(item.strip() for item in instruction_files))
+    instruction_parts = []
+    for filename in instruction_files:
+        path = (base_dir / filename).resolve()
+        try:
+            path.relative_to(base_dir.resolve())
+        except ValueError as exc:
+            raise ValueError("instruction files must remain within the project") from exc
+        instruction_parts.append(path.read_text())
+    cfg["instructions"] = "\n\n".join(instruction_parts)
+    cfg["instructions_source"] = instruction_files[0]
+    cfg["instruction_files"] = instruction_files
+    cfg.setdefault("instructions_file", instruction_files[0])
+
+    vector_store_ids = cfg.get("vector_store_ids")
+    if vector_store_ids is None:
+        vector_store_ids = [cfg["vector_store_id"]] if cfg.get("vector_store_id") else []
+    if (
+        not isinstance(vector_store_ids, list)
+        or any(not isinstance(item, str) or not item.strip() for item in vector_store_ids)
+    ):
+        raise ValueError("vector_store_ids must be a list of non-empty strings")
+    vector_store_ids = list(dict.fromkeys(item.strip() for item in vector_store_ids))
+    cfg["vector_store_ids"] = vector_store_ids
+    if vector_store_ids:
+        cfg.setdefault("vector_store_id", vector_store_ids[0])
     return cfg
 
 
@@ -97,13 +129,28 @@ def _expand_secret_value(value, environ):
 def _public_url(value):
     if not isinstance(value, str):
         return value
-    parsed = urlsplit(value)
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return value.split("?", 1)[0].split("#", 1)[0]
     if not parsed.scheme or not parsed.hostname:
         return value.split("?", 1)[0]
     host = parsed.hostname
-    if parsed.port:
-        host = f"{host}:{parsed.port}"
+    if port:
+        host = f"{host}:{port}"
     return urlunsplit((parsed.scheme, host, parsed.path, "", ""))
+
+
+def sanitize_text_urls(value):
+    if not isinstance(value, str):
+        return value
+    return _URL_IN_TEXT.sub(
+        lambda match: _public_url(
+            match.group(0).rstrip(".,);]")
+        ),
+        value,
+    )
 
 
 def prepare_mcp_servers(servers=None, *, environ=None, base_dir=BASE_DIR):
@@ -141,10 +188,13 @@ def build_tools(cfg, *, mcp_servers=None, environ=None):
         tools.append({"type": "web_search"})
     if cfg.get("image_generation_enabled", True):
         tools.append({"type": "image_generation"})
-    if cfg.get("vector_store_id"):
+    vector_store_ids = cfg.get("vector_store_ids")
+    if vector_store_ids is None:
+        vector_store_ids = [cfg["vector_store_id"]] if cfg.get("vector_store_id") else []
+    if vector_store_ids:
         tools.append({
             "type": "file_search",
-            "vector_store_ids": [cfg["vector_store_id"]],
+            "vector_store_ids": list(vector_store_ids),
         })
     if cfg.get("computer_use_enabled") and cfg.get("model") in COMPUTER_USE_MODELS:
         tools.append({
@@ -182,10 +232,30 @@ def build_tools(cfg, *, mcp_servers=None, environ=None):
 def capability_manifest(cfg=None, *, mcp_servers=None, environ=None):
     cfg = load_config() if cfg is None else cfg
     prepared = prepare_mcp_servers(mcp_servers, environ=environ)
+    import imageops
+
+    image_status = imageops.get_image_capability_status()
+    image_tool_states = {
+        "generate_image_asset": (
+            "active"
+            if image_status["generation"] == "active"
+            else "disabled"
+            if image_status["generation"] == "disabled"
+            else "degraded"
+        ),
+        "edit_image_asset": "unavailable",
+        "create_image_variation": "unavailable",
+        "create_controlled_image": "active",
+        "register_vector_image": "active",
+        "get_image_asset": "active",
+        "delete_image_asset": "active",
+        "record_image_feedback": "active",
+        "get_image_capability_status": "active",
+    }
     functions = [
         {
             "name": tool["name"],
-            "status": "active",
+            "status": image_tool_states.get(tool["name"], "active"),
             "configured": True,
         }
         for tool in skills.TOOL_SCHEMAS
@@ -233,8 +303,12 @@ def capability_manifest(cfg=None, *, mcp_servers=None, environ=None):
             "configured": True,
         },
         "file_search": {
-            "status": "active" if cfg.get("vector_store_id") else "unavailable",
-            "configured": bool(cfg.get("vector_store_id")),
+            "status": "active" if (
+                cfg.get("vector_store_ids") or cfg.get("vector_store_id")
+            ) else "unavailable",
+            "configured": bool(
+                cfg.get("vector_store_ids") or cfg.get("vector_store_id")
+            ),
         },
         "tool_search": {
             "status": "active" if cfg.get("tool_search_enabled", True) else "disabled",
@@ -258,6 +332,7 @@ def capability_manifest(cfg=None, *, mcp_servers=None, environ=None):
             "configured", "active", "disabled", "degraded", "unavailable"
         ],
         "model": {"id": cfg["model"], "status": "active"},
+        "imageops": image_status,
         "instructions": {
             "source": cfg.get("instructions_source", cfg.get("instructions_file")),
             "status": "active",
@@ -320,7 +395,7 @@ def _function_calls(response):
             continue
         calls.append({
             "name": _get(item, "name"),
-            "call_id": _get(item, "call_id"),
+            "call_id": _get(item, "call_id") or _get(item, "id"),
             "arguments": _parsed_arguments(_get(item, "arguments", "{}")),
         })
     return calls
@@ -354,6 +429,8 @@ def _citation_metadata(response):
                     )
                     if _get(annotation, key) is not None
                 }
+                if "url" in data:
+                    data["url"] = _public_url(data["url"])
                 marker = json.dumps(data, sort_keys=True, default=str)
                 if data and marker not in seen:
                     seen.add(marker)
@@ -387,6 +464,8 @@ def _source_metadata(response):
                 "query": _get(action, "query"),
                 "url": _get(action, "url"),
             }
+            if source["url"] is not None:
+                source["url"] = _public_url(source["url"])
             sources.append({
                 key: value for key, value in source.items() if value is not None
             })
@@ -418,14 +497,71 @@ def _native_tool_result(item):
     return result
 
 
-_SERVER_PATH_FIELDS = {
-    "html_fallback",
-    "local_path",
-    "output_path",
-    "path",
-    "source_path",
-    "workspace_path",
-}
+def _stream_error(event):
+    error = _get(event, "error")
+    return sanitize_text_urls(
+        _get(error, "message")
+        or _get(event, "message")
+        or str(error or event)
+    )
+
+
+_DELIVERABLE_INTENT_PATTERN = re.compile(
+    r"\b(?:"
+    r"create|creates|created|creating|"
+    r"export|exports|exported|exporting|"
+    r"generate|generates|generated|generating|"
+    r"build|builds|built|building|"
+    r"save|saves|saved|saving|"
+    r"download|downloads|downloaded|downloading|"
+    r"draft|drafts|drafted|drafting|"
+    r"produce|produces|produced|producing"
+    r")\b"
+)
+
+
+def requested_deliverable_format(message):
+    """Map explicit file requests to the exact artifact format required.
+
+    Bare informational mentions of a format (for example "What is a .docx
+    file used for?" or "Explain HTML") must not force artifact creation.
+    A format is only treated as required when the message also carries
+    clear creation intent (create, export, generate, build, save,
+    download, draft, or produce) alongside the format reference.
+    """
+    if not isinstance(message, str):
+        return None
+    text = message.casefold()
+    if not _DELIVERABLE_INTENT_PATTERN.search(text):
+        return None
+    checks = (
+        ("pptx", (r"\bpower\s*point\b", r"\bpowerpoint\b", r"\.pptx\b", r"\bpptx\b")),
+        ("pdf", (r"\bportable document format\b", r"\.pdf\b", r"\bpdf\b")),
+        (
+            "xlsx",
+            (
+                r"\bexcel (?:file|spreadsheet|workbook)\b",
+                r"\.xlsx\b",
+                r"\bxlsx\b",
+            ),
+        ),
+        ("docx", (r"\bword document\b", r"\.docx\b", r"\bdocx\b")),
+        ("rtf", (r"\brich text format\b", r"\.rtf\b", r"\brtf\b")),
+        ("html", (r"\bhtml file\b", r"\.html\b")),
+        (
+            "md",
+            (
+                r"\bmarkdown (?:file|document)\b",
+                r"\.md\b",
+            ),
+        ),
+    )
+    for format_name, patterns in checks:
+        if any(re.search(pattern, text) for pattern in patterns):
+            return format_name
+    return None
+
+
 _SERVER_PATH_PATTERN = re.compile(
     r"""(?<![A-Za-z0-9:])
     (?:
@@ -439,6 +575,17 @@ _URI_PATTERN = re.compile(r"\bhttps?://[^\s\"'<>}\]]+")
 _ARTIFACT_DOWNLOAD_PATTERN = re.compile(
     r"^/responses/artifacts/ART-[a-f0-9]{32}$"
 )
+_SERVER_PATH_FIELDS = {
+    "canonical_path",
+    "cwd",
+    "directory",
+    "html_fallback",
+    "local_path",
+    "output_path",
+    "path",
+    "source_path",
+    "workspace_path",
+}
 
 
 def redact_server_paths(value):
@@ -466,9 +613,9 @@ def redact_server_paths(value):
     if isinstance(value, str):
         if _ARTIFACT_DOWNLOAD_PATTERN.fullmatch(value):
             return value
-        uris = {}
+        uris: dict[str, str] = {}
 
-        def preserve_uri(match):
+        def preserve_uri(match: re.Match) -> str:
             placeholder = f"\x00PJ_URI_{len(uris)}\x00"
             uris[placeholder] = match.group(0)
             return placeholder
@@ -498,13 +645,10 @@ def _verified_artifact_from_result(result):
     return verified if verified.get("status") == "ready" else None
 
 
-def _stream_error(event):
-    error = _get(event, "error")
-    return (
-        _get(error, "message")
-        or _get(event, "message")
-        or str(error or event)
-    )
+def _tool_call_key(call_id, tool_type, name):
+    if call_id:
+        return str(call_id)
+    return f"{tool_type or 'tool'}:{name or 'unnamed'}"
 
 
 class ResponsesOrchestrator:
@@ -515,14 +659,26 @@ class ResponsesOrchestrator:
             *,
             dispatcher=dispatch_local_function,
             approved_dispatcher=dispatch_approved_local_function,
-            approval_handler=None):
+            approval_handler=None,
+            tool_executor=None,
+            response_checkpoint=None,
+            expose_local_paths=False):
         self.client = client
         self.cfg = cfg
         self.dispatcher = dispatcher
         self.approved_dispatcher = approved_dispatcher
         self.approval_handler = approval_handler
+        self.tool_executor = tool_executor
+        self.response_checkpoint = response_checkpoint
+        self.expose_local_paths = bool(expose_local_paths)
 
-    def _request_kwargs(self, input_value, previous_response_id, text_format, first):
+    def _request_kwargs(
+            self,
+            input_value,
+            previous_response_id,
+            text_format,
+            first,
+            idempotency_key=None):
         kwargs = {
             "model": self.cfg["model"],
             "input": input_value,
@@ -536,44 +692,130 @@ class ResponsesOrchestrator:
             kwargs["reasoning"] = {"effort": self.cfg["reasoning_effort"]}
         if text_format:
             kwargs["text"] = {"format": text_format}
+        if idempotency_key:
+            kwargs["extra_headers"] = {"Idempotency-Key": idempotency_key}
         return kwargs
 
-    def stream_turn(self, message, *, previous_response_id=None, text_format=None):
+    def _dispatch_call(self, call: dict, *, approved: bool):
+        if self.tool_executor is not None:
+            return self.tool_executor(call, approved)
+        dispatcher = self.approved_dispatcher if approved else self.dispatcher
+        return dispatcher(call["name"], call["arguments"])
+
+    def _checkpoint_response(self, operation_key, response_id):
+        if (
+            operation_key
+            and response_id
+            and self.response_checkpoint is not None
+            and not self.response_checkpoint(operation_key, response_id)
+        ):
+            raise RuntimeError(
+                "Provider idempotency key returned a different response ID"
+            )
+
+    def stream_turn(
+            self,
+            message,
+            *,
+            previous_response_id=None,
+            text_format=None,
+            required_deliverable_format=None,
+            ready_artifact_ids=(),
+            idempotency_key_prefix=None):
         input_value = message
         first = True
         round_number = 0
-        complete_text = []
         all_citations = []
         all_sources = []
+        tool_calls_emitted = set()
+        tool_results_emitted = set()
         ready_artifacts = {}
+        for artifact_id in ready_artifact_ids or ():
+            import docops
+
+            artifact = docops.resolve_export_artifact(artifact_id)
+            if artifact.get("status") != "ready":
+                raise RuntimeError(
+                    "Persisted deliverable artifact failed integrity validation"
+                )
+            ready_artifacts[artifact_id] = artifact
+        required_format = (
+            required_deliverable_format or requested_deliverable_format(message)
+        )
+        if required_format not in {
+            None,
+            "md",
+            "html",
+            "pdf",
+            "docx",
+            "rtf",
+            "pptx",
+            "xlsx",
+        }:
+            raise ValueError("unsupported required deliverable format")
+        repair_attempts = 0
 
         while True:
+            operation_key = (
+                f"{idempotency_key_prefix}:round:{round_number}"
+                if idempotency_key_prefix else None
+            )
             kwargs = self._request_kwargs(
-                input_value, previous_response_id, text_format, first
+                input_value,
+                previous_response_id,
+                text_format,
+                first,
+                operation_key,
             )
             final_response = None
-            announced_calls = set()
+            round_text = []
+            pending_stream_results = {}
             for event in self.client.responses.create(**kwargs):
                 event_type = _get(event, "type", "")
-                if event_type == "response.output_text.delta":
+                if event_type == "response.created":
+                    created_response = _get(event, "response")
+                    self._checkpoint_response(
+                        operation_key,
+                        _get(created_response, "id")
+                        or _get(event, "response_id")
+                        or _get(event, "id"),
+                    )
+                elif event_type == "response.output_text.delta":
                     delta = _get(event, "delta", "")
-                    complete_text.append(delta)
-                    yield {"type": "text.delta", "delta": delta}
+                    round_text.append(delta)
+                    if not required_format:
+                        yield {"type": "text.delta", "delta": delta}
                 elif event_type == "response.output_item.added":
                     item = _get(event, "item")
-                    if _get(item, "type") in ("function_call", "mcp_call"):
+                    item_type = _get(item, "type")
+                    if item_type in {
+                        "function_call",
+                        "mcp_call",
+                        "web_search_call",
+                        "file_search_call",
+                        "code_interpreter_call",
+                        "image_generation_call",
+                        "computer_call",
+                    }:
                         call_id = _get(item, "call_id") or _get(item, "id")
-                        announced_calls.add(call_id)
+                        name = _get(item, "name") or _get(item, "server_label")
+                        key = _tool_call_key(call_id, item_type, name)
+                        if key in tool_calls_emitted:
+                            continue
+                        tool_calls_emitted.add(key)
                         yield {
                             "type": "tool.call",
                             "call_id": call_id,
-                            "name": _get(item, "name"),
-                            "tool_type": _get(item, "type"),
+                            "name": name,
+                            "tool_type": item_type,
                         }
                 elif event_type == "response.function_call_arguments.delta":
                     call_id = _get(event, "call_id") or _get(event, "item_id")
-                    if call_id not in announced_calls:
-                        announced_calls.add(call_id)
+                    key = _tool_call_key(
+                        call_id, "function_call", _get(event, "name")
+                    )
+                    if key not in tool_calls_emitted:
+                        tool_calls_emitted.add(key)
                         yield {
                             "type": "tool.call",
                             "call_id": call_id,
@@ -586,15 +828,37 @@ class ResponsesOrchestrator:
                         "delta": _get(event, "delta", ""),
                     }
                 elif event_type.startswith("response.mcp_call"):
-                    yield {
-                        "type": (
-                            "tool.result" if event_type.endswith(".completed")
-                            else "tool.call"
-                        ),
-                        "tool_type": "mcp_call",
-                        "source_event": event_type,
-                        "name": _get(event, "name"),
-                    }
+                    call_id = (
+                        _get(event, "item_id")
+                        or _get(event, "call_id")
+                        or _get(event, "id")
+                    )
+                    name = _get(event, "name") or _get(event, "server_label")
+                    key = _tool_call_key(call_id, "mcp_call", name)
+                    if key not in tool_calls_emitted:
+                        tool_calls_emitted.add(key)
+                        yield {
+                            "type": "tool.call",
+                            "call_id": call_id,
+                            "tool_type": "mcp_call",
+                            "source_event": event_type,
+                            "name": name,
+                        }
+                    if (
+                        event_type.endswith((".completed", ".failed"))
+                        and key not in tool_results_emitted
+                    ):
+                        pending_stream_results[key] = {
+                            "type": "tool.result",
+                            "call_id": call_id,
+                            "tool_type": "mcp_call",
+                            "source_event": event_type,
+                            "name": name,
+                            "status": (
+                                "failed" if event_type.endswith(".failed")
+                                else "completed"
+                            ),
+                        }
                 elif any(
                     event_type.startswith(f"response.{tool_type}_call")
                     for tool_type in (
@@ -602,15 +866,35 @@ class ResponsesOrchestrator:
                         "image_generation", "computer",
                     )
                 ):
-                    yield {
-                        "type": (
-                            "tool.result" if event_type.endswith(".completed")
-                            else "tool.call"
-                        ),
-                        "tool_type": event_type.split(".")[1],
-                        "source_event": event_type,
-                        "call_id": _get(event, "item_id"),
-                    }
+                    tool_type = event_type.split(".")[1]
+                    call_id = (
+                        _get(event, "item_id")
+                        or _get(event, "call_id")
+                        or _get(event, "id")
+                    )
+                    key = _tool_call_key(call_id, tool_type, None)
+                    if key not in tool_calls_emitted:
+                        tool_calls_emitted.add(key)
+                        yield {
+                            "type": "tool.call",
+                            "tool_type": tool_type,
+                            "source_event": event_type,
+                            "call_id": call_id,
+                        }
+                    if (
+                        event_type.endswith((".completed", ".failed"))
+                        and key not in tool_results_emitted
+                    ):
+                        pending_stream_results[key] = {
+                            "type": "tool.result",
+                            "tool_type": tool_type,
+                            "source_event": event_type,
+                            "call_id": call_id,
+                            "status": (
+                                "failed" if event_type.endswith(".failed")
+                                else "completed"
+                            ),
+                        }
                 elif event_type in (
                     "response.error", "response.failed", "response.incomplete",
                     "error",
@@ -623,6 +907,7 @@ class ResponsesOrchestrator:
                 raise RuntimeError("Responses stream ended without response.completed")
 
             response_id = _get(final_response, "id")
+            self._checkpoint_response(operation_key, response_id)
             citations = _citation_metadata(final_response)
             for citation in citations:
                 all_citations.append(citation)
@@ -634,7 +919,27 @@ class ResponsesOrchestrator:
             for item in _get(final_response, "output", []) or []:
                 native_result = _native_tool_result(item)
                 if native_result:
-                    yield native_result
+                    key = _tool_call_key(
+                        native_result.get("call_id"),
+                        native_result.get("tool_type"),
+                        native_result.get("name"),
+                    )
+                    if key not in tool_calls_emitted:
+                        tool_calls_emitted.add(key)
+                        yield {
+                            "type": "tool.call",
+                            "call_id": native_result.get("call_id"),
+                            "tool_type": native_result.get("tool_type"),
+                            "name": native_result.get("name"),
+                        }
+                    if key not in tool_results_emitted:
+                        tool_results_emitted.add(key)
+                        pending_stream_results.pop(key, None)
+                        yield native_result
+            for key, result in pending_stream_results.items():
+                if key not in tool_results_emitted:
+                    tool_results_emitted.add(key)
+                    yield result
 
             mcp_approvals = _mcp_approval_requests(final_response)
             if mcp_approvals:
@@ -648,6 +953,7 @@ class ResponsesOrchestrator:
                         "arguments": approval["arguments"],
                         "_response_id": response_id,
                         "_provider_item_id": approval["provider_item_id"],
+                        "_artifact_ids": list(ready_artifacts),
                     }
                     yield approval_event
                     if self.approval_handler is None:
@@ -680,7 +986,52 @@ class ResponsesOrchestrator:
             if not calls:
                 output_text = _get(final_response, "output_text", None)
                 if output_text is None:
-                    output_text = "".join(complete_text)
+                    output_text = "".join(round_text)
+                if required_format and not any(
+                    artifact.get("format") == required_format
+                    for artifact in ready_artifacts.values()
+                ):
+                    if repair_attempts < 1:
+                        repair_attempts += 1
+                        round_number += 1
+                        if round_number > MAX_LOCAL_TOOL_ROUNDS:
+                            raise RuntimeError("Deliverable repair limit exceeded")
+                        input_value = (
+                            "The requested deliverable is incomplete. Do not "
+                            "claim completion or substitute another format. "
+                            f"Create and export a validated .{required_format} "
+                            "artifact now, using the governed document tools. "
+                            "Finish only after export_document returns an "
+                            "artifact with status ready."
+                        )
+                        previous_response_id = response_id
+                        first = False
+                        continue
+                    failure_text = (
+                        f"The requested .{required_format} deliverable is "
+                        "incomplete because no validated artifact was produced."
+                    )
+                    yield {
+                        "type": "deliverable.incomplete",
+                        "requested_format": required_format,
+                        "reason": "validated_artifact_missing",
+                    }
+                    yield {"type": "text.delta", "delta": failure_text}
+                    yield {
+                        "type": "completion",
+                        "text": failure_text,
+                        "citations": all_citations,
+                        "sources": all_sources,
+                        "artifacts": list(ready_artifacts.values()),
+                        "deliverable": {
+                            "status": "incomplete",
+                            "requested_format": required_format,
+                        },
+                        "_response_id": response_id,
+                    }
+                    return
+                if required_format and output_text:
+                    yield {"type": "text.delta", "delta": output_text}
                 completion = {
                     "type": "completion",
                     "text": output_text,
@@ -689,6 +1040,11 @@ class ResponsesOrchestrator:
                     "artifacts": list(ready_artifacts.values()),
                     "_response_id": response_id,
                 }
+                if required_format:
+                    completion["deliverable"] = {
+                        "status": "ready",
+                        "requested_format": required_format,
+                    }
                 if text_format:
                     try:
                         completion["structured_output"] = json.loads(output_text)
@@ -710,6 +1066,18 @@ class ResponsesOrchestrator:
                         "local function call"
                     )
                 call = approval_calls[0]
+                call_key = _tool_call_key(
+                    call["call_id"], "function_call", call["name"]
+                )
+                if call_key not in tool_calls_emitted:
+                    tool_calls_emitted.add(call_key)
+                    yield {
+                        "type": "tool.call",
+                        "call_id": call["call_id"],
+                        "name": call["name"],
+                        "arguments": call["arguments"],
+                        "tool_type": "function_call",
+                    }
                 approval_event = {
                     "type": "approval.required",
                     "approval_kind": "local_function",
@@ -717,6 +1085,7 @@ class ResponsesOrchestrator:
                     "arguments": call["arguments"],
                     "_response_id": response_id,
                     "_provider_item_id": call["call_id"],
+                    "_artifact_ids": list(ready_artifacts),
                 }
                 yield approval_event
                 if self.approval_handler is None:
@@ -727,28 +1096,32 @@ class ResponsesOrchestrator:
                     if not key.startswith("_")
                 }))
                 if approved:
-                    result = self.approved_dispatcher(
-                        call["name"], call["arguments"]
-                    )
+                    result = self._dispatch_call(call, approved=True)
                 else:
                     result = {"error": "The owner rejected this tool call."}
-                public_result = redact_server_paths(result)
-                artifact = _verified_artifact_from_result(result)
-                if artifact and artifact["artifact_id"] not in ready_artifacts:
-                    ready_artifacts[artifact["artifact_id"]] = artifact
-                    yield {"type": "artifact.ready", **artifact}
                 yield {
                     "type": "approval.resolved",
                     "approval_kind": "local_function",
                     "name": call["name"],
                     "approved": approved,
                 }
-                yield {
-                    "type": "tool.result",
-                    "call_id": call["call_id"],
-                    "name": call["name"],
-                    "result": public_result,
-                }
+                public_result = (
+                    result
+                    if self.expose_local_paths
+                    else redact_server_paths(result)
+                )
+                artifact = _verified_artifact_from_result(result)
+                if artifact and artifact["artifact_id"] not in ready_artifacts:
+                    ready_artifacts[artifact["artifact_id"]] = artifact
+                    yield {"type": "artifact.ready", **artifact}
+                if call_key not in tool_results_emitted:
+                    tool_results_emitted.add(call_key)
+                    yield {
+                        "type": "tool.result",
+                        "call_id": call["call_id"],
+                        "name": call["name"],
+                        "result": public_result,
+                    }
                 round_number += 1
                 if round_number > MAX_LOCAL_TOOL_ROUNDS:
                     raise RuntimeError("Local function recursion limit exceeded")
@@ -766,25 +1139,36 @@ class ResponsesOrchestrator:
                 raise RuntimeError("Local function recursion limit exceeded")
             tool_outputs = []
             for call in calls:
-                yield {
-                    "type": "tool.call",
-                    "call_id": call["call_id"],
-                    "name": call["name"],
-                    "arguments": call["arguments"],
-                    "tool_type": "function_call",
-                }
-                result = self.dispatcher(call["name"], call["arguments"])
-                public_result = redact_server_paths(result)
+                call_key = _tool_call_key(
+                    call["call_id"], "function_call", call["name"]
+                )
+                if call_key not in tool_calls_emitted:
+                    tool_calls_emitted.add(call_key)
+                    yield {
+                        "type": "tool.call",
+                        "call_id": call["call_id"],
+                        "name": call["name"],
+                        "arguments": call["arguments"],
+                        "tool_type": "function_call",
+                    }
+                result = self._dispatch_call(call, approved=False)
+                public_result = (
+                    result
+                    if self.expose_local_paths
+                    else redact_server_paths(result)
+                )
                 artifact = _verified_artifact_from_result(result)
                 if artifact and artifact["artifact_id"] not in ready_artifacts:
                     ready_artifacts[artifact["artifact_id"]] = artifact
                     yield {"type": "artifact.ready", **artifact}
-                yield {
-                    "type": "tool.result",
-                    "call_id": call["call_id"],
-                    "name": call["name"],
-                    "result": public_result,
-                }
+                if call_key not in tool_results_emitted:
+                    tool_results_emitted.add(call_key)
+                    yield {
+                        "type": "tool.result",
+                        "call_id": call["call_id"],
+                        "name": call["name"],
+                        "result": public_result,
+                    }
                 tool_outputs.append({
                     "type": "function_call_output",
                     "call_id": call["call_id"],
@@ -815,7 +1199,10 @@ def send_message(
         echo=True,
         approval_handler=terminal_approval_handler):
     orchestrator = ResponsesOrchestrator(
-        client, cfg, approval_handler=approval_handler
+        client,
+        cfg,
+        approval_handler=approval_handler,
+        expose_local_paths=True,
     )
     completion = None
     for event in orchestrator.stream_turn(
@@ -931,6 +1318,17 @@ def dispatch_realtime_function(
             client=client,
             cfg=cfg,
         )
+    from realtime_config import realtime_tool_schemas
+
+    allowed = {
+        tool.get("name")
+        for tool in realtime_tool_schemas()
+        if isinstance(tool, dict) and tool.get("type") == "function"
+    }
+    if name not in allowed:
+        raise ValueError(f"Tool '{name}' is not available in Realtime mode.")
     if approval_granted:
-        return dispatch_approved_local_function(name, arguments)
-    return dispatch_local_function(name, arguments)
+        return redact_server_paths(
+            dispatch_approved_local_function(name, arguments)
+        )
+    return redact_server_paths(dispatch_local_function(name, arguments))

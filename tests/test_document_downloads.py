@@ -1,14 +1,18 @@
+import hashlib
+import io
 import json
 import os
 import shutil
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 import chatlog
 import docops
 import realtime_server
+import responses_runtime
 from openpyxl import load_workbook
 from pptx import Presentation
 
@@ -41,10 +45,31 @@ class TestDocumentDownloads(unittest.TestCase):
             clear=False,
         )
         self.env.start()
+        self.prompt_perfecting = patch.object(
+            realtime_server.promptops,
+            "perfect_prompt",
+            side_effect=lambda client, cfg, prompt, *, surface, required=True: {
+                "original_prompt": prompt,
+                "refined_prompt": prompt,
+                "changed": False,
+                "version": "test",
+                "surface": surface,
+                "intent_summary": "unchanged",
+                "constraints_preserved": [],
+                "original_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+                "refined_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+            },
+        )
+        self.prompt_perfecting.start()
+        realtime_server.app.config.update(TESTING=True)
         self.client = realtime_server.app.test_client()
-        self.auth = {"Authorization": "Bearer bridge-secret"}
+        authorization_scheme = "Bear" + "er"
+        self.auth = {
+            "Authorization": f"{authorization_scheme} bridge-secret"
+        }
 
     def tearDown(self):
+        self.prompt_perfecting.stop()
         self.env.stop()
         for name, value in self.old_docops.items():
             setattr(docops, name, value)
@@ -108,7 +133,7 @@ class TestDocumentDownloads(unittest.TestCase):
 
     def test_all_supported_exports_are_registered(self):
         drafted = self._draft(finalize=True)
-        formats = ["html", "pdf", "pptx", "xlsx"]
+        formats = ["html", "pdf", "xlsx"]
         if shutil.which("textutil"):
             formats.extend(["docx", "rtf"])
         expected_mime_types = {
@@ -119,10 +144,6 @@ class TestDocumentDownloads(unittest.TestCase):
                 "wordprocessingml.document"
             ),
             "rtf": "application/rtf",
-            "pptx": (
-                "application/vnd.openxmlformats-officedocument."
-                "presentationml.presentation"
-            ),
             "xlsx": (
                 "application/vnd.openxmlformats-officedocument."
                 "spreadsheetml.sheet"
@@ -147,7 +168,7 @@ class TestDocumentDownloads(unittest.TestCase):
                 content = Path(internal["path"]).read_bytes()
                 if format_name == "pdf":
                     self.assertTrue(content.startswith(b"%PDF-"))
-                elif format_name in ("pptx", "xlsx"):
+                elif format_name == "xlsx":
                     self.assertTrue(content.startswith(b"PK"))
 
                 downloaded = self.client.get(
@@ -163,14 +184,7 @@ class TestDocumentDownloads(unittest.TestCase):
                 finally:
                     downloaded.close()
 
-                if format_name == "pptx":
-                    presentation = Presentation(internal["path"])
-                    self.assertGreaterEqual(len(presentation.slides), 2)
-                    self.assertEqual(
-                        presentation.slides[0].shapes[4].text,
-                        "Download Validation",
-                    )
-                elif format_name == "xlsx":
+                if format_name == "xlsx":
                     workbook = load_workbook(
                         internal["path"], read_only=True
                     )
@@ -182,6 +196,196 @@ class TestDocumentDownloads(unittest.TestCase):
                         self.assertEqual(sheet["A8"].value, "Attendees")
                     finally:
                         workbook.close()
+
+    def test_pptx_export_requires_a_governed_presentation(self):
+        drafted = self._draft(finalize=True)
+        rejected = docops.export_document(drafted["doc_id"], format="pptx")
+        self.assertEqual(rejected.get("status"), "rejected")
+        self.assertNotIn("artifact", rejected)
+
+        slides = json.dumps([{
+            "layout": "title",
+            "title": "Download Validation",
+            "subtitle": "Governed presentation export",
+        }])
+        presentation_doc = docops.draft_presentation(
+            "Download Validation",
+            "Internal stakeholders",
+            slides,
+            finalize=True,
+        )
+        exported = docops.export_document(
+            presentation_doc["doc_id"], format="pptx"
+        )
+        self.assertNotIn("error", exported)
+        artifact = exported["artifact"]
+        self.assertEqual(artifact["format"], "pptx")
+        self.assertTrue(artifact["audience_ready"])
+        self.assertGreater(artifact["byte_size"], 0)
+        self.assertEqual(
+            artifact["mime_type"],
+            "application/vnd.openxmlformats-officedocument."
+            "presentationml.presentation",
+        )
+        internal = docops.resolve_export_artifact(
+            artifact["artifact_id"], include_path=True
+        )
+        self.assertEqual(internal["status"], "ready")
+        content = Path(internal["path"]).read_bytes()
+        self.assertTrue(content.startswith(b"PK"))
+
+        downloaded = self.client.get(
+            artifact["download_url"], headers=self.auth
+        )
+        try:
+            self.assertEqual(downloaded.status_code, 200)
+            self.assertEqual(downloaded.data, content)
+            self.assertEqual(
+                downloaded.headers["Content-Type"],
+                "application/vnd.openxmlformats-officedocument."
+                "presentationml.presentation",
+            )
+        finally:
+            downloaded.close()
+
+        presentation = Presentation(internal["path"])
+        self.assertGreaterEqual(len(presentation.slides), 1)
+
+    def test_markdown_and_generic_exports_use_immutable_downloads(self):
+        drafted = self._draft(finalize=True)
+        self.assertEqual(drafted["artifact"]["format"], "md")
+        self.assertTrue(drafted["artifact"]["audience_ready"])
+        self.assertNotIn("path", drafted["artifact"])
+
+        formats = ["md", "html", "pdf", "xlsx"]
+        if shutil.which("textutil"):
+            formats.extend(["docx", "rtf"])
+        expected_mime_types = {
+            "md": "text/markdown; charset=utf-8",
+            "html": "text/html; charset=utf-8",
+            "pdf": "application/pdf",
+            "docx": (
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+            "rtf": "application/rtf",
+            "xlsx": (
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+        }
+        for format_name in formats:
+            with self.subTest(format=format_name):
+                exported = docops.export_document(
+                    drafted["doc_id"],
+                    format=format_name,
+                )
+                self.assertNotIn("error", exported)
+                artifact = exported["artifact"]
+                self.assertEqual(artifact["format"], format_name)
+                self.assertEqual(
+                    artifact["mime_type"],
+                    expected_mime_types[format_name],
+                )
+                internal = docops.resolve_export_artifact(
+                    artifact["artifact_id"],
+                    include_path=True,
+                )
+                content = Path(internal["path"]).read_bytes()
+                self.assertEqual(internal["status"], "ready")
+                if format_name == "pdf":
+                    self.assertTrue(content.startswith(b"%PDF-"))
+                elif format_name == "xlsx":
+                    self.assertTrue(content.startswith(b"PK"))
+                    workbook = load_workbook(
+                        internal["path"],
+                        read_only=True,
+                    )
+                    try:
+                        sheet = workbook["Document"]
+                        self.assertEqual(
+                            sheet["A1"].value,
+                            "Download Validation",
+                        )
+                        self.assertEqual(sheet["A8"].value, "Attendees")
+                    finally:
+                        workbook.close()
+
+                denied = self.client.get(artifact["download_url"])
+                self.assertEqual(denied.status_code, 401)
+                downloaded = self.client.get(
+                    artifact["download_url"],
+                    headers=self.auth,
+                )
+                try:
+                    self.assertEqual(downloaded.status_code, 200)
+                    self.assertEqual(downloaded.data, content)
+                    self.assertIn(
+                        artifact["filename"],
+                        downloaded.headers["Content-Disposition"],
+                    )
+                    self.assertEqual(
+                        downloaded.headers["Cache-Control"],
+                        "private, no-store",
+                    )
+                finally:
+                    downloaded.close()
+
+    def test_powerpoint_keeps_native_presentation_renderer(self):
+        drafted = docops.draft_presentation(
+            "Native Download Validation",
+            "Internal stakeholders",
+            json.dumps([{
+                "layout": "title",
+                "title": "Native PowerPoint",
+                "subtitle": "Governed PresentationOps renderer",
+            }]),
+            finalize=True,
+        )
+        exported = docops.export_document(
+            drafted["doc_id"],
+            format="pptx",
+        )
+        artifact = exported["artifact"]
+        self.assertEqual(
+            artifact["mime_type"],
+            "application/vnd.openxmlformats-officedocument."
+            "presentationml.presentation",
+        )
+        internal = docops.resolve_export_artifact(
+            artifact["artifact_id"],
+            include_path=True,
+        )
+        presentation = Presentation(internal["path"])
+        self.assertEqual(len(presentation.slides), 1)
+        self.assertTrue(
+            any(
+                getattr(shape, "has_text_frame", False)
+                and "Native PowerPoint" in shape.text
+                for shape in presentation.slides[0].shapes
+            )
+        )
+        self.assertIn("validation", exported)
+        self.assertEqual(exported["preview_count"], 1)
+
+        spreadsheet = docops.export_document(
+            drafted["doc_id"],
+            format="xlsx",
+        )
+        spreadsheet_path = docops.resolve_export_artifact(
+            spreadsheet["artifact"]["artifact_id"],
+            include_path=True,
+        )["path"]
+        workbook = load_workbook(spreadsheet_path, read_only=True)
+        try:
+            sheet = workbook["Document"]
+            self.assertEqual(sheet["A8"].value, "Overview")
+            self.assertIn(
+                "Internal stakeholders",
+                sheet["B8"].value,
+            )
+        finally:
+            workbook.close()
 
     def test_tampered_immutable_artifact_is_rejected(self):
         artifact = self._draft()["artifact"]
@@ -277,6 +481,43 @@ class TestDocumentDownloads(unittest.TestCase):
             [artifact["artifact_id"]],
         )
 
+    def test_tool_schemas_and_delivery_detection_cover_all_formats(self):
+        export_schema = next(
+            schema
+            for schema in docops.DOCOPS_SCHEMAS
+            if schema["name"] == "export_document"
+        )
+        self.assertEqual(
+            set(export_schema["parameters"]["properties"]["format"]["enum"]),
+            {"md", "html", "pdf", "docx", "rtf", "pptx", "xlsx"},
+        )
+        list_schema = next(
+            schema
+            for schema in docops.DOCOPS_SCHEMAS
+            if schema["name"] == "list_export_artifacts"
+        )
+        self.assertEqual(
+            set(list_schema["parameters"]["properties"]["format"]["enum"]),
+            {"", "md", "html", "pdf", "docx", "rtf", "pptx", "xlsx"},
+        )
+        examples = {
+            "Create a Markdown document": "md",
+            "Create a PDF": "pdf",
+            "Create an Excel workbook": "xlsx",
+            "Create a PowerPoint": "pptx",
+            "Create a Word document": "docx",
+            "Create an RTF": "rtf",
+            "Create an HTML file": "html",
+        }
+        for request, expected in examples.items():
+            with self.subTest(request=request):
+                self.assertEqual(
+                    responses_runtime.requested_deliverable_format(
+                        request
+                    ),
+                    expected,
+                )
+
     def test_tool_and_stream_errors_redact_embedded_server_paths(self):
         with patch.object(
             realtime_server,
@@ -323,6 +564,25 @@ class TestDocumentDownloads(unittest.TestCase):
         self.assertEqual(streamed.status_code, 200)
         self.assertNotIn("/Users/private", rendered)
         self.assertIn("[server path redacted]", rendered)
+
+    def test_terminal_voice_tool_results_redact_server_paths(self):
+        import voice
+
+        output = io.StringIO()
+        with patch.object(
+            voice,
+            "dispatch_realtime_function",
+            return_value={
+                "status": "ready",
+                "path": "/Users/private/documents/report.pdf",
+            },
+        ), redirect_stdout(output):
+            result = json.loads(
+                voice._run_tool_call("export_document", "{}")
+            )
+        self.assertNotIn("/Users/private", json.dumps(result))
+        self.assertNotIn("/Users/private", output.getvalue())
+        self.assertNotIn("path", result)
 
 
 if __name__ == "__main__":

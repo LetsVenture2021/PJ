@@ -3919,6 +3919,14 @@ def sync_vector_store(
                     "vector_store_file_id": vector_store_file_id or None,
                     "filename": filename,
                 }
+                if source_file_id and _is_n8n_vector_source(entry, {}):
+                    # The vector-store listing alone (no metadata fetch
+                    # required) already identifies this as an n8n source.
+                    # Mark it seen now so a later transient metadata-fetch
+                    # failure for this same file cannot cause
+                    # _mark_unseen_n8n_sources to misclassify a
+                    # still-present source as absent.
+                    n8n_seen_source_ids.add(source_file_id)
                 try:
                     if not source_file_id:
                         raise ValueError("vector-store entry has no file identity")
@@ -4299,6 +4307,13 @@ def sync_vector_store(
                     totals["files_failed"] += 1
                     errors.append(f"{source_file_id or vector_store_file_id}: {error}")
                     report.update({"status": "failed", "error": error[:1000]})
+                    if source_file_id:
+                        # This file is still present in the vector store's
+                        # file listing for this run; a per-file identity or
+                        # metadata error makes its n8n-source disposition
+                        # indeterminate, not confirmed absent. Never let a
+                        # transient failure feed the absence sweep below.
+                        n8n_seen_source_ids.add(source_file_id)
                     if source_file_id and not dry_run:
                         _record_sync_attempt(
                             vector_store_id,

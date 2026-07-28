@@ -2,7 +2,9 @@
   "name": "PJ",
   "model": "gpt-5.6-sol",
   "vector_store_id": "vs_6a6548b0416c8191a617b1f11ce162c8",
+  "vector_store_ids": ["vs_6a6548b0416c8191a617b1f11ce162c8"],
   "instructions_file": "pj_instructions.txt",
+  "instruction_files": ["pj_instructions.txt"],
   "computer_use_enabled": true,
   "tool_search_enabled": true,
   "reasoning_effort": "low",
@@ -13,5 +15,14 @@
     "corpus_sha256": "65b2d20b7c7ac8d92c6c36eeffdb08e6eeb815d33a2567ec30aff13d2c808229",
     "corpus_version": "1.0.0",
     "evaluation_receipt_sha256": "83b9aa09d7dd093c9e3830468b274fe5d9d6b2849538dad6c486c484b6b90b27"
+  },
+  "prompt_perfecting": {
+    "enabled": true,
+    "model": "gpt-5.6-sol",
+    "timeout_seconds": 30,
+    "reasoning_effort": "low",
+    "surfaces": ["cli", "full_power", "full_power_voice"],
+    "max_input_chars": 20000,
+    "max_output_chars": 30000
   }
 }
