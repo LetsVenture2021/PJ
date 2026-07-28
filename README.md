@@ -154,6 +154,10 @@ Do not commit secrets. Both `.env` and runtime files (`*.sqlite3`, `state.json`,
 - `tool_policy.json`: local tools that require explicit approval.
 - `pj_instructions.txt`: assistant instructions.
 
+Repository administrators should follow the
+[GitHub security controls checklist](docs/security-controls.md) to verify
+Dependabot, secret scanning, and push protection.
+
 The checked-in `config.json` contains project-specific model and vector-store
 IDs; access to those resources is not provisioned by this repository.
 
