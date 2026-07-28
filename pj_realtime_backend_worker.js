@@ -6,6 +6,8 @@ const MAX_ERROR_DETAIL_LENGTH = 320;
 const DEFAULT_TOOL_SCHEMA_CACHE_TTL_MS = 60000;
 const DEFAULT_MAX_REALTIME_TOOLS = 256;
 const DEFAULT_ACCESS_CERT_CACHE_TTL_MS = 300000;
+const REALTIME_CALL_TIMEOUT_MS = 30000;
+const REALTIME_TOKEN_TIMEOUT_MS = 12000;
 const ACCESS_CLOCK_SKEW_SECONDS = 60;
 const MAX_RESPONSES_REQUEST_BYTES = 262144;
 const REALTIME_EXCLUDED_TOOL_NAMES = new Set([
@@ -409,11 +411,11 @@ async function validateAccessIdentity(request, env, fetchImpl = fetch) {
   }
 }
 
-async function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = 20000, fetchImpl = fetch) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(new Error("timeout")), timeoutMs);
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    return await fetchImpl(url, { ...options, signal: controller.signal });
   } finally {
     clearTimeout(timeout);
   }
@@ -977,6 +979,7 @@ async function requestRealtimeCall(
   tools,
   voiceMode,
   instructions,
+  fetchImpl = fetch,
 ) {
   const form = new FormData();
   form.set("sdp", sdpOffer);
@@ -987,20 +990,35 @@ async function requestRealtimeCall(
     ),
   );
 
-  const openaiResp = await fetch("https://api.openai.com/v1/realtime/calls", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-    },
-    body: form,
-  });
+  try {
+    const openaiResp = await fetchWithTimeout(
+      "https://api.openai.com/v1/realtime/calls",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+        },
+        body: form,
+      },
+      REALTIME_CALL_TIMEOUT_MS,
+      fetchImpl,
+    );
 
-  const text = await openaiResp.text();
-  return {
-    ok: openaiResp.ok,
-    status: openaiResp.status,
-    text,
-  };
+    const text = await openaiResp.text();
+    return {
+      ok: openaiResp.ok,
+      status: openaiResp.status,
+      text,
+      transportError: false,
+    };
+  } catch (exc) {
+    return {
+      ok: false,
+      status: 502,
+      text: `OpenAI realtime call request failed before completion: ${trimDetail(exc) || "unknown transport error"}`,
+      transportError: true,
+    };
+  }
 }
 
 async function requestRealtimeClientSecret(
@@ -1009,29 +1027,45 @@ async function requestRealtimeClientSecret(
   tools,
   voiceMode,
   instructions,
+  fetchImpl = fetch,
 ) {
-  const openaiResp = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      session: createSessionConfig(
-        model,
-        env,
-        tools,
-        voiceMode,
-        instructions,
-      ),
-    }),
-  });
-  const text = await openaiResp.text();
-  return {
-    ok: openaiResp.ok,
-    status: openaiResp.status,
-    text,
-  };
+  try {
+    const openaiResp = await fetchWithTimeout(
+      "https://api.openai.com/v1/realtime/client_secrets",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          session: createSessionConfig(
+            model,
+            env,
+            tools,
+            voiceMode,
+            instructions,
+          ),
+        }),
+      },
+      REALTIME_TOKEN_TIMEOUT_MS,
+      fetchImpl,
+    );
+    const text = await openaiResp.text();
+    return {
+      ok: openaiResp.ok,
+      status: openaiResp.status,
+      text,
+      transportError: false,
+    };
+  } catch (exc) {
+    return {
+      ok: false,
+      status: 502,
+      text: `OpenAI client secret request failed before completion: ${trimDetail(exc) || "unknown transport error"}`,
+      transportError: true,
+    };
+  }
 }
 
 function extractClientSecretPayload(rawText) {
@@ -1190,8 +1224,10 @@ async function handleSession(request, env, corsOrigin, requestId) {
     });
     return jsonResponse(
       errorPayload(
-        "openai_realtime_failed",
-        `Realtime signaling failed (model: ${selectedModel}).`,
+        result.transportError ? "openai_realtime_unreachable" : "openai_realtime_failed",
+        result.transportError
+          ? "OpenAI realtime signaling was unreachable."
+          : `Realtime signaling failed (model: ${selectedModel}).`,
         requestId,
         `sdp_length=${sdpOffer.length}; tool_count=${realtimeTools.length}; ${trimDetail(result.text)}`,
       ),
@@ -1315,8 +1351,10 @@ async function handleToken(request, env, corsOrigin, requestId) {
     });
     return jsonResponse(
       errorPayload(
-        "openai_client_secret_failed",
-        `Failed to create realtime client secret (model: ${selectedModel}).`,
+        result.transportError ? "openai_client_secret_unreachable" : "openai_client_secret_failed",
+        result.transportError
+          ? "OpenAI realtime client secret service was unreachable."
+          : `Failed to create realtime client secret (model: ${selectedModel}).`,
         requestId,
         trimDetail(result.text),
       ),
@@ -1516,6 +1554,8 @@ export {
   safeAttachmentDisposition,
   normalizeFunctionTools,
   resolveRealtimeTools,
+  requestRealtimeCall,
+  requestRealtimeClientSecret,
   toolBridgeTimeoutMs,
   stableJson,
   validateAccessClaims,
