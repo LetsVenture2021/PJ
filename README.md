@@ -250,19 +250,40 @@ Ingestion needs `OPENAI_API_KEY` and a configured vector store. Governed n8n
 ingestion additionally requires an independent evaluation receipt; inspect each
 script's `--help` before changing a corpus.
 
-## Tests
+## Tests and quality checks
 
-CI installs `requirements.txt` on Python 3.11 and runs exactly:
+The pull-request quality gate targets `master` and also runs after pushes to
+`master`. It uses Python 3.11 and Node.js 20. Run the same checks locally:
 
 ```bash
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m ruff check .
+python -m mypy
 python -m unittest discover tests -v
-node --test tests/test_worker_auth.mjs
+npm ci
+npm run lint
+npm test
 ```
+
+CI also runs `ruff format --check` against every Python file changed by the push
+or pull request. Format a changed file before pushing with
+`python -m ruff format PATH`.
 
 The Python suite uses temporary databases and mocked provider calls. On macOS,
 one CodeOps sandbox test can run with `/usr/bin/sandbox-exec`; where that
 executable is absent the test explicitly skips. The Node suite imports the
 Worker directly and does not require a Cloudflare account.
+
+### Repository settings checklist
+
+Workflow failures only block merging after branch protection is enabled:
+
+- [ ] In **Settings > Rules > Rulesets** (or **Settings > Branches**), add a rule
+      targeting `master`.
+- [ ] Require a pull request before merging.
+- [ ] Require status checks to pass and select **Python quality**,
+      **Python tests**, and **Worker quality**.
+- [ ] Require branches to be up to date before merging.
 
 ## Deployment
 

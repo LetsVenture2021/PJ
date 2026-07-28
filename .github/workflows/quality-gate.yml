@@ -1,0 +1,100 @@
+name: Quality gate
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-quality:
+    name: Python quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install quality tools
+        run: python -m pip install --requirement requirements-dev.txt
+
+      - name: Lint Python
+        run: python -m ruff check .
+
+      - name: Check changed Python formatting
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [[ -z "$BASE_SHA" || "$BASE_SHA" =~ ^0+$ ]] || ! git cat-file -e "$BASE_SHA^{commit}"; then
+            git ls-files -z -- '*.py' > /tmp/changed-python-files
+          else
+            git diff --name-only --diff-filter=ACMR -z "$BASE_SHA" "$GITHUB_SHA" -- '*.py' \
+              > /tmp/changed-python-files
+          fi
+
+          if [[ -s /tmp/changed-python-files ]]; then
+            xargs -0 python -m ruff format --check < /tmp/changed-python-files
+          else
+            echo "No Python files changed."
+          fi
+
+      - name: Type check Python
+        run: python -m mypy
+
+  python-tests:
+    name: Python tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --requirement requirements.txt
+
+      - name: Run Python tests
+        run: python -m unittest discover tests -v
+
+  worker-quality:
+    name: Worker quality
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint Worker
+        run: npm run lint
+
+      - name: Test Worker
+        run: npm test
