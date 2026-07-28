@@ -1,0 +1,30 @@
+minimum_pre_commit_version: "4.0.0"
+
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-lint
+        name: Ruff lint
+        entry: python -m ruff check
+        language: system
+        types: [python]
+
+      - id: ruff-format
+        name: Ruff format
+        entry: python -m ruff format --check
+        language: system
+        types: [python]
+
+      - id: eslint
+        name: ESLint
+        entry: npm exec --no -- eslint
+        language: system
+        files: ^(pj_realtime_backend_worker\.js|tests/test_worker_auth\.mjs)$
+        types: [javascript]
+
+      - id: prettier
+        name: Prettier
+        entry: npm exec --no -- prettier --check
+        language: system
+        files: ^(pj_realtime_backend_worker\.js|tests/test_worker_auth\.mjs)$
+        types: [javascript]

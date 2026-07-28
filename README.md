@@ -93,6 +93,22 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
+Install the local quality tools and Git pre-commit hook:
+
+```bash
+python -m pip install -r requirements-dev.txt
+npm ci
+pre-commit install
+```
+
+The hook checks staged Python files with Ruff lint and format validation, and
+the Worker JavaScript files with ESLint and Prettier. Run every hook against all
+tracked files at any time with:
+
+```bash
+pre-commit run --all-files
+```
+
 Create `~/.env` for the launcher, or export variables in the current shell when
 using `python pj.py` directly:
 

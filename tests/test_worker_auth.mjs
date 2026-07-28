@@ -3,10 +3,16 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const workerSource = await readFile(new URL("../pj_realtime_backend_worker.js", import.meta.url), "utf8");
+const workerSource = await readFile(
+  new URL("../pj_realtime_backend_worker.js", import.meta.url),
+  "utf8",
+);
 const webClientSource = await readFile(new URL("../webrtc_client.html", import.meta.url), "utf8");
 const wranglerSource = await readFile(new URL("../wrangler.toml.example", import.meta.url), "utf8");
-const webUtilsSource = await readFile(new URL("../assets/pj_web_utils.js", import.meta.url), "utf8");
+const webUtilsSource = await readFile(
+  new URL("../assets/pj_web_utils.js", import.meta.url),
+  "utf8",
+);
 const workerModule = await import(
   `data:text/javascript;base64,${Buffer.from(workerSource).toString("base64")}`
 );
@@ -116,7 +122,10 @@ test("deployment routes cover APIs without claiming frontend assets", () => {
     assert.ok(wranglerSource.includes(`pattern = "${route}"`));
   }
   assert.doesNotMatch(wranglerSource, /pattern = "pj-assistant\.ai\/\*"/);
-  assert.match(wranglerSource, /PJ_TOOL_BRIDGE_URL = "https:\/\/replace-with-private-runtime\/execute-tool"/);
+  assert.match(
+    wranglerSource,
+    /PJ_TOOL_BRIDGE_URL = "https:\/\/replace-with-private-runtime\/execute-tool"/,
+  );
   assert.match(webClientSource, /window\.location\.hostname === "www\.pj-assistant\.ai"/);
   assert.match(webClientSource, /\? "https:\/\/pj-assistant\.ai"/);
 });
@@ -142,38 +151,20 @@ test("Full Power routes and bridge URL derivation are narrowly scoped", () => {
   assert.equal(isResponsesRoute("GET", "/responses/sessions/search"), true);
   assert.equal(isResponsesRoute("POST", "/responses/sessions/example_123/resume"), true);
   assert.equal(isResponsesRoute("POST", "/responses/sessions/example_123/turns"), true);
+  assert.equal(isResponsesRoute("GET", `/responses/artifacts/ART-${"a".repeat(32)}`), true);
+  assert.equal(isResponsesRoute("GET", "/responses/sessions/example_123/artifacts"), true);
   assert.equal(
-    isResponsesRoute("GET", `/responses/artifacts/ART-${"a".repeat(32)}`),
+    isResponsesRoute("GET", "/responses/artifacts/ART-0123456789abcdef0123456789abcdef"),
     true,
   );
+  assert.equal(isResponsesRoute("GET", "/responses/artifacts/../../private"), false);
   assert.equal(
-    isResponsesRoute("GET", "/responses/sessions/example_123/artifacts"),
-    true,
-  );
-  assert.equal(
-    isResponsesRoute(
-      "GET",
-      "/responses/artifacts/ART-0123456789abcdef0123456789abcdef",
-    ),
-    true,
-  );
-  assert.equal(
-    isResponsesRoute("GET", "/responses/artifacts/../../private"),
-    false,
-  );
-  assert.equal(
-    isResponsesRoute(
-      "POST",
-      "/responses/sessions/example_123/approvals/approval_123",
-    ),
+    isResponsesRoute("POST", "/responses/sessions/example_123/approvals/approval_123"),
     true,
   );
   assert.equal(isResponsesRoute("DELETE", "/responses/sessions/example_123"), false);
   assert.equal(isResponsesRoute("POST", "/responses/arbitrary"), false);
-  assert.equal(
-    isResponsesRoute("GET", "/responses/artifacts/../../secret"),
-    false,
-  );
+  assert.equal(isResponsesRoute("GET", "/responses/artifacts/../../secret"), false);
   assert.equal(
     deriveResponsesBridgeBaseUrl({
       PJ_TOOL_BRIDGE_URL: "https://tools.pj-assistant.ai/execute-tool",
@@ -190,20 +181,18 @@ test("prompt perfecting is an authenticated Full Power bridge route", () => {
 test("voice policies keep Fast Voice automatic and Full Power Voice explicit", () => {
   const fast = createSessionConfig("gpt-realtime", env, [], "fast");
   const fullPower = createSessionConfig(
-    "gpt-realtime", env, [], "full_power", "Authoritative PJ instructions"
+    "gpt-realtime",
+    env,
+    [],
+    "full_power",
+    "Authoritative PJ instructions",
   );
   assert.equal(fast.audio.input.turn_detection.create_response, true);
   assert.equal(fullPower.audio.input.turn_detection.create_response, false);
   assert.equal(fullPower.instructions, "Authoritative PJ instructions");
   assert.equal(fast.audio.input.turn_detection.interrupt_response, true);
   assert.equal(fullPower.audio.input.turn_detection.interrupt_response, true);
-  assert.equal(
-    isResponsesRoute(
-      "POST",
-      "/responses/sessions/example_123/realtime-messages",
-    ),
-    true,
-  );
+  assert.equal(isResponsesRoute("POST", "/responses/sessions/example_123/realtime-messages"), true);
 });
 
 test("successful session signaling returns the durable session id", async () => {
@@ -212,19 +201,15 @@ test("successful session signaling returns the durable session id", async () => 
     assert.equal(url, "https://api.openai.com/v1/realtime/calls");
     assert.equal(options.method, "POST");
     assert.match(options.headers.Authorization, /^Bearer /);
-    return new Response(
-      "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
-      {
-        status: 200,
-        headers: { "content-type": "application/sdp" },
-      },
-    );
+    return new Response("v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n", {
+      status: 200,
+      headers: { "content-type": "application/sdp" },
+    });
   };
   try {
     const response = await handleSession(
       new Request(
-        "https://pj-assistant.ai/session"
-          + "?session_id=session_voice_123&voice_mode=full_power",
+        "https://pj-assistant.ai/session" + "?session_id=session_voice_123&voice_mode=full_power",
         {
           method: "POST",
           headers: { "content-type": "application/sdp" },
@@ -240,14 +225,8 @@ test("successful session signaling returns the durable session id", async () => 
     );
 
     assert.equal(response.status, 200);
-    assert.equal(
-      response.headers.get("x-pj-session-id"),
-      "session_voice_123",
-    );
-    assert.equal(
-      response.headers.get("content-type"),
-      "application/sdp",
-    );
+    assert.equal(response.headers.get("x-pj-session-id"), "session_voice_123");
+    assert.equal(response.headers.get("content-type"), "application/sdp");
     assert.match(await response.text(), /^v=0/m);
   } finally {
     globalThis.fetch = originalFetch;
@@ -255,17 +234,19 @@ test("successful session signaling returns the durable session id", async () => 
 });
 
 test("Realtime bridge validates contract, tool manifest, and instructions", async () => {
-  const tools = [{
-    type: "function",
-    name: "example_tool",
-    description: "Example — tool",
-    parameters: {
-      type: "object",
-      properties: {},
-      required: [],
-      additionalProperties: false,
+  const tools = [
+    {
+      type: "function",
+      name: "example_tool",
+      description: "Example — tool",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: [],
+        additionalProperties: false,
+      },
     },
-  }];
+  ];
   const instructions = "Authoritative PJ instructions\n";
   const digest = (value) => createHash("sha256").update(value).digest("hex");
   const payload = {
@@ -278,10 +259,11 @@ test("Realtime bridge validates contract, tool manifest, and instructions", asyn
     tool_policy_sha256: "a".repeat(64),
   };
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(JSON.stringify(payload), {
-    status: 200,
-    headers: { "content-type": "application/json" },
-  });
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
   try {
     const bridgeEnv = {
       PJ_TOOL_BRIDGE_URL: "https://bridge.example/execute-tool",
@@ -325,15 +307,11 @@ test("Realtime bridge validates contract, tool manifest, and instructions", asyn
     );
     assert.equal(staleRejected.source, "bridge_error");
     assert.equal(staleRejected.tools.length, 0);
-    const degradedHealth = await worker.fetch(
-      new Request("https://pj-assistant.ai/health"),
-      bridgeEnv,
-    ).then((response) => response.json());
+    const degradedHealth = await worker
+      .fetch(new Request("https://pj-assistant.ai/health"), bridgeEnv)
+      .then((response) => response.json());
     assert.equal(degradedHealth.full_tooling_ready, false);
-    assert.equal(
-      degradedHealth.tool_schema_reconciliation_status,
-      "failed",
-    );
+    assert.equal(degradedHealth.tool_schema_reconciliation_status, "failed");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -359,10 +337,9 @@ test("Full Power proxy streams SSE with only allowlisted bridge headers", async 
     "request-stream",
     async (url, options) => {
       captured = { url, options };
-      return new Response(
-        'event: completion\ndata: {"type":"completion","text":"Done"}\n\n',
-        { headers: { "content-type": "text/event-stream" } },
-      );
+      return new Response('event: completion\ndata: {"type":"completion","text":"Done"}\n\n', {
+        headers: { "content-type": "text/event-stream" },
+      });
     },
   );
 
@@ -398,10 +375,7 @@ test("Full Power proxy preserves verified binary downloads with safe filenames",
     },
   );
 
-  assert.equal(
-    captured.url,
-    `https://tools.pj-assistant.ai/responses/artifacts/${artifactId}`,
-  );
+  assert.equal(captured.url, `https://tools.pj-assistant.ai/responses/artifacts/${artifactId}`);
   assert.equal(captured.options.headers.accept, "application/octet-stream");
   assert.equal(response.headers.get("content-disposition"), 'attachment; filename="report.docx"');
   assert.equal(response.headers.get("etag"), '"sha256-abc123"');
@@ -413,9 +387,7 @@ test("Full Power proxy preserves binary artifacts and only safe download headers
   let captured = null;
   const bytes = new Uint8Array([80, 75, 3, 4, 9, 8, 7]);
   const response = await handleResponsesProxy(
-    new Request(
-      "https://pj-assistant.ai/responses/artifacts/ART-0123456789abcdef0123456789abcdef",
-    ),
+    new Request("https://pj-assistant.ai/responses/artifacts/ART-0123456789abcdef0123456789abcdef"),
     {
       PJ_TOOL_BRIDGE_URL: "https://tools.pj-assistant.ai/execute-tool",
       PJ_TOOL_BRIDGE_TOKEN: "bridge-secret",
@@ -447,10 +419,7 @@ test("Full Power proxy preserves binary artifacts and only safe download headers
     response.headers.get("content-type"),
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
   );
-  assert.equal(
-    response.headers.get("content-disposition"),
-    'attachment; filename="deck.pptx"',
-  );
+  assert.equal(response.headers.get("content-disposition"), 'attachment; filename="deck.pptx"');
   assert.equal(response.headers.get("etag"), '"sha256-abc123"');
   assert.equal(response.headers.get("content-length"), null);
   assert.equal(response.headers.get("x-upstream-secret"), null);
@@ -469,28 +438,23 @@ test("attachment filenames are rebuilt from safe basenames", () => {
 test("artifact disposition is reconstructed from a validated basename", () => {
   assert.equal(
     safeAttachmentDisposition(
-      'attachment; filename="../../private/deck.pptx"; filename*=UTF-8\'\'..%2F..%2Fprivate%2Fdeck.pptx',
+      "attachment; filename=\"../../private/deck.pptx\"; filename*=UTF-8''..%2F..%2Fprivate%2Fdeck.pptx",
     ),
     'attachment; filename="deck.pptx"',
   );
-  assert.equal(
-    safeAttachmentDisposition('attachment; filename="bad\nname.pptx"'),
-    null,
-  );
+  assert.equal(safeAttachmentDisposition('attachment; filename="bad\nname.pptx"'), null);
   assert.equal(safeAttachmentDisposition("inline; filename=deck.pptx"), null);
 });
 
 test("Access configuration requires team domain, audience, and owner allowlist", () => {
   assert.throws(() => buildAccessConfig({}), /CF_ACCESS_TEAM_DOMAIN/);
+  assert.throws(() => buildAccessConfig({ CF_ACCESS_TEAM_DOMAIN: TEAM_DOMAIN }), /CF_ACCESS_AUD/);
   assert.throws(
-    () => buildAccessConfig({ CF_ACCESS_TEAM_DOMAIN: TEAM_DOMAIN }),
-    /CF_ACCESS_AUD/,
-  );
-  assert.throws(
-    () => buildAccessConfig({
-      CF_ACCESS_TEAM_DOMAIN: TEAM_DOMAIN,
-      CF_ACCESS_AUD: AUDIENCE,
-    }),
+    () =>
+      buildAccessConfig({
+        CF_ACCESS_TEAM_DOMAIN: TEAM_DOMAIN,
+        CF_ACCESS_AUD: AUDIENCE,
+      }),
     /PJ_OWNER_EMAILS/,
   );
 });
@@ -603,25 +567,15 @@ test("public health warms tool schemas and reports n8n readiness", async () => {
     // own bridge payload first (other tests in this file also warm the
     // same cache; forceRefresh keeps this test's assertions independent of
     // suite ordering rather than reading a stale prior test's cache).
-    await resolveRealtimeTools(
-      env,
-      "warm-request",
-      "https://pj-assistant.ai/health",
-      true,
-    );
-    const health = await worker.fetch(
-      new Request("https://pj-assistant.ai/health"),
-      env,
-    );
+    await resolveRealtimeTools(env, "warm-request", "https://pj-assistant.ai/health", true);
+    const health = await worker.fetch(new Request("https://pj-assistant.ai/health"), env);
     assert.equal(health.status, 200);
     const payload = await health.json();
     assert.equal(payload.tool_schema_cache_source, "bridge");
     assert.equal(payload.tool_schema_cache_count, 3);
     assert.equal(payload.full_tooling_ready, true);
     assert.equal(payload.n8n_corpus_tools_ready, true);
-    assert.deepEqual(requestedUrls, [
-      "https://private-runtime.example/tool-schemas",
-    ]);
+    assert.deepEqual(requestedUrls, ["https://private-runtime.example/tool-schemas"]);
     assert.equal(authorizationHeaders.length, 1);
     assert.equal(typeof authorizationHeaders[0], "string");
     assert.ok(authorizationHeaders[0].endsWith("bridge-secret"));
@@ -643,29 +597,35 @@ test("downstream bridge headers contain only the bridge credential", () => {
 test("all Worker responses use the hardened response header policy", () => {
   const headers = responseHeaders("https://pj-assistant.ai", "request-456");
   assert.equal(headers["cache-control"], "no-store");
-  assert.equal(headers["content-security-policy"], "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
+  assert.equal(
+    headers["content-security-policy"],
+    "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+  );
   assert.equal(headers["referrer-policy"], "no-referrer");
   assert.match(headers["access-control-expose-headers"], /content-disposition/);
 });
 
 test("realtime excludes long-running tools and aligns bridge timeouts", () => {
-  const tools = normalizeFunctionTools([
-    {
-      type: "function",
-      name: "get_current_time",
-      parameters: { type: "object", properties: {} },
-    },
-    {
-      type: "function",
-      name: "sync_vector_store",
-      parameters: { type: "object", properties: {} },
-    },
-    {
-      type: "function",
-      name: "delegate_advanced_task",
-      parameters: { type: "object", properties: {} },
-    },
-  ], 10);
+  const tools = normalizeFunctionTools(
+    [
+      {
+        type: "function",
+        name: "get_current_time",
+        parameters: { type: "object", properties: {} },
+      },
+      {
+        type: "function",
+        name: "sync_vector_store",
+        parameters: { type: "object", properties: {} },
+      },
+      {
+        type: "function",
+        name: "delegate_advanced_task",
+        parameters: { type: "object", properties: {} },
+      },
+    ],
+    10,
+  );
   assert.deepEqual(
     tools.map((tool) => tool.name),
     ["get_current_time", "delegate_advanced_task"],
@@ -675,13 +635,8 @@ test("realtime excludes long-running tools and aligns bridge timeouts", () => {
 });
 
 test("browser and Worker advertise the same contract version", async () => {
-  const source = await readFile(
-    new URL("../assets/pj_web_utils.js", import.meta.url),
-    "utf8",
-  );
-  const match = source.match(
-    /export const CONTRACT_VERSION = "([^"]+)";/,
-  );
+  const source = await readFile(new URL("../assets/pj_web_utils.js", import.meta.url), "utf8");
+  const match = source.match(/export const CONTRACT_VERSION = "([^"]+)";/);
   assert.ok(match, "browser contract version must be declared");
   assert.equal(match[1], CONTRACT_VERSION);
 });
@@ -709,8 +664,8 @@ test("realtime upstream transport and body-read failures return typed results", 
   try {
     const response = await handleSession(
       new Request(
-        "https://pj-assistant.ai/session"
-          + "?session_id=session_transport_123&voice_mode=full_power",
+        "https://pj-assistant.ai/session" +
+          "?session_id=session_transport_123&voice_mode=full_power",
         {
           method: "POST",
           headers: { "content-type": "application/sdp" },
@@ -769,16 +724,11 @@ test("realtime upstream transport and body-read failures return typed results", 
   assert.match(unreadableCall.text, /response body stream failed/);
 
   await assert.rejects(
-    fetchTextWithTimeout(
-      "https://api.openai.com/v1/realtime/calls",
-      {},
-      10,
-      async () => ({
-        async text() {
-          return new Promise(() => {});
-        },
-      }),
-    ),
+    fetchTextWithTimeout("https://api.openai.com/v1/realtime/calls", {}, 10, async () => ({
+      async text() {
+        return new Promise(() => {});
+      },
+    })),
     /timeout/,
   );
 });
@@ -794,13 +744,16 @@ test("HTML infrastructure errors are summarized without leaking markup", () => {
     "Server returned an HTML error page",
   );
   assert.equal(
-    parseErrorBody(JSON.stringify({
-      error: {
-        message: "Realtime signaling failed.",
-        detail: "sdp_length=42; <!DOCTYPE html><html><head>"
-          + "<title>Bad Gateway</title></head><body>failure</body></html>",
-      },
-    })),
+    parseErrorBody(
+      JSON.stringify({
+        error: {
+          message: "Realtime signaling failed.",
+          detail:
+            "sdp_length=42; <!DOCTYPE html><html><head>" +
+            "<title>Bad Gateway</title></head><body>failure</body></html>",
+        },
+      }),
+    ),
     "Server returned an HTML error page (Bad Gateway)",
   );
 });
@@ -808,24 +761,17 @@ test("HTML infrastructure errors are summarized without leaking markup", () => {
 test("HTML error page titles are bounded to a safe length", () => {
   const longTitle = "Upstream Gateway Failure ".repeat(20).trim();
   const detail = parseErrorBody(
-    `<!DOCTYPE html><html><head><title>${longTitle}</title></head>`
-      + "<body>failure</body></html>",
+    `<!DOCTYPE html><html><head><title>${longTitle}</title></head>` + "<body>failure</body></html>",
   );
   assert.match(detail, /^Server returned an HTML error page \(/);
-  const shownTitle = detail.slice(
-    "Server returned an HTML error page (".length,
-    -1,
-  );
+  const shownTitle = detail.slice("Server returned an HTML error page (".length, -1);
   assert.ok(shownTitle.length <= 163, `title was ${shownTitle.length} chars`);
   assert.match(shownTitle, /\.\.\.$/);
   assert.doesNotMatch(detail, /<!DOCTYPE|<html|<body/i);
 });
 
 test("browser module initializes with Full Power helpers in shared scope", async () => {
-  const html = await readFile(
-    new URL("../webrtc_client.html", import.meta.url),
-    "utf8",
-  );
+  const html = await readFile(new URL("../webrtc_client.html", import.meta.url), "utf8");
   const moduleMatch = html.match(/<script type="module">([\s\S]*?)<\/script>/);
   assert.ok(moduleMatch, "browser module script must exist");
   const moduleSource = moduleMatch[1].replace(
@@ -862,21 +808,40 @@ test("browser module initializes with Full Power helpers in shared scope", async
       className: "",
       children: [],
       classList: { toggle() {} },
-      append(...children) { this.children.push(...children); },
-      appendChild(child) { this.children.push(child); return child; },
-      prepend(child) { this.children.unshift(child); },
-      replaceChildren(...children) { this.children = children; },
+      append(...children) {
+        this.children.push(...children);
+      },
+      appendChild(child) {
+        this.children.push(child);
+        return child;
+      },
+      prepend(child) {
+        this.children.unshift(child);
+      },
+      replaceChildren(...children) {
+        this.children = children;
+      },
       focus() {},
       pause() {},
-      play() { return Promise.resolve(); },
-      remove() { this.removed = true; },
+      play() {
+        return Promise.resolve();
+      },
+      remove() {
+        this.removed = true;
+      },
       querySelector(selector) {
         const className = selector.startsWith(".") ? selector.slice(1) : "";
-        return this.children.find((child) =>
-          String(child.className || "").split(/\s+/).includes(className)
-        ) || null;
+        return (
+          this.children.find((child) =>
+            String(child.className || "")
+              .split(/\s+/)
+              .includes(className),
+          ) || null
+        );
       },
-      querySelectorAll() { return []; },
+      querySelectorAll() {
+        return [];
+      },
       addEventListener(type, handler) {
         listeners.set(`${id}:${type}`, handler);
       },
@@ -901,7 +866,12 @@ test("browser module initializes with Full Power helpers in shared scope", async
       origin: "http://localhost:3001",
     },
   };
-  const localStorage = { getItem() { return null; }, setItem() {} };
+  const localStorage = {
+    getItem() {
+      return null;
+    },
+    setItem() {},
+  };
   const navigator = { clipboard: { writeText: async () => {} } };
   const initialize = new Function(
     "window",
@@ -919,12 +889,7 @@ test("browser module initializes with Full Power helpers in shared scope", async
      };`,
   );
 
-  const hooks = initialize(
-    window,
-    document,
-    localStorage,
-    navigator,
-  );
+  const hooks = initialize(window, document, localStorage, navigator);
   assert.ok(hooks);
   assert.equal(hooks.shouldUseEphemeralSignalingFallback(500, ""), true);
   assert.equal(hooks.shouldUseEphemeralSignalingFallback(503, "gateway unavailable"), true);
@@ -949,14 +914,8 @@ test("browser module initializes with Full Power helpers in shared scope", async
   assert.match(html, /seededSessionIds\.delete\(sessionId\)/);
   assert.match(html, /awaiting_response_status/);
   assert.match(html, /activePlaybackStartSeconds/);
-  assert.doesNotMatch(
-    html,
-    /: `\$\{prefix\}_\$\{crypto\.randomUUID\(\)/,
-  );
-  assert.doesNotMatch(
-    html,
-    /persistAssistantRealtimeItem\(item, "completed"\)/,
-  );
+  assert.doesNotMatch(html, /: `\$\{prefix\}_\$\{crypto\.randomUUID\(\)/);
+  assert.doesNotMatch(html, /persistAssistantRealtimeItem\(item, "completed"\)/);
   assert.match(html, /artifact-image-preview/);
   assert.match(html, /startsWith\("image\/"\)/);
   assert.doesNotMatch(html, /innerHTML\s*=\s*event\./);
@@ -1028,7 +987,9 @@ test("browser module initializes with Full Power helpers in shared scope", async
   const sent = [];
   hooks.state.dataChannel = {
     readyState: "open",
-    send(payload) { sent.push(JSON.parse(payload)); },
+    send(payload) {
+      sent.push(JSON.parse(payload));
+    },
   };
   hooks.handleRealtimeEvent({
     event_id: "response-created-2",
@@ -1053,10 +1014,7 @@ test("browser module initializes with Full Power helpers in shared scope", async
     ["conversation.item.truncate", "response.cancel"],
   );
   assert.equal(sent[0].audio_end_ms, 1250);
-  assert.equal(
-    hooks.state.realtimeItems.get("assistant-item-2").status,
-    "interrupted",
-  );
+  assert.equal(hooks.state.realtimeItems.get("assistant-item-2").status, "interrupted");
   hooks.handleRealtimeEvent({
     event_id: "output-done-after-interruption",
     type: "response.output_audio_transcript.done",
@@ -1064,10 +1022,7 @@ test("browser module initializes with Full Power helpers in shared scope", async
     response_id: "response-2",
     transcript: "This will be interrupted",
   });
-  assert.equal(
-    hooks.state.realtimeItems.get("assistant-item-2").status,
-    "interrupted",
-  );
+  assert.equal(hooks.state.realtimeItems.get("assistant-item-2").status, "interrupted");
   const interruptedDone = {
     type: "response.done",
     response: {
@@ -1088,16 +1043,13 @@ test("browser module initializes with Full Power helpers in shared scope", async
   hooks.renderArtifactCard({
     artifact_id: "ART-0123456789abcdef0123456789abcdef",
     filename: "generated.png",
-    download_url:
-      "/responses/artifacts/ART-0123456789abcdef0123456789abcdef",
+    download_url: "/responses/artifacts/ART-0123456789abcdef0123456789abcdef",
     format: "png",
     mime_type: "image/png",
     byte_size: 100,
     sha256: "a".repeat(64),
   });
-  const artifactCard = hooks.state.artifactCards.get(
-    "ART-0123456789abcdef0123456789abcdef",
-  );
+  const artifactCard = hooks.state.artifactCards.get("ART-0123456789abcdef0123456789abcdef");
   assert.ok(artifactCard.querySelector(".artifact-image-preview"));
 
   const directArtifactId = "ART-fedcba9876543210fedcba9876543210";
@@ -1107,8 +1059,7 @@ test("browser module initializes with Full Power helpers in shared scope", async
       filename: "direct-realtime.pptx",
       download_url: `/responses/artifacts/${directArtifactId}`,
       format: "pptx",
-      mime_type:
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      mime_type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
       byte_size: 2048,
       sha256: "b".repeat(64),
       status: "ready",
@@ -1121,11 +1072,7 @@ test("browser module initializes with Full Power helpers in shared scope", async
     "http://localhost:3001",
   );
   assert.ok(hooks.state.artifactCards.get(directArtifactId));
-  assert.ok(
-    window.__testFetches.some(
-      ({ url }) => url === "http://localhost:3001/execute-tool",
-    ),
-  );
+  assert.ok(window.__testFetches.some(({ url }) => url === "http://localhost:3001/execute-tool"));
 
   const seedSent = [];
   hooks.state.pendingSeedHistory = [
@@ -1136,7 +1083,9 @@ test("browser module initializes with Full Power helpers in shared scope", async
   hooks.state.seededSessionIds.delete("session_behavior");
   hooks.state.dataChannel = {
     readyState: "open",
-    send(payload) { seedSent.push(JSON.parse(payload)); },
+    send(payload) {
+      seedSent.push(JSON.parse(payload));
+    },
   };
   hooks.seedRealtimeConversation();
   hooks.seedRealtimeConversation();
@@ -1147,28 +1096,25 @@ test("browser module initializes with Full Power helpers in shared scope", async
   );
 
   await new Promise((resolve) => setImmediate(resolve));
-  const persisted = window.__testFetches.filter(({ url, options }) =>
-    url.includes("/realtime-messages") && options.method === "POST"
+  const persisted = window.__testFetches.filter(
+    ({ url, options }) => url.includes("/realtime-messages") && options.method === "POST",
   );
-  const persistedBodies = persisted.map(({ options }) =>
-    JSON.parse(options.body)
-  );
+  const persistedBodies = persisted.map(({ options }) => JSON.parse(options.body));
   assert.equal(
-    persistedBodies.filter((body) =>
-      body.external_id === "assistant-item-1"
-      && body.status === "completed"
+    persistedBodies.filter(
+      (body) => body.external_id === "assistant-item-1" && body.status === "completed",
     ).length,
     1,
   );
   assert.equal(
-    persistedBodies.filter((body) =>
-      body.external_id === "assistant-item-2"
-      && body.status === "interrupted"
+    persistedBodies.filter(
+      (body) => body.external_id === "assistant-item-2" && body.status === "interrupted",
     ).length,
     1,
   );
-  assert.ok(persistedBodies.some((body) =>
-    body.external_id === "user-item-1"
-    && body.content === "Hello PJ"
-  ));
+  assert.ok(
+    persistedBodies.some(
+      (body) => body.external_id === "user-item-1" && body.content === "Hello PJ",
+    ),
+  );
 });
