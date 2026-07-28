@@ -18,10 +18,10 @@ Slash commands (type "/" then Tab for completion):
   /exit                    quit
 """
 import json
+import secrets
 import sqlite3
-import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _DB_PATH = Path(__file__).resolve().parent / "pj_data.sqlite3"
@@ -35,8 +35,27 @@ def _db():
             id TEXT PRIMARY KEY,
             title TEXT DEFAULT '',
             last_response_id TEXT,
+            channel TEXT DEFAULT 'terminal',
+            active_turn_token TEXT,
+            active_turn_started_at TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(chat_sessions)")
+        }
+        if "channel" not in columns:
+            conn.execute(
+                "ALTER TABLE chat_sessions ADD COLUMN channel TEXT "
+                "DEFAULT 'terminal'"
+            )
+        if "active_turn_token" not in columns:
+            conn.execute(
+                "ALTER TABLE chat_sessions ADD COLUMN active_turn_token TEXT"
+            )
+        if "active_turn_started_at" not in columns:
+            conn.execute(
+                "ALTER TABLE chat_sessions ADD COLUMN active_turn_started_at TEXT"
+            )
         conn.execute("""CREATE TABLE IF NOT EXISTS chat_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT NOT NULL,
@@ -54,43 +73,67 @@ def _now():
 
 
 # ------------------------------------------------------------- sessions
-def new_session(title: str = "") -> dict:
-    sid = str(uuid.uuid4())[:8]
+def new_session(title: str = "", channel: str = "terminal") -> dict:
+    if channel not in ("terminal", "web"):
+        raise ValueError("channel must be terminal or web")
+    sid = secrets.token_urlsafe(24)
     with _db() as conn:
-        conn.execute("INSERT INTO chat_sessions (id, title) VALUES (?,?)",
-                     (sid, title))
-    return {"id": sid, "title": title, "last_response_id": None}
+        conn.execute(
+            "INSERT INTO chat_sessions (id, title, channel) VALUES (?,?,?)",
+            (sid, title, channel),
+        )
+    return {
+        "id": sid,
+        "title": title,
+        "last_response_id": None,
+        "channel": channel,
+    }
 
 
 def get_session(sid: str) -> dict:
     with _db() as conn:
         row = conn.execute(
-            "SELECT id, title, last_response_id FROM chat_sessions "
+            "SELECT id, title, last_response_id, channel, created_at, updated_at "
+            "FROM chat_sessions "
             "WHERE id=?", (sid,)).fetchone()
     if not row:
         return None
-    return {"id": row[0], "title": row[1], "last_response_id": row[2]}
+    return {
+        "id": row[0],
+        "title": row[1],
+        "last_response_id": row[2],
+        "channel": row[3] or "terminal",
+        "created_at": row[4],
+        "updated_at": row[5],
+    }
 
 
 def latest_session() -> dict:
     with _db() as conn:
         row = conn.execute(
-            "SELECT id, title, last_response_id FROM chat_sessions "
+            "SELECT id, title, last_response_id, channel FROM chat_sessions "
             "ORDER BY updated_at DESC LIMIT 1").fetchone()
     if not row:
         return None
-    return {"id": row[0], "title": row[1], "last_response_id": row[2]}
+    return {
+        "id": row[0],
+        "title": row[1],
+        "last_response_id": row[2],
+        "channel": row[3] or "terminal",
+    }
 
 
 def list_sessions(limit: int = 15) -> list:
     with _db() as conn:
         rows = conn.execute(
             "SELECT s.id, s.title, s.created_at, s.updated_at, "
-            "(SELECT COUNT(*) FROM chat_messages m WHERE m.session_id = s.id)"
+            "(SELECT COUNT(*) FROM chat_messages m WHERE m.session_id = s.id), "
+            "s.channel "
             " FROM chat_sessions s ORDER BY s.updated_at DESC LIMIT ?",
             (limit,)).fetchall()
     return [{"id": r[0], "title": r[1] or "(untitled)", "created_at": r[2],
-             "updated_at": r[3], "messages": r[4]} for r in rows]
+             "updated_at": r[3], "messages": r[4],
+             "channel": r[5] or "terminal"} for r in rows]
 
 
 def record_turn(session: dict, role: str, content: str,
@@ -122,6 +165,82 @@ def history(sid: str, limit: int = 10) -> list:
             "ORDER BY id DESC LIMIT ?", (sid, limit)).fetchall()
     return [{"role": r[0], "content": r[1], "ts": r[2]}
             for r in reversed(rows)]
+
+
+def session_detail(sid: str, message_limit: int = 50) -> dict:
+    session = get_session(sid)
+    if not session:
+        return None
+    public = dict(session)
+    public.pop("last_response_id", None)
+    public["history"] = history(sid, message_limit)
+    return public
+
+
+def claim_session_turn(sid: str, lease_seconds: int = 600) -> str:
+    token = secrets.token_urlsafe(24)
+    now = datetime.now(timezone.utc)
+    stale_before = now - timedelta(seconds=lease_seconds)
+    with _db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT active_turn_token, active_turn_started_at "
+            "FROM chat_sessions WHERE id=?",
+            (sid,),
+        ).fetchone()
+        if not row:
+            return None
+        started_at = None
+        if row[1]:
+            try:
+                started_at = datetime.fromisoformat(row[1])
+            except ValueError:
+                started_at = now
+        if row[0] and (started_at is None or started_at > stale_before):
+            return None
+        conn.execute(
+            "UPDATE chat_sessions SET active_turn_token=?, "
+            "active_turn_started_at=? WHERE id=?",
+            (token, now.isoformat(), sid),
+        )
+    return token
+
+
+def finish_session_turn(
+        session: dict, token: str, content: str, response_id: str) -> bool:
+    with _db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT active_turn_token FROM chat_sessions WHERE id=?",
+            (session["id"],),
+        ).fetchone()
+        if not row or not hmac_compare(row[0], token):
+            return False
+        conn.execute(
+            "INSERT INTO chat_messages (session_id, role, content) "
+            "VALUES (?,?,?)",
+            (session["id"], "assistant", content[:20000]),
+        )
+        conn.execute(
+            "UPDATE chat_sessions SET last_response_id=?, updated_at=?, "
+            "active_turn_token=NULL, active_turn_started_at=NULL WHERE id=?",
+            (response_id, _now(), session["id"]),
+        )
+        session["last_response_id"] = response_id
+    return True
+
+
+def release_session_turn(sid: str, token: str):
+    with _db() as conn:
+        conn.execute(
+            "UPDATE chat_sessions SET active_turn_token=NULL, "
+            "active_turn_started_at=NULL WHERE id=? AND active_turn_token=?",
+            (sid, token),
+        )
+
+
+def hmac_compare(left, right):
+    return bool(left and right and secrets.compare_digest(left, right))
 
 
 def search(keyword: str, limit: int = 15) -> list:
