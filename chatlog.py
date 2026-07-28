@@ -62,6 +62,24 @@ def _db():
             role TEXT NOT NULL,
             content TEXT NOT NULL,
             ts TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS chat_pending_approvals (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            approval_kind TEXT NOT NULL,
+            provider_response_id TEXT NOT NULL,
+            provider_item_id TEXT NOT NULL,
+            tool_name TEXT NOT NULL,
+            server_label TEXT,
+            arguments_json TEXT NOT NULL,
+            text_format_json TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            decided_at TEXT)""")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_pending_approvals_session "
+            "ON chat_pending_approvals(session_id, status, expires_at)"
+        )
         yield conn
         conn.commit()
     finally:
@@ -174,15 +192,181 @@ def session_detail(sid: str, message_limit: int = 50) -> dict:
     public = dict(session)
     public.pop("last_response_id", None)
     public["history"] = history(sid, message_limit)
+    public["pending_approvals"] = list_pending_approvals(sid)
     return public
 
 
-def claim_session_turn(sid: str, lease_seconds: int = 600) -> str:
+def _expire_pending_approvals(conn, sid: str = None):
+    params = [_now()]
+    where = "status='pending' AND expires_at<=?"
+    if sid:
+        where += " AND session_id=?"
+        params.append(sid)
+    conn.execute(
+        f"UPDATE chat_pending_approvals SET status='expired', decided_at=? "
+        f"WHERE {where}",
+        [_now(), *params],
+    )
+
+
+def _approval_from_row(row: tuple, *, include_provider: bool = False) -> dict:
+    approval = {
+        "approval_id": row[0],
+        "session_id": row[1],
+        "approval_kind": row[2],
+        "name": row[5],
+        "server_label": row[6],
+        "arguments": json.loads(row[7] or "{}"),
+        "status": row[9],
+        "created_at": row[10],
+        "expires_at": row[11],
+    }
+    if include_provider:
+        approval.update({
+            "provider_response_id": row[3],
+            "provider_item_id": row[4],
+            "text_format": (
+                json.loads(row[8]) if row[8] else None
+            ),
+        })
+    return approval
+
+
+def list_pending_approvals(sid: str) -> list:
+    with _db() as conn:
+        _expire_pending_approvals(conn, sid)
+        rows = conn.execute(
+            "SELECT id, session_id, approval_kind, provider_response_id, "
+            "provider_item_id, tool_name, server_label, arguments_json, "
+            "text_format_json, status, created_at, expires_at "
+            "FROM chat_pending_approvals "
+            "WHERE session_id=? AND status='pending' "
+            "ORDER BY created_at",
+            (sid,),
+        ).fetchall()
+    return [_approval_from_row(row) for row in rows]
+
+
+def get_pending_approval(sid: str, approval_id: str) -> dict:
+    with _db() as conn:
+        _expire_pending_approvals(conn, sid)
+        row = conn.execute(
+            "SELECT id, session_id, approval_kind, provider_response_id, "
+            "provider_item_id, tool_name, server_label, arguments_json, "
+            "text_format_json, status, created_at, expires_at "
+            "FROM chat_pending_approvals "
+            "WHERE id=? AND session_id=? AND status='pending'",
+            (approval_id, sid),
+        ).fetchone()
+    return _approval_from_row(row, include_provider=True) if row else None
+
+
+def pause_session_turn_for_approval(
+        session: dict,
+        token: str,
+        *,
+        approval_kind: str,
+        provider_response_id: str,
+        provider_item_id: str,
+        tool_name: str,
+        arguments: dict,
+        server_label: str = "",
+        text_format: dict = None,
+        ttl_seconds: int = 900) -> dict:
+    if approval_kind not in ("local_function", "mcp"):
+        raise ValueError("unsupported approval kind")
+    approval_id = secrets.token_urlsafe(24)
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(seconds=max(60, min(ttl_seconds, 3600)))
+    arguments_json = json.dumps(arguments or {}, default=str)
+    text_format_json = (
+        json.dumps(text_format, default=str) if text_format else None
+    )
+    if len(arguments_json) > 50000 or (
+        text_format_json and len(text_format_json) > 50000
+    ):
+        raise ValueError("approval state exceeds the persistence limit")
+    with _db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT active_turn_token FROM chat_sessions WHERE id=?",
+            (session["id"],),
+        ).fetchone()
+        if not row or not hmac_compare(row[0], token):
+            return None
+        conn.execute(
+            "INSERT INTO chat_pending_approvals "
+            "(id, session_id, approval_kind, provider_response_id, "
+            "provider_item_id, tool_name, server_label, arguments_json, "
+            "text_format_json, created_at, expires_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                approval_id,
+                session["id"],
+                approval_kind,
+                provider_response_id,
+                provider_item_id,
+                tool_name[:200],
+                (server_label or "")[:200] or None,
+                arguments_json,
+                text_format_json,
+                now.isoformat(),
+                expires_at.isoformat(),
+            ),
+        )
+        conn.execute(
+            "UPDATE chat_sessions SET active_turn_token=NULL, "
+            "active_turn_started_at=NULL, updated_at=? WHERE id=?",
+            (now.isoformat(), session["id"]),
+        )
+    return get_pending_approval(session["id"], approval_id)
+
+
+def decide_pending_approval(
+        sid: str, approval_id: str, approve: bool) -> dict:
+    with _db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        _expire_pending_approvals(conn, sid)
+        row = conn.execute(
+            "SELECT id, session_id, approval_kind, provider_response_id, "
+            "provider_item_id, tool_name, server_label, arguments_json, "
+            "text_format_json, status, created_at, expires_at "
+            "FROM chat_pending_approvals "
+            "WHERE id=? AND session_id=? AND status='pending'",
+            (approval_id, sid),
+        ).fetchone()
+        if not row:
+            return None
+        conn.execute(
+            "UPDATE chat_pending_approvals SET status=?, decided_at=? "
+            "WHERE id=? AND status='pending'",
+            ("approved" if approve else "rejected", _now(), approval_id),
+        )
+    approval = _approval_from_row(row, include_provider=True)
+    approval["status"] = "approved" if approve else "rejected"
+    return approval
+
+
+def claim_session_turn(
+        sid: str,
+        lease_seconds: int = 600,
+        pending_approval_id: str = None) -> str:
     token = secrets.token_urlsafe(24)
     now = datetime.now(timezone.utc)
     stale_before = now - timedelta(seconds=lease_seconds)
     with _db() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        _expire_pending_approvals(conn, sid)
+        pending = conn.execute(
+            "SELECT id FROM chat_pending_approvals "
+            "WHERE session_id=? AND status='pending'",
+            (sid,),
+        ).fetchall()
+        if pending and (
+            not pending_approval_id
+            or pending_approval_id not in {row[0] for row in pending}
+        ):
+            return None
         row = conn.execute(
             "SELECT active_turn_token, active_turn_started_at "
             "FROM chat_sessions WHERE id=?",

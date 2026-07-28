@@ -7,8 +7,8 @@ Provides:
   POST /execute-tool - executes local PJ tools for browser function calls
   POST /webhook    - SIP webhook for inbound phone calls
 """
-import json
 import hmac
+import json
 import os
 import re
 from pathlib import Path
@@ -23,7 +23,7 @@ from openai import OpenAI
 
 import chatlog
 import skills
-from realtime_config import realtime_session_config
+from realtime_config import realtime_session_config, realtime_tool_schemas
 from responses_runtime import (
     capability_manifest,
     dispatch_realtime_function,
@@ -32,7 +32,7 @@ from responses_runtime import (
 )
 
 BASE_DIR = Path(__file__).resolve().parent
-CONTRACT_VERSION = "2026-07-28.4"
+CONTRACT_VERSION = "2026-07-28.5"
 MAX_ERROR_DETAIL_LENGTH = 320
 MAX_SESSION_TITLE_LENGTH = 120
 MAX_MESSAGE_LENGTH = 20000
@@ -87,16 +87,17 @@ def _error_response(code, message, status, req_id, detail=None):
 def _check_bridge_auth(req_id, *, required=False):
     expected = (os.getenv("PJ_TOOL_BRIDGE_TOKEN") or "").strip()
     if not expected:
-        if required:
-            return _error_response(
-                "bridge_auth_not_configured",
-                "Bridge authorization is not configured.",
-                503,
-                req_id,
-            )
-        return None
+        return _error_response(
+            "bridge_auth_not_configured",
+            "Bridge authorization is not configured.",
+            503,
+            req_id,
+        )
     provided = request.headers.get("Authorization") or ""
-    if hmac.compare_digest(provided, f"Bearer {expected}"):
+    if hmac.compare_digest(
+        provided.encode("utf-8"),
+        f"Bearer {expected}".encode("utf-8"),
+    ):
         return None
     return _error_response(
         "bridge_auth_required",
@@ -108,7 +109,7 @@ def _check_bridge_auth(req_id, *, required=False):
 
 def _function_tool_schemas():
     tools = []
-    for schema in skills.TOOL_SCHEMAS:
+    for schema in realtime_tool_schemas():
         if not isinstance(schema, dict):
             continue
         if schema.get("type") != "function":
@@ -272,6 +273,7 @@ def health():
                 "/responses/sessions/search",
                 "/responses/sessions/<id>/resume",
                 "/responses/sessions/<id>/turns",
+                "/responses/sessions/<id>/approvals/<id>",
                 "/webhook",
                 "/health",
             ],
@@ -436,6 +438,13 @@ def stream_responses_turn(session_id):
         )
 
     message = message.strip()
+    if chatlog.list_pending_approvals(session["id"]):
+        return _error_response(
+            "session_approval_pending",
+            "Resolve the pending owner approval before starting another turn.",
+            409,
+            req_id,
+        )
     turn_token = chatlog.claim_session_turn(session["id"])
     if not turn_token:
         return _error_response(
@@ -446,49 +455,217 @@ def stream_responses_turn(session_id):
         )
     chatlog.record_turn(session, "user", message)
 
-    @stream_with_context
-    def generate():
-        yield _sse({
-            "type": "session",
-            "session_id": session["id"],
-            "request_id": req_id,
-        })
-        try:
-            orchestrator = ResponsesOrchestrator(OPENAI_CLIENT_FACTORY(), load_config())
-            for event in orchestrator.stream_turn(
-                message,
-                previous_response_id=session.get("last_response_id"),
-                text_format=text_format,
-            ):
-                public_event = dict(event)
-                response_id = public_event.pop("_response_id", None)
-                if public_event["type"] == "completion":
-                    stored = chatlog.finish_session_turn(
-                        session,
-                        turn_token,
-                        public_event.get("text", ""),
-                        response_id,
-                    )
-                    if not stored:
-                        raise RuntimeError(
-                            "Session turn lease expired before completion"
-                        )
-                    public_event["session_id"] = session["id"]
-                yield _sse(public_event)
-        except Exception as exc:
-            yield _sse({
-                "type": "error",
-                "error": {
-                    "code": "responses_turn_failed",
-                    "message": "Responses turn failed.",
-                    "request_id": req_id,
-                    "detail": _trim_detail(exc),
-                },
-            })
-        finally:
-            chatlog.release_session_turn(session["id"], turn_token)
+    response = Response(
+        stream_with_context(_stream_session_response(
+            session,
+            turn_token,
+            message,
+            previous_response_id=session.get("last_response_id"),
+            text_format=text_format,
+            req_id=req_id,
+        )),
+        status=200,
+        mimetype="text/event-stream",
+    )
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    response.headers["x-request-id"] = req_id
+    response.headers["x-pj-contract-version"] = CONTRACT_VERSION
+    return response
 
-    response = Response(generate(), status=200, mimetype="text/event-stream")
+
+def _stream_session_response(
+        session,
+        turn_token,
+        input_value,
+        *,
+        previous_response_id,
+        text_format,
+        req_id,
+        prelude=()):
+    yield _sse({
+        "type": "session",
+        "session_id": session["id"],
+        "request_id": req_id,
+    })
+    for event in prelude:
+        yield _sse(event)
+    try:
+        orchestrator = ResponsesOrchestrator(
+            OPENAI_CLIENT_FACTORY(), load_config()
+        )
+        for event in orchestrator.stream_turn(
+            input_value,
+            previous_response_id=previous_response_id,
+            text_format=text_format,
+        ):
+            public_event = dict(event)
+            response_id = public_event.pop("_response_id", None)
+            provider_item_id = public_event.pop("_provider_item_id", None)
+            if public_event["type"] == "approval.required":
+                if not response_id or not provider_item_id:
+                    raise RuntimeError(
+                        "Approval request did not include provider continuity"
+                    )
+                pending = chatlog.pause_session_turn_for_approval(
+                    session,
+                    turn_token,
+                    approval_kind=public_event["approval_kind"],
+                    provider_response_id=response_id,
+                    provider_item_id=provider_item_id,
+                    tool_name=public_event.get("name") or "",
+                    server_label=public_event.get("server_label") or "",
+                    arguments=public_event.get("arguments") or {},
+                    text_format=text_format,
+                )
+                if not pending:
+                    raise RuntimeError(
+                        "Session turn lease expired before approval was stored"
+                    )
+                public_event.update({
+                    "approval_id": pending["approval_id"],
+                    "expires_at": pending["expires_at"],
+                    "session_id": session["id"],
+                })
+                yield _sse(public_event)
+                return
+            if public_event["type"] == "completion":
+                stored = chatlog.finish_session_turn(
+                    session,
+                    turn_token,
+                    public_event.get("text", ""),
+                    response_id,
+                )
+                if not stored:
+                    raise RuntimeError(
+                        "Session turn lease expired before completion"
+                    )
+                public_event["session_id"] = session["id"]
+            yield _sse(public_event)
+    except Exception as exc:
+        yield _sse({
+            "type": "error",
+            "error": {
+                "code": "responses_turn_failed",
+                "message": "Responses turn failed.",
+                "request_id": req_id,
+                "detail": _trim_detail(exc),
+            },
+        })
+    finally:
+        chatlog.release_session_turn(session["id"], turn_token)
+
+
+@app.route(
+    "/responses/sessions/<session_id>/approvals/<approval_id>",
+    methods=["POST"],
+)
+def resolve_responses_approval(session_id, approval_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    session, error = _validated_session(session_id, req_id)
+    if error:
+        return error
+    if not SESSION_ID_PATTERN.fullmatch(approval_id):
+        return _error_response(
+            "approval_not_found", "Approval was not found.", 404, req_id
+        )
+    payload, error = _validated_json(
+        req_id, allowed={"approve"}, required={"approve"}
+    )
+    if error:
+        return error
+    approve = payload["approve"]
+    if not isinstance(approve, bool):
+        return _error_response(
+            "invalid_approval_decision",
+            "approve must be a boolean.",
+            400,
+            req_id,
+        )
+    if "OPENAI_API_KEY" not in os.environ:
+        return _error_response(
+            "missing_openai_api_key",
+            "OPENAI_API_KEY is not set.",
+            500,
+            req_id,
+        )
+    pending = chatlog.get_pending_approval(session["id"], approval_id)
+    if not pending:
+        return _error_response(
+            "approval_not_found", "Approval was not found.", 404, req_id
+        )
+    turn_token = chatlog.claim_session_turn(
+        session["id"], pending_approval_id=approval_id
+    )
+    if not turn_token:
+        return _error_response(
+            "session_turn_in_progress",
+            "Another turn is already in progress for this session.",
+            409,
+            req_id,
+        )
+    pending = chatlog.decide_pending_approval(
+        session["id"], approval_id, approve
+    )
+    if not pending:
+        chatlog.release_session_turn(session["id"], turn_token)
+        return _error_response(
+            "approval_already_resolved",
+            "Approval was already resolved or expired.",
+            409,
+            req_id,
+        )
+
+    prelude = [{
+        "type": "approval.resolved",
+        "approval_id": approval_id,
+        "approval_kind": pending["approval_kind"],
+        "name": pending["name"],
+        "approved": approve,
+    }]
+    if pending["approval_kind"] == "mcp":
+        continuation = [{
+            "type": "mcp_approval_response",
+            "approval_request_id": pending["provider_item_id"],
+            "approve": approve,
+        }]
+    else:
+        if approve:
+            result = skills.dispatch(
+                pending["name"],
+                pending["arguments"],
+                approval_granted=True,
+            )
+        else:
+            result = {"error": "The owner rejected this tool call."}
+        prelude.append({
+            "type": "tool.result",
+            "call_id": pending["provider_item_id"],
+            "name": pending["name"],
+            "result": result,
+        })
+        continuation = [{
+            "type": "function_call_output",
+            "call_id": pending["provider_item_id"],
+            "output": json.dumps(result, default=str),
+        }]
+
+    response = Response(
+        stream_with_context(_stream_session_response(
+            session,
+            turn_token,
+            continuation,
+            previous_response_id=pending["provider_response_id"],
+            text_format=pending["text_format"],
+            req_id=req_id,
+            prelude=prelude,
+        )),
+        status=200,
+        mimetype="text/event-stream",
+    )
     response.headers["Cache-Control"] = "no-cache"
     response.headers["X-Accel-Buffering"] = "no"
     response.headers["x-request-id"] = req_id

@@ -1,0 +1,9 @@
+{
+  "default": "allow",
+  "tools": {
+    "approve_codeops_task": "approval",
+    "learn_from_vector_store": "approval",
+    "run_codeops_validation": "approval",
+    "sync_vector_store": "approval"
+  }
+}
