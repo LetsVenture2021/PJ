@@ -23,10 +23,10 @@ sys.path.insert(0, str(BASE_DIR))
 # Redirect every module's DB to a throwaway file BEFORE any skill runs.
 _TMP_DB = Path(tempfile.mkstemp(suffix=".sqlite3")[1])
 
-import skills, skillops, docops, chiefops, chatlog  # noqa: E402
+import skills, skillops, docops, chiefops, chatlog, codeops  # noqa: E402
 import realtime_server  # noqa: E402
 
-for _mod in (skills, skillops, docops, chiefops, chatlog):
+for _mod in (skills, skillops, docops, chiefops, chatlog, codeops):
     _mod._DB_PATH = _TMP_DB
 
 
