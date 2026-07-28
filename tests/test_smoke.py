@@ -1326,7 +1326,12 @@ Create a 40-80 record governed corpus, then evaluate and synchronize it.
         self.assertEqual(preflight["records_valid"], 0)
 
     def test_model_callable_learning_and_sync_require_approval(self):
-        for tool_name in ("learn_from_vector_store", "sync_vector_store"):
+        for tool_name in (
+            "create_skill",
+            "learn_from_vector_store",
+            "run_shortcut",
+            "sync_vector_store",
+        ):
             with self.subTest(tool_name=tool_name):
                 result = skills.dispatch(tool_name, {"dry_run": True})
                 self.assertIn("requires explicit approval", result["error"])

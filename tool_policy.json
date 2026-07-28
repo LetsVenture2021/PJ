@@ -2,8 +2,10 @@
   "default": "allow",
   "tools": {
     "approve_codeops_task": "approval",
+    "create_skill": "approval",
     "learn_from_vector_store": "approval",
     "run_codeops_validation": "approval",
+    "run_shortcut": "approval",
     "sync_vector_store": "approval"
   }
 }
