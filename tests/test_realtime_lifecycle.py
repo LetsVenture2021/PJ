@@ -60,6 +60,14 @@ class FakeOpenAIClient:
         self.responses = FakeResponses(streams)
 
 
+class InvalidEventOrchestrator:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def stream_turn(self, *args, **kwargs):
+        yield {"type": "text.delta"}
+
+
 class FakeSignalingResponse:
     status_code = 201
     text = "v=0\r\no=openai 1 1 IN IP4 127.0.0.1\r\n"
@@ -235,6 +243,93 @@ class TestRealtimeSessionLifecycle(unittest.TestCase):
                 ("user", "Run the lifecycle"),
                 ("assistant", "Lifecycle complete."),
             ],
+        )
+
+    def test_realtime_payload_schema_rejects_missing_and_malformed_fields(self):
+        session_id = self.create_realtime_session()
+
+        missing = self.client.post(
+            f"/responses/sessions/{session_id}/turns",
+            json={},
+            headers={
+                **self.auth,
+                "x-pj-client-request-id": "missing-field-request",
+            },
+        )
+        missing_error = self.assert_structured_error(
+            missing,
+            status=400,
+            code="invalid_request_body",
+            request_id="missing-field-request",
+        )
+        self.assertIn("'message' is a required property", missing_error["detail"])
+
+        malformed = self.client.post(
+            f"/responses/sessions/{session_id}/realtime-messages",
+            json={
+                "external_id": "item-malformed",
+                "role": "user",
+                "content": {"text": "not a string"},
+                "source": "typed",
+                "status": "completed",
+            },
+            headers={
+                **self.auth,
+                "x-pj-client-request-id": "malformed-field-request",
+            },
+        )
+        malformed_error = self.assert_structured_error(
+            malformed,
+            status=400,
+            code="invalid_realtime_message",
+            request_id="malformed-field-request",
+        )
+        self.assertIn("$.content", malformed_error["detail"])
+
+    def test_invalid_outbound_payloads_become_typed_boundary_errors(self):
+        session_id = self.create_realtime_session()
+        with patch.object(realtime_server, "ResponsesOrchestrator", InvalidEventOrchestrator):
+            streamed = self.client.post(
+                f"/responses/sessions/{session_id}/turns",
+                json={"message": "Emit an invalid event"},
+                headers={
+                    **self.auth,
+                    "x-pj-client-request-id": "invalid-stream-event",
+                },
+                buffered=True,
+            )
+
+        events = parse_sse(streamed)
+        self.assertEqual(events[-1]["type"], "error")
+        self.assertEqual(events[-1]["error"]["code"], "invalid_outbound_payload")
+        self.assertEqual(events[-1]["error"]["request_id"], "invalid-stream-event")
+        self.assertIn("$.delta", events[-1]["error"]["detail"])
+
+        with patch.object(
+            realtime_server.chatlog,
+            "record_external_turn",
+            return_value={"external_id": "item-invalid-response"},
+        ):
+            response = self.client.post(
+                f"/responses/sessions/{session_id}/realtime-messages",
+                json={
+                    "external_id": "item-invalid-response",
+                    "role": "user",
+                    "content": "Persist this",
+                    "source": "typed",
+                    "status": "completed",
+                },
+                headers={
+                    **self.auth,
+                    "x-pj-client-request-id": "invalid-json-response",
+                },
+            )
+
+        self.assert_structured_error(
+            response,
+            status=502,
+            code="invalid_outbound_payload",
+            request_id="invalid-json-response",
         )
 
     def test_request_logs_carry_request_and_session_correlation(self):

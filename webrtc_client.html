@@ -606,6 +606,172 @@
       return headers;
     }
 
+    function validateOutboundRealtimeEvent(payload) {
+      if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+        return "payload must be an object";
+      }
+      if (typeof payload.type !== "string" || !payload.type) {
+        return "type is required";
+      }
+      if (payload.type === "conversation.item.create") {
+        if (!payload.item || typeof payload.item !== "object" || Array.isArray(payload.item)) {
+          return "item is required";
+        }
+        if (payload.item.type === "message") {
+          if (!["user", "assistant"].includes(payload.item.role)) {
+            return "item.role must be user or assistant";
+          }
+          if (
+            !Array.isArray(payload.item.content)
+            || !payload.item.content.length
+            || payload.item.content.some(
+              (part) => !part || typeof part.type !== "string" || typeof part.text !== "string",
+            )
+          ) {
+            return "item.content must contain typed text parts";
+          }
+        } else if (payload.item.type === "function_call_output") {
+          if (typeof payload.item.call_id !== "string" || !payload.item.call_id) {
+            return "item.call_id is required";
+          }
+          if (typeof payload.item.output !== "string") {
+            return "item.output must be a string";
+          }
+        } else {
+          return "item.type is unsupported";
+        }
+      } else if (["conversation.item.delete", "conversation.item.truncate"].includes(payload.type)) {
+        if (typeof payload.item_id !== "string" || !payload.item_id) {
+          return "item_id is required";
+        }
+        if (
+          payload.type === "conversation.item.truncate"
+          && (
+            !Number.isInteger(payload.content_index)
+            || !Number.isInteger(payload.audio_end_ms)
+            || payload.audio_end_ms < 0
+          )
+        ) {
+          return "truncate offsets must be non-negative integers";
+        }
+      } else if (!["response.create", "response.cancel"].includes(payload.type)) {
+        return `unsupported type ${payload.type}`;
+      }
+      return null;
+    }
+
+    function sendRealtimeEvent(payload) {
+      const issue = validateOutboundRealtimeEvent(payload);
+      if (issue) {
+        throw new Error(`Invalid outbound realtime payload: ${issue}.`);
+      }
+      if (!state.dataChannel || state.dataChannel.readyState !== "open") {
+        throw new Error("Realtime data channel is not open.");
+      }
+      state.dataChannel.send(JSON.stringify(payload));
+    }
+
+    function validateInboundRealtimeEvent(event) {
+      if (!event || typeof event !== "object" || Array.isArray(event)) {
+        return "payload must be an object";
+      }
+      if (typeof event.type !== "string" || !event.type) {
+        return "type is required";
+      }
+      const hasItemId = Boolean(realtimeItemId(event, "item"));
+      if (event.type === "error") {
+        if (!event.error || typeof event.error.message !== "string") {
+          return "error.message is required";
+        }
+      } else if (event.type === "response.created") {
+        if (typeof (event.response?.id || event.response_id) !== "string") {
+          return "response identifier is required";
+        }
+      } else if (
+        event.type === "conversation.item.input_audio_transcription.delta"
+        || event.type === "response.output_text.delta"
+        || event.type === "response.output_audio_transcript.delta"
+      ) {
+        if (!hasItemId) return "item identifier is required";
+        if (typeof event.delta !== "string") return "delta must be a string";
+      } else if (
+        event.type === "conversation.item.input_audio_transcription.completed"
+        || event.type === "response.output_text.done"
+        || event.type === "response.output_audio_transcript.done"
+      ) {
+        if (!hasItemId) return "item identifier is required";
+        if (typeof (event.transcript ?? event.text) !== "string") {
+          return "completed transcript text is required";
+        }
+      } else if (event.type === "response.done") {
+        if (
+          !event.response
+          || typeof event.response !== "object"
+          || typeof event.response.id !== "string"
+          || typeof event.response.status !== "string"
+        ) {
+          return "response.id and response.status are required";
+        }
+        if (event.response.output !== undefined && !Array.isArray(event.response.output)) {
+          return "response.output must be an array";
+        }
+      } else if (event.type === "response.function_call_arguments.delta") {
+        if (typeof event.call_id !== "string" || !event.call_id) return "call_id is required";
+        if (typeof event.delta !== "string") return "delta must be a string";
+      } else if (event.type === "response.function_call_arguments.done") {
+        if (typeof event.call_id !== "string" || !event.call_id) return "call_id is required";
+        const pendingCall = state.pendingCalls[event.call_id];
+        if (
+          typeof event.name !== "string"
+          && typeof pendingCall?.name !== "string"
+        ) return "name is required";
+        if (
+          typeof event.arguments !== "string"
+          && typeof pendingCall?.args !== "string"
+        ) return "arguments must be a string";
+      } else if (
+        event.type === "response.output_item.done"
+        && event.item?.type === "function_call"
+      ) {
+        if (
+          typeof event.item.call_id !== "string"
+          || typeof event.item.name !== "string"
+          || typeof event.item.arguments !== "string"
+        ) {
+          return "function call item fields are required";
+        }
+      }
+      return null;
+    }
+
+    function validateFullPowerEvent(event) {
+      if (!event || typeof event !== "object" || Array.isArray(event)) {
+        return "payload must be an object";
+      }
+      if (typeof event.type !== "string" || !event.type) return "type is required";
+      const requiredFields = {
+        "text.delta": ["delta"],
+        "tool.call": ["call_id", "tool_type"],
+        "tool.call.delta": ["call_id", "delta"],
+        "tool.result": ["call_id"],
+        "artifact.ready": ["artifact_id", "filename", "download_url"],
+        "deliverable.incomplete": ["requested_format"],
+        citation: ["citation"],
+        source: ["source"],
+        "approval.required": ["approval_id", "approval_kind", "session_id"],
+        "approval.executing": ["approval_id", "approval_kind", "approved"],
+        "approval.resolved": ["approval_id", "approval_kind", "approved"],
+        completion: ["text", "session_id"],
+        error: ["error"],
+      };
+      for (const field of requiredFields[event.type] || []) {
+        if (!(field in event)) {
+          return `${field} is required for ${event.type}`;
+        }
+      }
+      return null;
+    }
+
     function setPhase(phase, statusText = null) {
       state.phase = phase;
       if (phase === PHASE.IDLE) {
@@ -791,11 +957,14 @@
       try {
         parsed = body ? JSON.parse(body) : {};
       } catch (_) {
-        parsed = {};
+        throw new Error("Response payload was not valid JSON.");
       }
       if (!response.ok) {
         const detail = parseErrorBody(body);
         throw new Error(`Request failed (${response.status})${detail ? `: ${detail}` : ""}`);
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("Response payload did not match the JSON object contract.");
       }
       return parsed;
     }
@@ -943,7 +1112,7 @@
           || !item.content
           || (item.status && item.status !== "completed")
         ) continue;
-        state.dataChannel.send(JSON.stringify({
+        sendRealtimeEvent({
           type: "conversation.item.create",
           item: {
             type: "message",
@@ -953,7 +1122,7 @@
               text: item.content,
             }],
           },
-        }));
+        });
       }
       state.seededSessionIds.add(state.activeSessionId);
     }
@@ -1189,6 +1358,7 @@
           try {
             parsed = JSON.parse(event.data);
           } catch (_) {
+            appendBubble("system", "Invalid inbound realtime payload: malformed JSON.");
             return;
           }
           handleRealtimeEvent(parsed, apiBase);
@@ -1322,7 +1492,7 @@
           source: "typed",
           metadata,
         });
-        state.dataChannel.send(JSON.stringify({
+        sendRealtimeEvent({
           type: "conversation.item.create",
           item: {
             id: externalId,
@@ -1330,8 +1500,8 @@
             role: "user",
             content: [{ type: "input_text", text: submitted }],
           },
-        }));
-        state.dataChannel.send(JSON.stringify({ type: "response.create" }));
+        });
+        sendRealtimeEvent({ type: "response.create" });
         setStatus("Live", "live");
       } catch (error) {
         appendBubble(
@@ -1617,6 +1787,11 @@
       }
 
       function renderFullPowerEvent(event) {
+        const validationIssue = validateFullPowerEvent(event);
+        if (validationIssue) {
+          appendBubble("system", `Invalid Full Power payload: ${validationIssue}.`);
+          return;
+        }
         if (event.type === "text.delta") {
           appendBubble("assistant", event.delta || "", true);
         } else if (event.type === "tool.call") {
@@ -1893,11 +2068,11 @@
           if (!state.dataChannel || state.dataChannel.readyState !== "open") {
             throw new Error("Realtime channel closed before transcript replacement.");
           }
-          state.dataChannel.send(JSON.stringify({
+          sendRealtimeEvent({
             type: "conversation.item.delete",
             item_id: externalId,
-          }));
-          state.dataChannel.send(JSON.stringify({
+          });
+          sendRealtimeEvent({
             type: "conversation.item.create",
             item: {
               type: "message",
@@ -1907,8 +2082,8 @@
                 text: perfected.refined_prompt,
               }],
             },
-          }));
-          state.dataChannel.send(JSON.stringify({ type: "response.create" }));
+          });
+          sendRealtimeEvent({ type: "response.create" });
           setStatus("Live", "live");
           return;
         }
@@ -1958,6 +2133,11 @@
     }
 
     function handleRealtimeEvent(event, apiBase) {
+      const validationIssue = validateInboundRealtimeEvent(event);
+      if (validationIssue) {
+        appendBubble("system", `Invalid inbound realtime payload: ${validationIssue}.`);
+        return;
+      }
       const realtimeEventId =
         typeof event?.event_id === "string" ? event.event_id : "";
       if (realtimeEventId) {
@@ -1999,13 +2179,13 @@
             ),
           );
           el.pjAudio.pause();
-          state.dataChannel.send(JSON.stringify({
+          sendRealtimeEvent({
             type: "conversation.item.truncate",
             item_id: state.activeAssistantItemId,
             content_index: 0,
             audio_end_ms: playbackMs,
-          }));
-          state.dataChannel.send(JSON.stringify({ type: "response.cancel" }));
+          });
+          sendRealtimeEvent({ type: "response.cancel" });
           item.status = "interrupted";
           item.playbackMs = playbackMs;
           item.bubble.dataset.status = "interrupted";
@@ -2218,11 +2398,11 @@
       }
 
       if (state.dataChannel && state.dataChannel.readyState === "open") {
-        state.dataChannel.send(JSON.stringify({
+        sendRealtimeEvent({
           type: "conversation.item.create",
           item: { type: "function_call_output", call_id: callId, output },
-        }));
-        state.dataChannel.send(JSON.stringify({ type: "response.create" }));
+        });
+        sendRealtimeEvent({ type: "response.create" });
       }
 
       delete state.pendingCalls[callId];
