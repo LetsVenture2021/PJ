@@ -4,6 +4,15 @@ PJ is a Python assistant runtime built on the OpenAI Responses and Realtime
 APIs. It has a terminal client, durable local tools and chat history, terminal
 voice, a local browser client, and an optional Cloudflare Worker edge proxy.
 
+## Documentation
+
+- [End-to-end architecture](docs/architecture.md)
+- [Realtime protocol compatibility](docs/realtime-protocol.md)
+- [Incident response and recovery runbook](docs/runbook.md)
+- [GitHub security controls](docs/security-controls.md)
+- [Dependency audit report (July 28, 2026)](docs/dependency-audit-2026-07-28.md)
+- [Hugging Face MCP server setup and usage](docs/huggingface-mcp-server.md)
+
 ## What works
 
 ### Text assistant and local tools
