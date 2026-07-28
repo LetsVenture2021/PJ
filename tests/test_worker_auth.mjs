@@ -939,8 +939,11 @@ test("browser module initializes with Full Power helpers in shared scope", async
        handleRealtimeEvent,
        renderArtifactCard,
        runFunctionCall,
+       sendRealtimeEvent,
        seedRealtimeConversation,
        shouldUseEphemeralSignalingFallback,
+       validateInboundRealtimeEvent,
+       validateOutboundRealtimeEvent,
      };`,
   );
 
@@ -974,6 +977,19 @@ test("browser module initializes with Full Power helpers in shared scope", async
   assert.match(html, /artifact-image-preview/);
   assert.match(html, /startsWith\("image\/"\)/);
   assert.doesNotMatch(html, /innerHTML\s*=\s*event\./);
+  assert.match(
+    hooks.validateInboundRealtimeEvent({
+      type: "response.output_audio_transcript.delta",
+      item_id: "assistant-missing-delta",
+    }),
+    /delta/,
+  );
+  assert.match(hooks.validateInboundRealtimeEvent(null), /object/);
+  assert.match(hooks.validateOutboundRealtimeEvent({ type: "conversation.item.create" }), /item/);
+  assert.throws(
+    () => hooks.sendRealtimeEvent({ type: "conversation.item.delete" }),
+    /Invalid outbound realtime payload: item_id is required/,
+  );
 
   hooks.state.activeSessionId = "session_behavior";
   hooks.handleRealtimeEvent({

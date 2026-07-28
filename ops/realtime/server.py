@@ -48,6 +48,12 @@ from ops.shared.logging import (
     new_correlation_id,
     set_log_context,
 )
+from ops.realtime.payload_validation import (
+    RealtimePayloadValidationError,
+    validate_inbound_payload,
+    validate_outbound_event,
+    validate_outbound_payload,
+)
 from realtime_config import realtime_session_config, realtime_tool_schemas
 from responses_runtime import (
     capability_manifest,
@@ -157,8 +163,26 @@ def _trim_detail(detail):
     return compact[:MAX_ERROR_DETAIL_LENGTH] + "..."
 
 
-def _json_response(payload, status=200, req_id=None):
+def _json_response(payload, status=200, req_id=None, outbound_schema=None):
     req_id = req_id or _request_id()
+    if outbound_schema:
+        try:
+            validate_outbound_payload(outbound_schema, payload)
+        except RealtimePayloadValidationError as exc:
+            _LOGGER.error(
+                "realtime.outbound_payload.invalid",
+                extra={"error_code": "invalid_outbound_payload"},
+            )
+            payload = {
+                "ok": False,
+                "error": {
+                    "code": "invalid_outbound_payload",
+                    "message": "Server response did not match the realtime contract.",
+                    "request_id": req_id,
+                    "detail": _trim_detail(exc.detail),
+                },
+            }
+            status = 502
     body = json.dumps({**payload, "version": PROTOCOL_VERSION})
     resp = Response(body, status=status, mimetype="application/json")
     resp.headers["x-request-id"] = req_id
@@ -290,7 +314,34 @@ def _function_tool_schemas():
     return tools
 
 
-def _validated_json(req_id, *, allowed, required=()):
+def _inbound_schema_error(schema_name, exc):
+    if exc.validator in {"additionalProperties", "required"} and not exc.path:
+        return (
+            "invalid_request_body",
+            "Request body does not match the endpoint contract.",
+        )
+    if schema_name == "session.create":
+        if exc.path and exc.path[0] == "title":
+            return (
+                "invalid_session_title",
+                f"title must be a string up to {MAX_SESSION_TITLE_LENGTH} characters.",
+            )
+        return "invalid_session_channel", "channel must be web or realtime."
+    if schema_name == "realtime.message":
+        return "invalid_realtime_message", "Realtime message payload is invalid."
+    if schema_name == "responses.turn":
+        if exc.path and exc.path[0] == "structured_output":
+            return "invalid_structured_output", "structured_output must be an object."
+        return (
+            "invalid_message",
+            f"message must be a non-empty string up to {MAX_MESSAGE_LENGTH} characters.",
+        )
+    if schema_name == "approval.decision":
+        return "invalid_approval_decision", "approve must be a boolean."
+    return "invalid_realtime_payload", f"Request body does not match the {schema_name} schema."
+
+
+def _validated_json(req_id, *, schema_name=None, allowed=None, required=()):
     if not request.is_json:
         return None, _error_response(
             "invalid_content_type",
@@ -308,6 +359,20 @@ def _validated_json(req_id, *, allowed, required=()):
         )
     payload = dict(payload)
     payload.pop("version", None)
+    if schema_name:
+        try:
+            validate_inbound_payload(schema_name, payload)
+        except RealtimePayloadValidationError as exc:
+            code, message = _inbound_schema_error(schema_name, exc)
+            return None, _error_response(
+                code,
+                message,
+                400,
+                req_id,
+                detail=exc.detail,
+            )
+        return payload, None
+    allowed = set(allowed or ())
     extras = sorted(set(payload) - set(allowed))
     missing = sorted(set(required) - set(payload))
     if extras or missing:
@@ -575,6 +640,7 @@ def _validated_structured_output(value, req_id):
 
 
 def _sse(event):
+    validate_outbound_event(event)
     message = {**event, "version": PROTOCOL_VERSION}
     event_type = message.get("type", "message")
     return f"event: {event_type}\ndata: {json.dumps(message, default=str)}\n\n"
@@ -730,7 +796,7 @@ def create_responses_session():
     auth_error = _check_bridge_auth(req_id)
     if auth_error:
         return auth_error
-    payload, error = _validated_json(req_id, allowed={"title", "channel"})
+    payload, error = _validated_json(req_id, schema_name="session.create")
     if error:
         return error
     title = payload.get("title", "")
@@ -752,7 +818,12 @@ def create_responses_session():
     session = chatlog.new_session(title.strip(), channel=channel)
     bind_log_context(session_id=session["id"])
     session.pop("last_response_id", None)
-    return _json_response({"ok": True, "session": session}, 201, req_id)
+    return _json_response(
+        {"ok": True, "session": session},
+        201,
+        req_id,
+        outbound_schema="session.response",
+    )
 
 
 @app.route("/responses/sessions", methods=["GET"])
@@ -804,7 +875,7 @@ def resume_responses_session(session_id):
     auth_error = _check_bridge_auth(req_id)
     if auth_error:
         return auth_error
-    payload, error = _validated_json(req_id, allowed=set())
+    payload, error = _validated_json(req_id, schema_name="session.resume")
     if error:
         return error
     session, error = _validated_session(session_id, req_id)
@@ -813,6 +884,7 @@ def resume_responses_session(session_id):
     return _json_response(
         {"ok": True, "session": _session_detail_with_artifacts(session["id"])},
         req_id=req_id,
+        outbound_schema="session.response",
     )
 
 
@@ -847,20 +919,7 @@ def record_realtime_message(session_id):
     session, error = _validated_session(session_id, req_id)
     if error:
         return error
-    payload, error = _validated_json(
-        req_id,
-        allowed={
-            "external_id",
-            "role",
-            "content",
-            "source",
-            "response_id",
-            "status",
-            "playback_ms",
-            "metadata",
-        },
-        required={"external_id", "role", "content", "source", "status"},
-    )
+    payload, error = _validated_json(req_id, schema_name="realtime.message")
     if error:
         return error
     metadata = payload.get("metadata") or {}
@@ -934,7 +993,11 @@ def record_realtime_message(session_id):
         )
     except ValueError as exc:
         return _error_response("invalid_realtime_message", str(exc), 400, req_id)
-    return _json_response({"ok": True, "message": message}, req_id=req_id)
+    return _json_response(
+        {"ok": True, "message": message},
+        req_id=req_id,
+        outbound_schema="realtime.message.response",
+    )
 
 
 @app.route("/responses/artifacts/<artifact_id>", methods=["GET"])
@@ -984,11 +1047,7 @@ def stream_responses_turn(session_id):
     session, error = _validated_session(session_id, req_id)
     if error:
         return error
-    payload, error = _validated_json(
-        req_id,
-        allowed={"message", "structured_output"},
-        required={"message"},
-    )
+    payload, error = _validated_json(req_id, schema_name="responses.turn")
     if error:
         return error
     message = payload["message"]
@@ -1255,6 +1314,22 @@ def _stream_session_response(
                     )
                 public_event["session_id"] = session["id"]
             yield _sse(public_event)
+    except RealtimePayloadValidationError as exc:
+        _LOGGER.error(
+            "responses.turn.invalid_outbound_payload",
+            extra={"error_code": "invalid_outbound_payload"},
+        )
+        yield _sse(
+            {
+                "type": "error",
+                "error": {
+                    "code": "invalid_outbound_payload",
+                    "message": "Realtime stream event did not match the server contract.",
+                    "request_id": req_id,
+                    "detail": _trim_detail(exc.detail),
+                },
+            }
+        )
     except DurableExecutionOutcomeUnknown as exc:
         _LOGGER.exception(
             "responses.turn.failed",
@@ -1312,7 +1387,7 @@ def resolve_responses_approval(session_id, approval_id):
         return error
     if not SESSION_ID_PATTERN.fullmatch(approval_id):
         return _error_response("approval_not_found", "Approval was not found.", 404, req_id)
-    payload, error = _validated_json(req_id, allowed={"approve"}, required={"approve"})
+    payload, error = _validated_json(req_id, schema_name="approval.decision")
     if error:
         return error
     approve = payload["approve"]
