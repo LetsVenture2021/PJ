@@ -6,12 +6,14 @@ import json
 import os
 import re
 from pathlib import Path
+from time import perf_counter
 
 from openai import OpenAI
 
 import skills
 from runtime_config import load_mcp_config, load_runtime_config
 from ops.shared.interfaces import ResponsesProvider, ToolDispatcher
+from ops.shared.logging import get_logger
 from ops.shared.providers import OpenAIResponsesProvider
 from ops.shared.validation import (
     public_url as _shared_public_url,
@@ -26,6 +28,7 @@ COMPUTER_USE_MODELS = {"computer-use-preview"}
 MAX_LOCAL_TOOL_ROUNDS = 12
 MAX_DELEGATION_DETAIL_LENGTH = 6000
 MAX_DELEGATION_CITATIONS = 25
+_LOGGER = get_logger("realtime.orchestration")
 
 ADVANCED_DELEGATION_TOOL = {
     "type": "function",
@@ -642,7 +645,38 @@ class ResponsesOrchestrator:
         if self.tool_executor is not None:
             return self.tool_executor(call, approved)
         dispatcher = self.approved_dispatcher if approved else self.dispatcher
-        return dispatcher(call["name"], call["arguments"])
+        started_at = perf_counter()
+        fields = {
+            "approval_granted": approved,
+            "tool_call_id": call.get("call_id"),
+            "tool_name": call["name"],
+        }
+        _LOGGER.info("tool.execution.started", extra=fields)
+        try:
+            result = dispatcher(call["name"], call["arguments"])
+        except Exception:
+            _LOGGER.exception(
+                "tool.execution.failed",
+                extra={
+                    **fields,
+                    "duration_ms": round(
+                        (perf_counter() - started_at) * 1000,
+                        3,
+                    ),
+                },
+            )
+            raise
+        _LOGGER.info(
+            "tool.execution.completed",
+            extra={
+                **fields,
+                "duration_ms": round(
+                    (perf_counter() - started_at) * 1000,
+                    3,
+                ),
+            },
+        )
+        return result
 
     def _checkpoint_response(self, operation_key, response_id):
         if (
@@ -1254,23 +1288,60 @@ def dispatch_realtime_function(
         client=None,
         cfg=None,
         approval_granted=False):
-    if name == ADVANCED_DELEGATION_TOOL["name"]:
-        return delegate_advanced_task(
-            arguments.get("prompt") if isinstance(arguments, dict) else None,
-            client=client,
-            cfg=cfg,
-        )
-    from realtime_config import realtime_tool_schemas
-
-    allowed = {
-        tool.get("name")
-        for tool in realtime_tool_schemas()
-        if isinstance(tool, dict) and tool.get("type") == "function"
+    started_at = perf_counter()
+    fields = {
+        "approval_granted": approval_granted,
+        "tool_name": name,
+        "tool_surface": "realtime",
     }
-    if name not in allowed:
-        raise ValueError(f"Tool '{name}' is not available in Realtime mode.")
-    if approval_granted:
-        return redact_server_paths(
-            dispatch_approved_local_function(name, arguments)
+    _LOGGER.info("tool.execution.started", extra=fields)
+    try:
+        if name == ADVANCED_DELEGATION_TOOL["name"]:
+            result = delegate_advanced_task(
+                arguments.get("prompt") if isinstance(arguments, dict) else None,
+                client=client,
+                cfg=cfg,
+            )
+        else:
+            from realtime_config import realtime_tool_schemas
+
+            allowed = {
+                tool.get("name")
+                for tool in realtime_tool_schemas()
+                if isinstance(tool, dict) and tool.get("type") == "function"
+            }
+            if name not in allowed:
+                raise ValueError(
+                    f"Tool '{name}' is not available in Realtime mode."
+                )
+            if approval_granted:
+                result = redact_server_paths(
+                    dispatch_approved_local_function(name, arguments)
+                )
+            else:
+                result = redact_server_paths(
+                    dispatch_local_function(name, arguments)
+                )
+    except Exception:
+        _LOGGER.exception(
+            "tool.execution.failed",
+            extra={
+                **fields,
+                "duration_ms": round(
+                    (perf_counter() - started_at) * 1000,
+                    3,
+                ),
+            },
         )
-    return redact_server_paths(dispatch_local_function(name, arguments))
+        raise
+    _LOGGER.info(
+        "tool.execution.completed",
+        extra={
+            **fields,
+            "duration_ms": round(
+                (perf_counter() - started_at) * 1000,
+                3,
+            ),
+        },
+    )
+    return result

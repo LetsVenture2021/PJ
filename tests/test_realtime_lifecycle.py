@@ -1,5 +1,7 @@
 import hashlib
+import io
 import json
+import logging
 import os
 import tempfile
 import unittest
@@ -9,6 +11,7 @@ from unittest.mock import patch
 
 import chatlog
 import realtime_server
+from ops.shared.logging import JsonFormatter
 
 
 def obj(**values):
@@ -241,6 +244,49 @@ class TestRealtimeSessionLifecycle(unittest.TestCase):
             ],
         )
 
+    def test_request_logs_carry_request_and_session_correlation(self):
+        session_id = self.create_realtime_session()
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setFormatter(JsonFormatter())
+        logger = logging.getLogger("pj.ops.realtime.server")
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+        try:
+            response = self.client.post(
+                f"/responses/sessions/{session_id}/resume",
+                json={},
+                headers={
+                    **self.auth,
+                    "x-pj-client-request-id": "correlated-request",
+                },
+            )
+        finally:
+            logger.removeHandler(handler)
+
+        self.assertEqual(response.status_code, 200)
+        entries = [
+            json.loads(line)
+            for line in stream.getvalue().splitlines()
+        ]
+        lifecycle = {
+            entry["message"]: entry
+            for entry in entries
+            if entry["message"].startswith("http.request.")
+        }
+        self.assertEqual(
+            lifecycle["http.request.started"]["request_id"],
+            "correlated-request",
+        )
+        self.assertEqual(
+            lifecycle["http.request.completed"]["session_id"],
+            session_id,
+        )
+        self.assertEqual(
+            lifecycle["http.request.completed"]["http_status"],
+            200,
+        )
+
     def test_signaling_timeout_is_structured_and_not_retried(self):
         session_id = self.create_realtime_session()
         with patch.object(
@@ -278,30 +324,37 @@ class TestRealtimeSessionLifecycle(unittest.TestCase):
                 completed_stream("Retry completed.", "resp_retry"),
             ],
         )
-
-        with patch.object(
-            realtime_server,
-            "OPENAI_CLIENT_FACTORY",
-            return_value=runtime_client,
-        ):
-            failed = self.client.post(
-                f"/responses/sessions/{session_id}/turns",
-                json={"message": "First attempt"},
-                headers={
-                    **self.auth,
-                    "x-pj-client-request-id": "failed-stream-request",
-                },
-                buffered=True,
-            )
-            retried = self.client.post(
-                f"/responses/sessions/{session_id}/turns",
-                json={"message": "Explicit retry"},
-                headers={
-                    **self.auth,
-                    "x-pj-client-request-id": "retry-stream-request",
-                },
-                buffered=True,
-            )
+        log_stream = io.StringIO()
+        log_handler = logging.StreamHandler(log_stream)
+        log_handler.setFormatter(JsonFormatter())
+        logger = logging.getLogger("pj.ops.realtime.server")
+        logger.addHandler(log_handler)
+        try:
+            with patch.object(
+                realtime_server,
+                "OPENAI_CLIENT_FACTORY",
+                return_value=runtime_client,
+            ):
+                failed = self.client.post(
+                    f"/responses/sessions/{session_id}/turns",
+                    json={"message": "First attempt"},
+                    headers={
+                        **self.auth,
+                        "x-pj-client-request-id": "failed-stream-request",
+                    },
+                    buffered=True,
+                )
+                retried = self.client.post(
+                    f"/responses/sessions/{session_id}/turns",
+                    json={"message": "Explicit retry"},
+                    headers={
+                        **self.auth,
+                        "x-pj-client-request-id": "retry-stream-request",
+                    },
+                    buffered=True,
+                )
+        finally:
+            logger.removeHandler(log_handler)
 
         failed_events = parse_sse(failed)
         self.assertEqual(
@@ -320,6 +373,16 @@ class TestRealtimeSessionLifecycle(unittest.TestCase):
             "failed-stream-request",
         )
         self.assertIn("transient provider disconnect", error["detail"])
+        failure_log = next(
+            json.loads(line)
+            for line in log_stream.getvalue().splitlines()
+            if json.loads(line)["message"] == "responses.turn.failed"
+        )
+        self.assertEqual(
+            failure_log["request_id"],
+            "failed-stream-request",
+        )
+        self.assertEqual(failure_log["session_id"], session_id)
 
         retry_events = parse_sse(retried)
         self.assertEqual(retry_events[-1]["type"], "completion")

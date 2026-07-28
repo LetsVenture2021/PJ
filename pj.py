@@ -10,6 +10,11 @@ import chatlog
 import imageops
 import promptops
 import skills
+from ops.shared.logging import (
+    bind_log_context,
+    configure_logging,
+    new_correlation_id,
+)
 from responses_runtime import (
     build_tools,
     load_config,
@@ -97,6 +102,8 @@ def _perfect_cli_prompt(client, cfg, message):
 
 
 def main():
+    configure_logging()
+    bind_log_context(request_id=new_correlation_id())
     args = sys.argv[1:]
     if args and args[0] in ("voice", "--voice"):
         import voice
@@ -117,6 +124,7 @@ def main():
     if args:
         message = " ".join(args)
         session = chatlog.latest_session() or chatlog.new_session()
+        bind_log_context(session_id=session["id"])
         state["previous_response_id"] = session.get("last_response_id")
         chatlog.record_turn(session, "user", message)
         perfected = _perfect_cli_prompt(client, cfg, message)
@@ -160,6 +168,7 @@ def main():
         "Ctrl+C to exit.\n"
     )
     session = chatlog.latest_session() or chatlog.new_session()
+    bind_log_context(session_id=session["id"])
     if session.get("title"):
         print(
             f"(Continuing: {session['title'][:60]} — /new for a fresh chat, "
@@ -173,12 +182,14 @@ def main():
             message = input("You: ").strip()
             if not message:
                 continue
+            bind_log_context(request_id=new_correlation_id())
             handled, switched = chatlog.handle_command(
                 message, session, skills.TOOL_SCHEMAS, cfg
             )
             if handled:
                 if switched:
                     session = switched
+                    bind_log_context(session_id=session["id"])
                     state["previous_response_id"] = session.get(
                         "last_response_id"
                     )

@@ -157,6 +157,24 @@ Do not commit secrets. Both `.env` and runtime files (`*.sqlite3`, `state.json`,
 The checked-in `config.json` contains project-specific model and vector-store
 IDs; access to those resources is not provisioned by this repository.
 
+### Structured logging and redaction
+
+Server and operation logs are emitted as one JSON object per line. Every HTTP
+request receives an `x-request-id` response header; a valid
+`x-pj-client-request-id` is reused, otherwise the server generates a UUID.
+Request and session IDs are bound to logging context so Responses orchestration
+and local tool execution events can be traced across the same lifecycle. Set
+`PJ_LOG_LEVEL` to change the default `INFO` threshold.
+
+Logs intentionally record tool names, call IDs, decisions, status codes, and
+durations but not prompts, tool arguments, results, authorization headers, or
+request bodies. The shared formatter recursively replaces values whose keys are
+credentials, authorization/cookie fields, or end in `_api_key`, `_password`,
+`_secret`, or `_token`. It also redacts bearer tokens, OpenAI-style `sk-...`
+keys, and common secret assignments embedded in strings. New log fields must
+follow the same metadata-only rule; redaction is defense in depth, not
+permission to log payloads.
+
 ## Primary user flows
 
 Run commands from the repository root with the virtual environment active.

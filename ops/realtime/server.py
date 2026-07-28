@@ -11,15 +11,17 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import logging
 import os
 import re
 import secrets
 from pathlib import Path
-from uuid import uuid4
+from time import perf_counter
 
 import requests
 from flask import (
     Flask,
+    g,
     request,
     Response,
     send_file,
@@ -37,6 +39,14 @@ import docops
 import promptops
 import skills
 from pj_contract import CONTRACT_VERSION
+from ops.shared.logging import (
+    bind_log_context,
+    clear_log_context,
+    configure_logging,
+    get_logger,
+    new_correlation_id,
+    set_log_context,
+)
 from realtime_config import realtime_session_config, realtime_tool_schemas
 from responses_runtime import (
     capability_manifest,
@@ -58,6 +68,9 @@ SCHEMA_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 ARTIFACT_ID_PATTERN = re.compile(r"^ART-[a-f0-9]{32}$")
 OPENAI_CLIENT_FACTORY = OpenAI
 
+configure_logging()
+_LOGGER = get_logger("realtime.server")
+
 
 class DurableExecutionOutcomeUnknown(RuntimeError):
     """Raised when replaying a tool or provider effect would be unsafe."""
@@ -78,13 +91,67 @@ app.config.update(
 CORS(app)  # allow local browser origins when running on localhost
 
 
+@app.before_request
+def _start_request_logging():
+    req_id = _request_id()
+    route_values = request.view_args or {}
+    session_id = (
+        route_values.get("session_id")
+        or request.args.get("session_id")
+        or ""
+    )
+    if not session_id and request.is_json:
+        payload = request.get_json(silent=True)
+        if isinstance(payload, dict):
+            session_id = payload.get("session_id") or ""
+    if not SESSION_ID_PATTERN.fullmatch(str(session_id)):
+        session_id = None
+    set_log_context(request_id=req_id, session_id=session_id)
+    g.request_started_at = perf_counter()
+    _LOGGER.info(
+        "http.request.started",
+        extra={"http_method": request.method, "http_path": request.path},
+    )
+
+
+@app.after_request
+def _finish_request_logging(response):
+    req_id = _request_id()
+    response.headers.setdefault("x-request-id", req_id)
+    started_at = getattr(g, "request_started_at", perf_counter())
+    level = logging.WARNING if response.status_code >= 500 else logging.INFO
+    _LOGGER.log(
+        level,
+        "http.request.completed",
+        extra={
+            "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+            "http_method": request.method,
+            "http_path": request.path,
+            "http_status": response.status_code,
+        },
+    )
+    return response
+
+
+@app.teardown_request
+def _clear_request_logging(_error=None):
+    clear_log_context()
+
+
 def _tool_policy_sha256():
     path = BASE_DIR / "tool_policy.json"
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
 
 
 def _request_id():
-    return request.headers.get("x-pj-client-request-id") or str(uuid4())
+    cached = getattr(g, "request_id", None)
+    if cached:
+        return cached
+    req_id = new_correlation_id(
+        request.headers.get("x-pj-client-request-id")
+    )
+    g.request_id = req_id
+    return req_id
 
 
 def _trim_detail(detail):
@@ -303,13 +370,30 @@ def _execute_durable_tool(
         name,
         arguments,
         approval_granted):
-    reservation = chatlog.reserve_tool_execution(
-        session["id"],
-        execution_key,
-        name,
-        arguments,
-        approval_id=approval_id,
-    )
+    started_at = perf_counter()
+    log_fields = {
+        "approval_granted": approval_granted,
+        "tool_call_id": execution_key,
+        "tool_name": name,
+    }
+    _LOGGER.info("tool.execution.started", extra=log_fields)
+    try:
+        reservation = chatlog.reserve_tool_execution(
+            session["id"],
+            execution_key,
+            name,
+            arguments,
+            approval_id=approval_id,
+        )
+    except Exception:
+        _LOGGER.exception(
+            "tool.execution.failed",
+            extra={
+                **log_fields,
+                "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+            },
+        )
+        raise
     state = reservation.get("state")
     if state == "completed":
         _validate_and_link_artifacts(
@@ -317,12 +401,27 @@ def _execute_durable_tool(
             reservation.get("artifact_ids") or [],
             reservation.get("artifact_hashes") or {},
         )
+        _LOGGER.info(
+            "tool.execution.replayed",
+            extra={
+                **log_fields,
+                "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+            },
+        )
         return (
             reservation["result"],
             list(reservation.get("artifact_ids") or []),
             dict(reservation.get("artifact_hashes") or {}),
         )
     if state != "reserved":
+        _LOGGER.error(
+            "tool.execution.failed",
+            extra={
+                **log_fields,
+                "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+                "failure_reason": "outcome_unknown",
+            },
+        )
         raise DurableExecutionOutcomeUnknown(
             "A prior tool execution did not durably record a safe outcome"
         )
@@ -347,15 +446,36 @@ def _execute_durable_tool(
             raise DurableExecutionOutcomeUnknown(
                 "The tool outcome could not be committed exactly once"
             )
+        _LOGGER.info(
+            "tool.execution.completed",
+            extra={
+                **log_fields,
+                "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+            },
+        )
         return public_result, artifact_ids, artifact_hashes
     except DurableExecutionOutcomeUnknown:
         chatlog.mark_tool_execution_unknown(
             session["id"], execution_key, token
         )
+        _LOGGER.exception(
+            "tool.execution.failed",
+            extra={
+                **log_fields,
+                "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+            },
+        )
         raise
     except Exception as exc:
         chatlog.mark_tool_execution_unknown(
             session["id"], execution_key, token
+        )
+        _LOGGER.exception(
+            "tool.execution.failed",
+            extra={
+                **log_fields,
+                "duration_ms": round((perf_counter() - started_at) * 1000, 3),
+            },
         )
         raise DurableExecutionOutcomeUnknown(
             "The tool may have executed, but its outcome was not durably recorded"
@@ -614,6 +734,7 @@ def create_responses_session():
             req_id,
         )
     session = chatlog.new_session(title.strip(), channel=channel)
+    bind_log_context(session_id=session["id"])
     session.pop("last_response_id", None)
     return _json_response({"ok": True, "session": session}, 201, req_id)
 
@@ -975,18 +1096,19 @@ def _stream_session_response(
         ready_artifact_ids=(),
         prelude=(),
         approval_execution=None):
-    deliverable_format = (
-        required_deliverable_format
-        or requested_deliverable_format(input_value)
-    )
-    yield _sse({
-        "type": "session",
-        "session_id": session["id"],
-        "request_id": req_id,
-    })
-    for event in prelude:
-        yield _sse(event)
+    set_log_context(request_id=req_id, session_id=session["id"])
     try:
+        deliverable_format = (
+            required_deliverable_format
+            or requested_deliverable_format(input_value)
+        )
+        yield _sse({
+            "type": "session",
+            "session_id": session["id"],
+            "request_id": req_id,
+        })
+        for event in prelude:
+            yield _sse(event)
         idempotency_key_prefix = None
         tool_executor = None
         response_checkpoint = None
@@ -1148,6 +1270,10 @@ def _stream_session_response(
                 public_event["session_id"] = session["id"]
             yield _sse(public_event)
     except DurableExecutionOutcomeUnknown as exc:
+        _LOGGER.exception(
+            "responses.turn.failed",
+            extra={"error_code": "approval_execution_outcome_unknown"},
+        )
         if approval_execution:
             chatlog.mark_pending_approval_execution_unknown(
                 session["id"],
@@ -1166,6 +1292,10 @@ def _stream_session_response(
             },
         })
     except Exception as exc:
+        _LOGGER.exception(
+            "responses.turn.failed",
+            extra={"error_code": "responses_turn_failed"},
+        )
         yield _sse({
             "type": "error",
             "error": {
@@ -1177,6 +1307,7 @@ def _stream_session_response(
         })
     finally:
         chatlog.release_session_turn(session["id"], turn_token)
+        clear_log_context()
 
 
 @app.route(
@@ -1642,6 +1773,8 @@ def execute_tool():
             404,
             req_id,
         )
+    if session_id:
+        bind_log_context(session_id=session_id)
 
     arguments = payload.get("arguments") or {}
     if isinstance(arguments, str):
@@ -1761,6 +1894,10 @@ def run():
         )
     except ValueError:
         app.config["LOCAL_WEB_OWNER_SESSION_ENABLED"] = False
+    _LOGGER.info(
+        "realtime.server.started",
+        extra={"bind_host": bind_host, "port": 3001},
+    )
     app.run(host=bind_host, port=3001)
 
 
