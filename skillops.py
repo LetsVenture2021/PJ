@@ -56,6 +56,7 @@ _VECTOR_SOURCE_CACHE_DIR = Path(
 
 DEFAULT_MAX_CHARS_PER_FILE = 5_000_000
 MAX_MAX_CHARS_PER_FILE = 25_000_000
+MAX_SYNC_REPORT_DETAILS = 200
 DEFAULT_REQUEST_RETRIES = 4
 DEFAULT_RETRY_BACKOFF_SECONDS = 0.5
 DOWNLOADABLE_FILE_PURPOSES = {
@@ -534,6 +535,23 @@ def _read_cached_vector_source(file_id: str, metadata: dict, entry: dict,
     return text
 
 
+def _cached_vector_source_fingerprint(file_id: str) -> str:
+    file_id = _safe_file_id(file_id)
+    manifest_path = _VECTOR_SOURCE_CACHE_DIR / f"{file_id}.json"
+    if not manifest_path.exists():
+        return ""
+    if manifest_path.is_symlink() or not manifest_path.is_file():
+        raise RuntimeError(f"cached source manifest for {file_id} is unsafe")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    fingerprint = str(manifest.get("source_sha256") or "").lower()
+    if (
+        len(fingerprint) != 64
+        or any(char not in "0123456789abcdef" for char in fingerprint)
+    ):
+        raise RuntimeError(f"cached source manifest for {file_id} has no valid hash")
+    return fingerprint
+
+
 def _read_openai_file_content(file_id: str, api_key: str,
                               max_chars_per_file: int,
                               expected_bytes: int = 0) -> tuple[str, bool]:
@@ -847,7 +865,8 @@ def _sync_policy_hash(overwrite_existing: bool,
 
 
 def _sync_version_hash(entry: dict, metadata: dict,
-                       sync_policy_hash: str) -> str:
+                       sync_policy_hash: str,
+                       cache_fingerprint: str = "") -> str:
     return _stable_hash({
         "vector_store_file_id": entry.get("id"),
         "source_file_id": entry.get("file_id"),
@@ -857,6 +876,7 @@ def _sync_version_hash(entry: dict, metadata: dict,
         "filename": metadata.get("filename"),
         "bytes": metadata.get("bytes"),
         "purpose": metadata.get("purpose"),
+        "cache_fingerprint": cache_fingerprint,
         "sync_policy_hash": sync_policy_hash,
     })
 
@@ -1071,6 +1091,28 @@ def _finish_sync_run(run_id: str, status: str, totals: dict,
         )
 
 
+def _bounded_sync_details(totals: dict, reports: list, errors: list) -> dict:
+    actionable = [
+        report for report in reports
+        if report.get("status") != "skipped_unchanged"
+    ]
+    unchanged = [
+        report for report in reports
+        if report.get("status") == "skipped_unchanged"
+    ]
+    retained = actionable[:MAX_SYNC_REPORT_DETAILS]
+    retained.extend(
+        unchanged[:max(0, MAX_SYNC_REPORT_DETAILS - len(retained))]
+    )
+    return {
+        "totals": totals,
+        "files": retained,
+        "file_reports_total": len(reports),
+        "file_reports_omitted": max(0, len(reports) - len(retained)),
+        "errors": errors[:100],
+    }
+
+
 def sync_vector_store(
         dry_run: bool = False,
         max_files: int = 0,
@@ -1189,10 +1231,14 @@ def sync_vector_store(
                     filename = str(metadata.get("filename") or filename)
                     report["filename"] = filename
                     report["purpose"] = metadata.get("purpose")
+                    cache_fingerprint = _cached_vector_source_fingerprint(
+                        source_file_id
+                    )
                     version_hash = _sync_version_hash(
                         entry,
                         metadata,
                         sync_policy_hash,
+                        cache_fingerprint,
                     )
                     state = _get_sync_state(vector_store_id, source_file_id)
                     if (
@@ -1464,11 +1510,7 @@ def sync_vector_store(
                 final_status = "dry_run_complete"
             else:
                 final_status = "completed"
-            details = {
-                "totals": totals,
-                "files": reports,
-                "errors": errors[:100],
-            }
+            details = _bounded_sync_details(totals, reports, errors)
             _finish_sync_run(
                 run_id,
                 final_status,
@@ -1483,7 +1525,9 @@ def sync_vector_store(
                 "dry_run": bool(dry_run),
                 "force": bool(force),
                 **totals,
-                "file_reports": reports,
+                "file_reports": details["files"],
+                "file_reports_total": details["file_reports_total"],
+                "file_reports_omitted": details["file_reports_omitted"],
                 "errors": errors[:50],
             }
         except Exception as exc:
@@ -1503,7 +1547,7 @@ def sync_vector_store(
                 run_id,
                 "failed",
                 totals,
-                {"totals": totals, "files": reports, "errors": [error]},
+                _bounded_sync_details(totals, reports, [error]),
                 error,
             )
             return {"status": "failed", "run_id": run_id, "error": error}

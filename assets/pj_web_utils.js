@@ -1,4 +1,4 @@
-export const CONTRACT_VERSION = "2026-07-28.4";
+export const CONTRACT_VERSION = "2026-07-28.5";
 
 export function createRequestId() {
   if (window.crypto && typeof window.crypto.randomUUID === "function") {

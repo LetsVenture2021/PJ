@@ -297,6 +297,17 @@
       font-size: 13px;
     }
 
+    .approval-actions {
+      display: flex;
+      gap: 8px;
+      justify-content: center;
+      margin-top: 10px;
+    }
+
+    .approval-actions button {
+      padding: 7px 12px;
+    }
+
     .composer {
       padding: 14px 16px;
       border-top: 1px solid var(--line);
@@ -488,6 +499,7 @@
       fullPowerBusy: false,
       responsesAbortController: null,
       capabilityManifest: null,
+      pendingApprovals: {},
     };
 
     const savedBase = localStorage.getItem(STORAGE_KEY);
@@ -536,37 +548,37 @@
         el.textInput.disabled = true;
       }
 
-      function setMode(mode) {
-        if (!Object.values(MODE).includes(mode) || state.mode === mode) return;
-        if (state.mode === MODE.REALTIME) {
-          stopSession({ announce: false });
-        } else {
-          stopFullPowerSession({ announce: false });
-        }
-        state.mode = mode;
-        el.realtimeModeBtn.classList.toggle("active", mode === MODE.REALTIME);
-        el.fullPowerModeBtn.classList.toggle("active", mode === MODE.FULL_POWER);
-        el.fullPowerControls.classList.toggle("hidden", mode !== MODE.FULL_POWER);
-        el.startBtn.textContent = mode === MODE.REALTIME
-          ? "Start Session"
-          : "New Conversation";
-        el.stopBtn.textContent = mode === MODE.REALTIME
-          ? "End Session"
-          : "Close Conversation";
-        el.modeNote.textContent = mode === MODE.REALTIME
-          ? "Voice mode requires microphone permission. You can still send text messages once connected."
-          : "Full Power uses PJ's terminal-equivalent Responses runtime: web and file search, MCP, local tools, citations, structured output, and shared history.";
-        setPhase(PHASE.IDLE, mode === MODE.REALTIME ? "Realtime idle" : "Full Power idle");
-        appendBubble("system", mode === MODE.REALTIME
-          ? "Realtime mode selected."
-          : "Full Power mode selected. Start or resume a conversation.");
-        refreshCurrentCapabilities({ forceRefresh: false });
-        if (mode === MODE.FULL_POWER) refreshFullPowerSessions();
-      }
-
       if (statusText) {
         setStatus(statusText, phase === PHASE.LIVE ? "live" : "idle");
       }
+    }
+
+    function setMode(mode) {
+      if (!Object.values(MODE).includes(mode) || state.mode === mode) return;
+      if (state.mode === MODE.REALTIME) {
+        stopSession({ announce: false });
+      } else {
+        stopFullPowerSession({ announce: false });
+      }
+      state.mode = mode;
+      el.realtimeModeBtn.classList.toggle("active", mode === MODE.REALTIME);
+      el.fullPowerModeBtn.classList.toggle("active", mode === MODE.FULL_POWER);
+      el.fullPowerControls.classList.toggle("hidden", mode !== MODE.FULL_POWER);
+      el.startBtn.textContent = mode === MODE.REALTIME
+        ? "Start Session"
+        : "New Conversation";
+      el.stopBtn.textContent = mode === MODE.REALTIME
+        ? "End Session"
+        : "Close Conversation";
+      el.modeNote.textContent = mode === MODE.REALTIME
+        ? "Voice mode requires microphone permission. You can still send text messages once connected."
+        : "Full Power uses PJ's terminal-equivalent Responses runtime: web and file search, MCP, local tools, citations, structured output, and shared history.";
+      setPhase(PHASE.IDLE, mode === MODE.REALTIME ? "Realtime idle" : "Full Power idle");
+      appendBubble("system", mode === MODE.REALTIME
+        ? "Realtime mode selected."
+        : "Full Power mode selected. Start or resume a conversation.");
+      refreshCurrentCapabilities({ forceRefresh: false });
+      if (mode === MODE.FULL_POWER) refreshFullPowerSessions();
     }
 
     function appendBubble(role, text, append = false) {
@@ -652,70 +664,6 @@
         throw new Error(`Tool schema fetch failed (${response.status})${detail ? `: ${detail}` : ""}`);
       }
 
-      async function fetchJson(url, options = {}, timeoutMs = 15000) {
-        const response = await fetchWithTimeout(url, {
-          credentials: "include",
-          ...options,
-        }, timeoutMs);
-        const body = await response.text();
-        let parsed = {};
-        try {
-          parsed = body ? JSON.parse(body) : {};
-        } catch (_) {
-          parsed = {};
-        }
-        if (!response.ok) {
-          const detail = parseErrorBody(body);
-          throw new Error(`Request failed (${response.status})${detail ? `: ${detail}` : ""}`);
-        }
-        return parsed;
-      }
-
-      function capabilityNames(manifest) {
-        const native = Object.entries(manifest?.native || {})
-          .filter(([, value]) => value?.status === "active")
-          .map(([name]) => name);
-        const mcp = (manifest?.mcp_servers || [])
-          .filter((server) => ["active", "configured"].includes(server?.status))
-          .map((server) => `mcp:${server.label}`);
-        return [...native, ...mcp];
-      }
-
-      async function refreshFullPowerCapabilities(base, requestId) {
-        try {
-          const parsed = await fetchJson(
-            `${base}/responses/capabilities`,
-            { headers: requestHeaders(requestId) },
-            12000,
-          );
-          const manifest = parsed.capabilities || {};
-          state.capabilityManifest = manifest;
-          const functionCount = manifest.local_functions?.count || 0;
-          const names = capabilityNames(manifest);
-          el.capabilityStatus.textContent =
-            `Capability mode: Full Power [${functionCount} local functions] model ${manifest.model?.id || "unknown"}`;
-          el.toolSummary.textContent = names.length
-            ? `Native and connected tools: ${names.join(", ")}`
-            : "Native and connected tools are unavailable.";
-          return manifest;
-        } catch (error) {
-          state.capabilityManifest = null;
-          el.capabilityStatus.textContent = "Capability mode: Full Power unavailable";
-          el.toolSummary.textContent = `Capability error: ${shorten(String(error), 240)}`;
-          return null;
-        }
-      }
-
-      async function refreshCurrentCapabilities({ forceRefresh = false } = {}) {
-        const base = apiBase();
-        if (!base) return null;
-        const requestId = createRequestId();
-        if (state.mode === MODE.FULL_POWER) {
-          return refreshFullPowerCapabilities(base, requestId);
-        }
-        return refreshCapabilities(base, requestId, { forceRefresh });
-      }
-
       let parsed = {};
       try {
         parsed = body ? JSON.parse(body) : {};
@@ -729,6 +677,70 @@
         detail: typeof parsed.detail === "string" ? parsed.detail : "",
         tools,
       };
+    }
+
+    async function fetchJson(url, options = {}, timeoutMs = 15000) {
+      const response = await fetchWithTimeout(url, {
+        credentials: "include",
+        ...options,
+      }, timeoutMs);
+      const body = await response.text();
+      let parsed = {};
+      try {
+        parsed = body ? JSON.parse(body) : {};
+      } catch (_) {
+        parsed = {};
+      }
+      if (!response.ok) {
+        const detail = parseErrorBody(body);
+        throw new Error(`Request failed (${response.status})${detail ? `: ${detail}` : ""}`);
+      }
+      return parsed;
+    }
+
+    function capabilityNames(manifest) {
+      const native = Object.entries(manifest?.native || {})
+        .filter(([, value]) => value?.status === "active")
+        .map(([name]) => name);
+      const mcp = (manifest?.mcp_servers || [])
+        .filter((server) => ["active", "configured"].includes(server?.status))
+        .map((server) => `mcp:${server.label}`);
+      return [...native, ...mcp];
+    }
+
+    async function refreshFullPowerCapabilities(base, requestId) {
+      try {
+        const parsed = await fetchJson(
+          `${base}/responses/capabilities`,
+          { headers: requestHeaders(requestId) },
+          12000,
+        );
+        const manifest = parsed.capabilities || {};
+        state.capabilityManifest = manifest;
+        const functionCount = manifest.local_functions?.count || 0;
+        const names = capabilityNames(manifest);
+        el.capabilityStatus.textContent =
+          `Capability mode: Full Power [${functionCount} local functions] model ${manifest.model?.id || "unknown"}`;
+        el.toolSummary.textContent = names.length
+          ? `Native and connected tools: ${names.join(", ")}`
+          : "Native and connected tools are unavailable.";
+        return manifest;
+      } catch (error) {
+        state.capabilityManifest = null;
+        el.capabilityStatus.textContent = "Capability mode: Full Power unavailable";
+        el.toolSummary.textContent = `Capability error: ${shorten(String(error), 240)}`;
+        return null;
+      }
+    }
+
+    async function refreshCurrentCapabilities({ forceRefresh = false } = {}) {
+      const base = apiBase();
+      if (!base) return null;
+      const requestId = createRequestId();
+      if (state.mode === MODE.FULL_POWER) {
+        return refreshFullPowerCapabilities(base, requestId);
+      }
+      return refreshCapabilities(base, requestId, { forceRefresh });
     }
 
     async function refreshCapabilities(apiBase, requestId, { health = null, forceRefresh = false } = {}) {
@@ -991,7 +1003,21 @@
         return;
       }
 
-      async function refreshFullPowerSessions() {
+      appendBubble("user", message);
+      el.textInput.value = "";
+
+      state.dataChannel.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: message }],
+        },
+      }));
+      state.dataChannel.send(JSON.stringify({ type: "response.create" }));
+    }
+
+    async function refreshFullPowerSessions() {
         if (state.mode !== MODE.FULL_POWER || !apiBase()) return;
         try {
           const parsed = await fetchJson(
@@ -1058,6 +1084,7 @@
         state.responsesAbortController = null;
         state.fullPowerSessionId = null;
         state.fullPowerBusy = false;
+        state.pendingApprovals = {};
         finalizeAssistantBubble();
         setPhase(PHASE.IDLE, "Full Power idle");
         el.sessionSelect.value = "";
@@ -1086,6 +1113,12 @@
             appendBubble(item.role === "assistant" ? "assistant" : "user", item.content || "");
             finalizeAssistantBubble();
           }
+          for (const approval of session.pending_approvals || []) {
+            renderFullPowerApproval({
+              type: "approval.required",
+              ...approval,
+            });
+          }
           setPhase(PHASE.LIVE, "Full Power live");
           appendBubble("system", `Resumed: ${session.title || "(untitled)"}`);
           el.sessionSelect.value = session.id;
@@ -1111,6 +1144,35 @@
         return { name, schema, strict: true };
       }
 
+      function renderFullPowerApproval(event) {
+        if (!event.approval_id || state.pendingApprovals[event.approval_id]) return;
+        state.pendingApprovals[event.approval_id] = true;
+        const target = event.server_label || event.name || "tool";
+        const argumentsText = shorten(JSON.stringify(event.arguments || {}), 700);
+        const bubble = appendBubble(
+          "system",
+          `Owner approval required for ${target}.\nArguments: ${argumentsText}`,
+        );
+        const controls = document.createElement("div");
+        controls.className = "approval-actions";
+        const approveButton = document.createElement("button");
+        approveButton.type = "button";
+        approveButton.textContent = "Approve";
+        const rejectButton = document.createElement("button");
+        rejectButton.type = "button";
+        rejectButton.textContent = "Reject";
+        const decide = async (approve) => {
+          approveButton.disabled = true;
+          rejectButton.disabled = true;
+          await resolveFullPowerApproval(event.approval_id, approve);
+        };
+        approveButton.addEventListener("click", () => decide(true));
+        rejectButton.addEventListener("click", () => decide(false));
+        controls.appendChild(approveButton);
+        controls.appendChild(rejectButton);
+        bubble.appendChild(controls);
+      }
+
       function renderFullPowerEvent(event) {
         if (event.type === "text.delta") {
           appendBubble("assistant", event.delta || "", true);
@@ -1127,6 +1189,14 @@
         } else if (event.type === "source") {
           const source = event.source || {};
           appendBubble("system", `Source: ${source.filename || source.query || source.url || source.type || "retrieved evidence"}${source.text ? `\n${shorten(source.text, 500)}` : ""}`);
+        } else if (event.type === "approval.required") {
+          renderFullPowerApproval(event);
+        } else if (event.type === "approval.resolved") {
+          delete state.pendingApprovals[event.approval_id];
+          appendBubble(
+            "system",
+            `${event.name || "Tool"} ${event.approved ? "approved" : "rejected"} by owner.`,
+          );
         } else if (event.type === "completion") {
           if (!state.activeAssistantBubble && event.text) {
             appendBubble("assistant", event.text);
@@ -1141,25 +1211,10 @@
         }
       }
 
-      async function streamFullPowerTurn(message, structuredOutput) {
-        const controller = new AbortController();
-        state.responsesAbortController = controller;
-        const response = await fetch(
-          `${apiBase()}/responses/sessions/${encodeURIComponent(state.fullPowerSessionId)}/turns`,
-          {
-            method: "POST",
-            credentials: "include",
-            signal: controller.signal,
-            headers: requestHeaders(createRequestId(), "application/json"),
-            body: JSON.stringify({
-              message,
-              ...(structuredOutput ? { structured_output: structuredOutput } : {}),
-            }),
-          },
-        );
+      async function consumeFullPowerStream(response) {
         if (!response.ok) {
           const raw = await response.text();
-          throw new Error(`Turn failed (${response.status})${parseErrorBody(raw) ? `: ${parseErrorBody(raw)}` : ""}`);
+          throw new Error(`Request failed (${response.status})${parseErrorBody(raw) ? `: ${parseErrorBody(raw)}` : ""}`);
         }
         if (!response.body) throw new Error("Streaming response body was unavailable.");
 
@@ -1185,6 +1240,58 @@
             }
           }
           if (done) break;
+        }
+      }
+
+      async function streamFullPowerTurn(message, structuredOutput) {
+        const controller = new AbortController();
+        state.responsesAbortController = controller;
+        const response = await fetch(
+          `${apiBase()}/responses/sessions/${encodeURIComponent(state.fullPowerSessionId)}/turns`,
+          {
+            method: "POST",
+            credentials: "include",
+            signal: controller.signal,
+            headers: requestHeaders(createRequestId(), "application/json"),
+            body: JSON.stringify({
+              message,
+              ...(structuredOutput ? { structured_output: structuredOutput } : {}),
+            }),
+          },
+        );
+        await consumeFullPowerStream(response);
+      }
+
+      async function resolveFullPowerApproval(approvalId, approve) {
+        if (!state.fullPowerSessionId || state.fullPowerBusy) return;
+        const controller = new AbortController();
+        state.responsesAbortController = controller;
+        state.fullPowerBusy = true;
+        el.sendBtn.disabled = true;
+        setStatus(approve ? "Approving tool..." : "Rejecting tool...", "live");
+        try {
+          const response = await fetch(
+            `${apiBase()}/responses/sessions/${encodeURIComponent(state.fullPowerSessionId)}/approvals/${encodeURIComponent(approvalId)}`,
+            {
+              method: "POST",
+              credentials: "include",
+              signal: controller.signal,
+              headers: requestHeaders(createRequestId(), "application/json"),
+              body: JSON.stringify({ approve }),
+            },
+          );
+          await consumeFullPowerStream(response);
+          setStatus("Full Power live", "live");
+          await refreshFullPowerSessions();
+        } catch (error) {
+          if (error.name !== "AbortError") {
+            appendBubble("system", `Approval request failed: ${shorten(String(error), 300)}`);
+          }
+          setStatus("Full Power live", "live");
+        } finally {
+          state.fullPowerBusy = false;
+          state.responsesAbortController = null;
+          if (state.phase === PHASE.LIVE) el.sendBtn.disabled = false;
         }
       }
 
@@ -1233,20 +1340,6 @@
       function sendSelectedMessage() {
         return state.mode === MODE.FULL_POWER ? sendFullPowerMessage() : sendTextMessage();
       }
-
-      appendBubble("user", message);
-      el.textInput.value = "";
-
-      state.dataChannel.send(JSON.stringify({
-        type: "conversation.item.create",
-        item: {
-          type: "message",
-          role: "user",
-          content: [{ type: "input_text", text: message }],
-        },
-      }));
-      state.dataChannel.send(JSON.stringify({ type: "response.create" }));
-    }
 
     function handleRealtimeEvent(event, apiBase) {
       if (event.type === "error") {
@@ -1324,7 +1417,7 @@
             "x-pj-contract-version": CONTRACT_VERSION,
           },
           body: JSON.stringify({ name, arguments: args }),
-        }, 20000);
+        }, name === "delegate_advanced_task" ? 290000 : 90000);
         const raw = await resp.text();
         if (!resp.ok) {
           output = JSON.stringify({

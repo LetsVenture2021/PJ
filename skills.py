@@ -350,21 +350,41 @@ def _tool_policy_mode(tool_name: str) -> str:
     return mode if mode in _POLICY_MODES else "allow"
 
 
-def dispatch(name: str, arguments: dict):
+def tool_policy_mode(tool_name: str) -> str:
+    return _tool_policy_mode(tool_name)
+
+
+def dispatch(name: str, arguments: dict, *, approval_granted: bool = False):
     fn = DISPATCH_TABLE.get(name)
     if fn is None:
         return {"error": f"Unknown skill: {name}"}
     if not isinstance(arguments, dict):
         return {"error": f"Invalid arguments for skill '{name}': expected object"}
     args = dict(arguments)
-    approval_granted = bool(args.pop("_approved", False))
+    untrusted_approval = bool(args.pop("_approved", False))
+    if untrusted_approval:
+        _skillops.record_invocation(
+            name, False, 0, "blocked_untrusted_approval_argument"
+        )
+        return {
+            "error": (
+                "Tool approval cannot be supplied through model or HTTP "
+                "arguments; a trusted server-side approval is required."
+            )
+        }
+    approval_granted = bool(approval_granted)
     policy_mode = _tool_policy_mode(name)
     if policy_mode == "deny":
         _skillops.record_invocation(name, False, 0, "blocked_by_policy_deny")
         return {"error": f"Tool '{name}' is blocked by policy (deny)."}
     if policy_mode == "approval" and not approval_granted:
         _skillops.record_invocation(name, False, 0, "blocked_by_policy_approval")
-        return {"error": f"Tool '{name}' requires explicit approval (_approved=true)."}
+        return {
+            "error": (
+                f"Tool '{name}' requires explicit approval from a trusted "
+                "server-side or local human flow."
+            )
+        }
     start = _time.monotonic()
     try:
         result = fn(**args)

@@ -73,18 +73,21 @@ class TestResponsesRuntime(unittest.TestCase):
                 "label": "ready",
                 "url": "https://user:pass@ready.test/mcp?token=url-secret",
                 "enabled": True,
+                "require_approval": "never",
                 "headers": {"Authorization": "Bearer ${READY_TOKEN}"},
             },
             {
                 "label": "missing",
                 "url": "https://missing.test/mcp",
                 "enabled": True,
+                "require_approval": "never",
                 "headers": {"Authorization": "Bearer ${MISSING_TOKEN}"},
             },
             {
                 "label": "off",
                 "url": "https://off.test/mcp",
                 "enabled": False,
+                "require_approval": "never",
             },
         ]
         manifest = responses_runtime.capability_manifest(
@@ -117,6 +120,7 @@ class TestResponsesRuntime(unittest.TestCase):
                 "label": "secure",
                 "url": "https://secure.test/mcp",
                 "enabled": True,
+                "require_approval": "never",
                 "headers": {"Authorization": "Bearer ${TOKEN}"},
             }],
             environ={"TOKEN": "abc123"},
@@ -126,14 +130,39 @@ class TestResponsesRuntime(unittest.TestCase):
         names = {tool.get("name") for tool in tools}
         self.assertNotIn("delegate_advanced_task", names)
 
+    def test_approval_required_mcp_uses_explicit_owner_flow(self):
+        server = {
+            "label": "protected",
+            "url": "https://protected.test/mcp",
+            "enabled": True,
+            "require_approval": "always",
+        }
+        tools = responses_runtime.build_tools(
+            self.cfg, mcp_servers=[server], environ={}
+        )
+        self.assertTrue(any(tool.get("type") == "mcp" for tool in tools))
+        manifest = responses_runtime.capability_manifest(
+            self.cfg, mcp_servers=[server], environ={}
+        )
+        self.assertEqual(manifest["mcp_servers"][0]["status"], "configured")
+        self.assertTrue(manifest["mcp_servers"][0]["runtime_enabled"])
+        self.assertEqual(
+            manifest["mcp_servers"][0]["approval_flow"],
+            "explicit_owner_confirmation",
+        )
+
     def test_realtime_keeps_direct_tools_and_adds_delegation_only_there(self):
         session = realtime_config.realtime_session_config()
         self.assertEqual(session["model"], realtime_config.REALTIME_MODEL)
-        self.assertEqual(
-            len(session["tools"]), len(skills.TOOL_SCHEMAS) + 1
+        names = {tool["name"] for tool in session["tools"]}
+        self.assertTrue(
+            realtime_config.REALTIME_EXCLUDED_TOOL_NAMES.isdisjoint(names)
         )
         self.assertEqual(
             session["tools"][-1]["name"], "delegate_advanced_task"
+        )
+        self.assertEqual(
+            realtime_server._function_tool_schemas(), session["tools"]
         )
 
     def test_recursive_local_tool_turn_streams_typed_events_and_continuity(self):
@@ -201,7 +230,12 @@ class TestResponsesRuntime(unittest.TestCase):
         self.assertEqual(
             client.responses.calls[1]["previous_response_id"], "resp_tool"
         )
-        self.assertNotIn("instructions", client.responses.calls[1])
+        self.assertEqual(
+            client.responses.calls[0]["instructions"], "Test instructions"
+        )
+        self.assertEqual(
+            client.responses.calls[1]["instructions"], "Test instructions"
+        )
         self.assertIn("tool.call", [event["type"] for event in events])
         self.assertIn("tool.result", [event["type"] for event in events])
         self.assertIn("citation", [event["type"] for event in events])
@@ -227,6 +261,63 @@ class TestResponsesRuntime(unittest.TestCase):
             )
         )
         self.assertEqual(events[-1]["structured_output"], {"answer": "ok"})
+
+    def test_mcp_approval_request_pauses_without_provider_id_exposure(self):
+        response = obj(
+            id="resp_mcp_pending",
+            output_text="",
+            output=[obj(
+                type="mcp_approval_request",
+                id="mcp_provider_approval",
+                server_label="github",
+                name="create_issue",
+                arguments='{"title":"Test"}',
+            )],
+        )
+        client = FakeClient([[
+            obj(type="response.completed", response=response)
+        ]])
+        events = list(
+            responses_runtime.ResponsesOrchestrator(
+                client, self.cfg
+            ).stream_turn("Create an issue")
+        )
+        approval = events[-1]
+        self.assertEqual(approval["type"], "approval.required")
+        self.assertEqual(approval["approval_kind"], "mcp")
+        self.assertEqual(approval["arguments"], {"title": "Test"})
+        self.assertEqual(approval["_response_id"], "resp_mcp_pending")
+        self.assertEqual(
+            approval["_provider_item_id"], "mcp_provider_approval"
+        )
+
+    def test_local_policy_approval_pauses_before_dispatch(self):
+        response = obj(
+            id="resp_local_pending",
+            output_text="",
+            output=[obj(
+                type="function_call",
+                call_id="call_approved",
+                name="approve_codeops_task",
+                arguments='{"task_id":"task","approval_evidence":"owner"}',
+            )],
+        )
+        client = FakeClient([[
+            obj(type="response.completed", response=response)
+        ]])
+        dispatched = []
+        events = list(
+            responses_runtime.ResponsesOrchestrator(
+                client,
+                self.cfg,
+                dispatcher=lambda name, arguments: dispatched.append(
+                    (name, arguments)
+                ),
+            ).stream_turn("Approve it")
+        )
+        self.assertEqual(events[-1]["type"], "approval.required")
+        self.assertEqual(events[-1]["approval_kind"], "local_function")
+        self.assertEqual(dispatched, [])
 
     def test_advanced_delegation_returns_summary_and_citations(self):
         citation = obj(
@@ -362,6 +453,171 @@ class TestResponsesRoutes(unittest.TestCase):
 
         stored = chatlog.get_session(session_id)
         self.assertEqual(stored["last_response_id"], "resp_final")
+
+    def test_mcp_approval_is_opaque_bound_and_resumable(self):
+        session = chatlog.new_session(channel="web")
+        pending_response = obj(
+            id="resp_mcp_pending",
+            output_text="",
+            output=[obj(
+                type="mcp_approval_request",
+                id="mcp_provider_approval",
+                server_label="github",
+                name="create_issue",
+                arguments='{"title":"Owner approved"}',
+            )],
+        )
+        first_client = FakeClient([[
+            obj(type="response.completed", response=pending_response)
+        ]])
+        with patch.object(
+            realtime_server,
+            "OPENAI_CLIENT_FACTORY",
+            return_value=first_client,
+        ):
+            turn = self.client.post(
+                f"/responses/sessions/{session['id']}/turns",
+                json={"message": "Create the issue"},
+                headers=self.auth,
+                buffered=True,
+            )
+        events = [
+            json.loads(line.removeprefix("data: "))
+            for line in turn.get_data(as_text=True).splitlines()
+            if line.startswith("data: ")
+        ]
+        approval = next(
+            event for event in events
+            if event["type"] == "approval.required"
+        )
+        self.assertNotIn("resp_mcp_pending", turn.get_data(as_text=True))
+        self.assertNotIn("mcp_provider_approval", turn.get_data(as_text=True))
+        self.assertGreaterEqual(len(approval["approval_id"]), 32)
+
+        blocked = self.client.post(
+            f"/responses/sessions/{session['id']}/turns",
+            json={"message": "Start another turn"},
+            headers=self.auth,
+        )
+        self.assertEqual(blocked.status_code, 409)
+        self.assertEqual(
+            blocked.get_json()["error"]["code"],
+            "session_approval_pending",
+        )
+
+        continuation_client = FakeClient([
+            final_stream("The approved MCP action completed.")
+        ])
+        with patch.object(
+            realtime_server,
+            "OPENAI_CLIENT_FACTORY",
+            return_value=continuation_client,
+        ):
+            resolved = self.client.post(
+                (
+                    f"/responses/sessions/{session['id']}/approvals/"
+                    f"{approval['approval_id']}"
+                ),
+                json={"approve": True},
+                headers=self.auth,
+                buffered=True,
+            )
+        self.assertEqual(resolved.status_code, 200)
+        resolved_body = resolved.get_data(as_text=True)
+        self.assertIn("event: approval.resolved", resolved_body)
+        self.assertIn("event: completion", resolved_body)
+        call = continuation_client.responses.calls[0]
+        self.assertEqual(call["previous_response_id"], "resp_mcp_pending")
+        self.assertEqual(call["input"], [{
+            "type": "mcp_approval_response",
+            "approval_request_id": "mcp_provider_approval",
+            "approve": True,
+        }])
+
+        detail = chatlog.session_detail(session["id"])
+        self.assertEqual(detail["pending_approvals"], [])
+        self.assertEqual(
+            [item["role"] for item in detail["history"]],
+            ["user", "assistant"],
+        )
+
+    def test_local_approval_executes_only_after_trusted_resolution(self):
+        session = chatlog.new_session(channel="web")
+        pending_response = obj(
+            id="resp_local_pending",
+            output_text="",
+            output=[obj(
+                type="function_call",
+                call_id="call_local_approval",
+                name="approve_codeops_task",
+                arguments=(
+                    '{"task_id":"task-123",'
+                    '"approval_evidence":"owner click"}'
+                ),
+            )],
+        )
+        with patch.object(
+            realtime_server,
+            "OPENAI_CLIENT_FACTORY",
+            return_value=FakeClient([[
+                obj(type="response.completed", response=pending_response)
+            ]]),
+        ):
+            turn = self.client.post(
+                f"/responses/sessions/{session['id']}/turns",
+                json={"message": "Approve the task"},
+                headers=self.auth,
+                buffered=True,
+            )
+        approval = next(
+            json.loads(line.removeprefix("data: "))
+            for line in turn.get_data(as_text=True).splitlines()
+            if line.startswith("data: ")
+            and '"type": "approval.required"' in line
+        )
+
+        continuation_client = FakeClient([
+            final_stream("The owner-approved local action completed.")
+        ])
+        with (
+            patch.object(
+                realtime_server,
+                "OPENAI_CLIENT_FACTORY",
+                return_value=continuation_client,
+            ),
+            patch.object(
+                realtime_server.skills,
+                "dispatch",
+                return_value={"approval_state": "approved"},
+            ) as dispatch,
+        ):
+            resolved = self.client.post(
+                (
+                    f"/responses/sessions/{session['id']}/approvals/"
+                    f"{approval['approval_id']}"
+                ),
+                json={"approve": True},
+                headers=self.auth,
+                buffered=True,
+            )
+        self.assertEqual(resolved.status_code, 200)
+        dispatch.assert_called_once_with(
+            "approve_codeops_task",
+            {
+                "task_id": "task-123",
+                "approval_evidence": "owner click",
+            },
+            approval_granted=True,
+        )
+        continuation = continuation_client.responses.calls[0]
+        self.assertEqual(
+            continuation["input"][0]["call_id"],
+            "call_local_approval",
+        )
+        self.assertEqual(
+            json.loads(continuation["input"][0]["output"]),
+            {"approval_state": "approved"},
+        )
 
     def test_turn_rejects_browser_supplied_response_id(self):
         session = chatlog.new_session(channel="web")

@@ -541,6 +541,42 @@ required_sections:
             "verified_local_cache",
         )
 
+    def test_adding_verified_cache_invalidates_unavailable_state(self):
+        self.metadata["purpose"] = "user_data"
+        first = self._run_sync()
+        self.assertEqual(first["files_skipped_unavailable"], 1)
+        with mock.patch.object(
+            skillops, "_VECTOR_SOURCE_CACHE_DIR", self.cache_path
+        ):
+            skillops.cache_vector_source(
+                "file-sync-1",
+                self.pack_text.encode("utf-8"),
+                filename=self.metadata["filename"],
+            )
+        second = self._run_sync()
+        self.assertEqual(second["files_processed"], 1)
+        self.assertEqual(
+            second["file_reports"][0]["content_source"],
+            "verified_local_cache",
+        )
+
+    def test_sync_report_details_are_bounded_and_prioritize_actions(self):
+        unchanged = [
+            {"file_id": f"file-{index}", "status": "skipped_unchanged"}
+            for index in range(skillops.MAX_SYNC_REPORT_DETAILS + 25)
+        ]
+        failed = {"file_id": "file-failed", "status": "failed"}
+        details = skillops._bounded_sync_details(
+            {"files_seen": len(unchanged) + 1},
+            [*unchanged, failed],
+            ["failure"],
+        )
+        self.assertEqual(
+            len(details["files"]), skillops.MAX_SYNC_REPORT_DETAILS
+        )
+        self.assertIn(failed, details["files"])
+        self.assertEqual(details["file_reports_omitted"], 26)
+
     def test_sync_imports_codeops_guidance_corpus(self):
         self.entry = {
             "id": "vs-file-codeops",

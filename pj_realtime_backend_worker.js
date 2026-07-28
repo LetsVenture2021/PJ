@@ -1,4 +1,4 @@
-const CONTRACT_VERSION = "2026-07-28.4";
+const CONTRACT_VERSION = "2026-07-28.5";
 const DEFAULT_REALTIME_MODEL = "gpt-realtime-2.1";
 const FALLBACK_REALTIME_MODEL = "gpt-realtime";
 const REALTIME_VOICE = "marin";
@@ -8,6 +8,14 @@ const DEFAULT_MAX_REALTIME_TOOLS = 256;
 const DEFAULT_ACCESS_CERT_CACHE_TTL_MS = 300000;
 const ACCESS_CLOCK_SKEW_SECONDS = 60;
 const MAX_RESPONSES_REQUEST_BYTES = 262144;
+const REALTIME_EXCLUDED_TOOL_NAMES = new Set([
+  "approve_codeops_task",
+  "create_skill",
+  "learn_from_vector_store",
+  "run_codeops_validation",
+  "run_shortcut",
+  "sync_vector_store",
+]);
 
 // Public: GET /health and CORS preflight. Every other route is privileged so
 // future Full Power endpoints fail closed until they explicitly authenticate.
@@ -398,6 +406,9 @@ function normalizeFunctionTools(rawTools, maxTools) {
     if (!name) {
       continue;
     }
+    if (REALTIME_EXCLUDED_TOOL_NAMES.has(name)) {
+      continue;
+    }
     const parameters =
       item.parameters && typeof item.parameters === "object"
         ? item.parameters
@@ -413,6 +424,10 @@ function normalizeFunctionTools(rawTools, maxTools) {
     }
   }
   return normalized;
+}
+
+function toolBridgeTimeoutMs(toolName) {
+  return toolName === "delegate_advanced_task" ? 280000 : 85000;
 }
 
 function parseToolSchemaPayload(rawText, maxTools) {
@@ -495,7 +510,8 @@ function isResponsesRoute(method, pathname) {
     }
     return method === "POST" && (
       /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/resume$/.test(pathname) ||
-      /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/turns$/.test(pathname)
+      /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/turns$/.test(pathname) ||
+      /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/approvals\/[A-Za-z0-9_-]{8,128}$/.test(pathname)
     );
   }
 
@@ -1123,7 +1139,7 @@ async function handleExecuteTool(request, env, corsOrigin, requestId) {
     const bridgeResp = await fetchWithTimeout(
       bridgeTarget.toString(),
       { method: "POST", headers: bridgeHeaders(env, requestId), body: JSON.stringify(payload) },
-      20000,
+      toolBridgeTimeoutMs(payload?.name),
     );
     const body = await bridgeResp.text();
     if (!bridgeResp.ok) {
@@ -1171,6 +1187,8 @@ export {
   isPublicRoute,
   isResponsesRoute,
   responseHeaders,
+  normalizeFunctionTools,
+  toolBridgeTimeoutMs,
   validateAccessClaims,
   validateAccessIdentity,
 };
@@ -1227,6 +1245,7 @@ export default {
             "/responses/sessions/search",
             "/responses/sessions/<id>/resume",
             "/responses/sessions/<id>/turns",
+            "/responses/sessions/<id>/approvals/<id>",
             "/health",
           ],
         },

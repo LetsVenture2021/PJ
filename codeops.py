@@ -467,11 +467,18 @@ def _validation_prefix(
     sandbox = Path("/usr/bin/sandbox-exec")
     if not sandbox.is_file():
         return None, "unavailable"
+    root = root.resolve()
+    private_home = private_home.resolve()
     rules = [
         "(version 1)",
         "(allow default)",
         "(deny network*)",
-        f"(deny file-write* (subpath {json.dumps(str(Path.home()))}))",
+        (
+            "(deny file-write* (require-not (require-any "
+            '(literal "/dev/null") '
+            f"(subpath {json.dumps(str(root))}) "
+            f"(subpath {json.dumps(str(private_home))}))))"
+        ),
     ]
     for path in [
         Path.home() / ".ssh",

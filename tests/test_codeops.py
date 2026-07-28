@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
@@ -114,7 +115,7 @@ class CodeOpsTestCase(unittest.TestCase):
         result = codeops.run_codeops_validation(
             task["task_id"], "tests", timeout_seconds=30
         )
-        self.assertEqual(result["status"], "passed")
+        self.assertEqual(result["status"], "passed", result)
         self.assertIsInstance(result["command"], list)
         self.assertFalse((self.root / "snapshot-only.txt").exists())
         fetched = codeops.get_codeops_task(task["task_id"], include_audit=True)
@@ -249,11 +250,16 @@ Return evidence.
             "approval_evidence": "policy test",
         })
         self.assertIn("requires explicit approval", blocked["error"])
-        approved = skills.dispatch("approve_codeops_task", {
+        untrusted = skills.dispatch("approve_codeops_task", {
             "task_id": task["task_id"],
             "approval_evidence": "policy test",
             "_approved": True,
         })
+        self.assertIn("cannot be supplied", untrusted["error"])
+        approved = skills.dispatch("approve_codeops_task", {
+            "task_id": task["task_id"],
+            "approval_evidence": "policy test",
+        }, approval_granted=True)
         self.assertEqual(approved["approval_state"], "approved")
         original_policy = skills._TOOL_POLICY_PATH
         try:
@@ -264,6 +270,23 @@ Return evidence.
             )
         finally:
             skills._TOOL_POLICY_PATH = original_policy
+
+    def test_sandbox_profile_denies_writes_outside_private_roots(self):
+        private_home = Path(self.temp.name) / "private-home"
+        private_home.mkdir()
+        with patch.object(Path, "is_file", return_value=True):
+            prefix, backend = codeops._validation_prefix(
+                self.root, private_home
+            )
+        self.assertEqual(backend, "sandbox-exec")
+        profile = prefix[2]
+        self.assertIn("(deny file-write* (require-not (require-any", profile)
+        self.assertIn(
+            f'(subpath "{self.root.resolve()}")', profile
+        )
+        self.assertIn(
+            f'(subpath "{private_home.resolve()}")', profile
+        )
 
     def test_git_evidence_is_bounded(self):
         subprocess.run(

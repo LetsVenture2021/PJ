@@ -156,7 +156,7 @@ def build_tools(cfg, *, mcp_servers=None, environ=None):
 
     prepared = prepare_mcp_servers(mcp_servers, environ=environ)
     for server in prepared:
-        if not server["enabled"]:
+        if not server["enabled"] or server["missing_secrets"]:
             continue
         entry = {
             "type": "mcp",
@@ -211,6 +211,15 @@ def capability_manifest(cfg=None, *, mcp_servers=None, environ=None):
                 ("configured" if server["headers"] else "not_required")
             ),
             "require_approval": server["require_approval"],
+            "runtime_enabled": (
+                server["enabled"]
+                and not server["missing_secrets"]
+            ),
+            "approval_flow": (
+                "explicit_owner_confirmation"
+                if server["require_approval"] != "never"
+                else "not_required"
+            ),
         })
 
     computer_status = "disabled"
@@ -289,22 +298,46 @@ def dispatch_local_function(name, arguments):
     return skills.dispatch(name, arguments)
 
 
+def dispatch_approved_local_function(name, arguments):
+    if not isinstance(arguments, dict):
+        raise ValueError("Function arguments must be an object")
+    return skills.dispatch(name, arguments, approval_granted=True)
+
+
+def _parsed_arguments(raw_arguments):
+    if isinstance(raw_arguments, dict):
+        return raw_arguments
+    try:
+        return json.loads(raw_arguments or "{}")
+    except (json.JSONDecodeError, TypeError) as exc:
+        return {"_invalid_json": str(exc)}
+
+
 def _function_calls(response):
     calls = []
     for item in _get(response, "output", []) or []:
         if _get(item, "type") != "function_call":
             continue
-        raw_arguments = _get(item, "arguments", "{}")
-        try:
-            arguments = json.loads(raw_arguments or "{}")
-        except json.JSONDecodeError as exc:
-            arguments = {"_invalid_json": str(exc)}
         calls.append({
             "name": _get(item, "name"),
             "call_id": _get(item, "call_id"),
-            "arguments": arguments,
+            "arguments": _parsed_arguments(_get(item, "arguments", "{}")),
         })
     return calls
+
+
+def _mcp_approval_requests(response):
+    approvals = []
+    for item in _get(response, "output", []) or []:
+        if _get(item, "type") != "mcp_approval_request":
+            continue
+        approvals.append({
+            "provider_item_id": _get(item, "id"),
+            "name": _get(item, "name"),
+            "server_label": _get(item, "server_label"),
+            "arguments": _parsed_arguments(_get(item, "arguments", "{}")),
+        })
+    return approvals
 
 
 def _citation_metadata(response):
@@ -395,10 +428,19 @@ def _stream_error(event):
 
 
 class ResponsesOrchestrator:
-    def __init__(self, client, cfg, *, dispatcher=dispatch_local_function):
+    def __init__(
+            self,
+            client,
+            cfg,
+            *,
+            dispatcher=dispatch_local_function,
+            approved_dispatcher=dispatch_approved_local_function,
+            approval_handler=None):
         self.client = client
         self.cfg = cfg
         self.dispatcher = dispatcher
+        self.approved_dispatcher = approved_dispatcher
+        self.approval_handler = approval_handler
 
     def _request_kwargs(self, input_value, previous_response_id, text_format, first):
         kwargs = {
@@ -406,9 +448,8 @@ class ResponsesOrchestrator:
             "input": input_value,
             "tools": build_tools(self.cfg),
             "stream": True,
+            "instructions": self.cfg["instructions"],
         }
-        if first:
-            kwargs["instructions"] = self.cfg["instructions"]
         if previous_response_id:
             kwargs["previous_response_id"] = previous_response_id
         if self.cfg.get("reasoning_effort"):
@@ -514,6 +555,46 @@ class ResponsesOrchestrator:
                 if native_result:
                     yield native_result
 
+            mcp_approvals = _mcp_approval_requests(final_response)
+            if mcp_approvals:
+                approval_outputs = []
+                for approval in mcp_approvals:
+                    approval_event = {
+                        "type": "approval.required",
+                        "approval_kind": "mcp",
+                        "name": approval["name"],
+                        "server_label": approval["server_label"],
+                        "arguments": approval["arguments"],
+                        "_response_id": response_id,
+                        "_provider_item_id": approval["provider_item_id"],
+                    }
+                    yield approval_event
+                    if self.approval_handler is None:
+                        return
+                    approved = bool(self.approval_handler({
+                        key: value
+                        for key, value in approval_event.items()
+                        if not key.startswith("_")
+                    }))
+                    yield {
+                        "type": "approval.resolved",
+                        "approval_kind": "mcp",
+                        "name": approval["name"],
+                        "approved": approved,
+                    }
+                    approval_outputs.append({
+                        "type": "mcp_approval_response",
+                        "approval_request_id": approval["provider_item_id"],
+                        "approve": approved,
+                    })
+                round_number += 1
+                if round_number > MAX_LOCAL_TOOL_ROUNDS:
+                    raise RuntimeError("Tool continuation limit exceeded")
+                input_value = approval_outputs
+                previous_response_id = response_id
+                first = False
+                continue
+
             calls = _function_calls(final_response)
             if not calls:
                 output_text = _get(final_response, "output_text", None)
@@ -535,6 +616,63 @@ class ResponsesOrchestrator:
                         ) from exc
                 yield completion
                 return
+
+            approval_calls = [
+                call for call in calls
+                if skills.tool_policy_mode(call["name"]) == "approval"
+            ]
+            if approval_calls:
+                if len(calls) != 1:
+                    raise RuntimeError(
+                        "Responses requiring approval must contain exactly one "
+                        "local function call"
+                    )
+                call = approval_calls[0]
+                approval_event = {
+                    "type": "approval.required",
+                    "approval_kind": "local_function",
+                    "name": call["name"],
+                    "arguments": call["arguments"],
+                    "_response_id": response_id,
+                    "_provider_item_id": call["call_id"],
+                }
+                yield approval_event
+                if self.approval_handler is None:
+                    return
+                approved = bool(self.approval_handler({
+                    key: value
+                    for key, value in approval_event.items()
+                    if not key.startswith("_")
+                }))
+                if approved:
+                    result = self.approved_dispatcher(
+                        call["name"], call["arguments"]
+                    )
+                else:
+                    result = {"error": "The owner rejected this tool call."}
+                yield {
+                    "type": "approval.resolved",
+                    "approval_kind": "local_function",
+                    "name": call["name"],
+                    "approved": approved,
+                }
+                yield {
+                    "type": "tool.result",
+                    "call_id": call["call_id"],
+                    "name": call["name"],
+                    "result": result,
+                }
+                round_number += 1
+                if round_number > MAX_LOCAL_TOOL_ROUNDS:
+                    raise RuntimeError("Local function recursion limit exceeded")
+                input_value = [{
+                    "type": "function_call_output",
+                    "call_id": call["call_id"],
+                    "output": json.dumps(result, default=str),
+                }]
+                previous_response_id = response_id
+                first = False
+                continue
 
             round_number += 1
             if round_number > MAX_LOCAL_TOOL_ROUNDS:
@@ -565,8 +703,28 @@ class ResponsesOrchestrator:
             first = False
 
 
-def send_message(client, cfg, state, message, text_format=None, *, echo=True):
-    orchestrator = ResponsesOrchestrator(client, cfg)
+def terminal_approval_handler(event):
+    target = event.get("server_label") or event.get("name") or "tool"
+    arguments = json.dumps(event.get("arguments") or {}, default=str)[:1000]
+    answer = input(
+        f"\nApproval required for {target} with arguments {arguments}. "
+        "Type 'approve' to continue: "
+    )
+    return answer.strip().lower() == "approve"
+
+
+def send_message(
+        client,
+        cfg,
+        state,
+        message,
+        text_format=None,
+        *,
+        echo=True,
+        approval_handler=terminal_approval_handler):
+    orchestrator = ResponsesOrchestrator(
+        client, cfg, approval_handler=approval_handler
+    )
     completion = None
     for event in orchestrator.stream_turn(
         message,
@@ -579,6 +737,12 @@ def send_message(client, cfg, state, message, text_format=None, *, echo=True):
             print(f"\n🔧 PJ is calling {event['name']}...", flush=True)
         elif event["type"] == "tool.result" and echo:
             print(f"   ✅ {json.dumps(event['result'], default=str)}", flush=True)
+        elif event["type"] == "approval.required" and echo:
+            target = event.get("server_label") or event.get("name") or "tool"
+            print(f"\n🔐 Owner approval required for {target}.", flush=True)
+        elif event["type"] == "approval.resolved" and echo:
+            decision = "approved" if event.get("approved") else "rejected"
+            print(f"   Approval {decision}.", flush=True)
         elif event["type"] == "completion":
             completion = event
     if echo:
@@ -625,9 +789,24 @@ def delegate_advanced_task(prompt, *, client=None, cfg=None):
         cfg = load_config() if cfg is None else cfg
         client = OpenAI() if client is None else client
         completion = None
+        approval = None
         for event in ResponsesOrchestrator(client, cfg).stream_turn(prompt.strip()):
             if event["type"] == "completion":
                 completion = event
+            elif event["type"] == "approval.required":
+                approval = {
+                    key: value
+                    for key, value in event.items()
+                    if not key.startswith("_")
+                }
+        if approval:
+            return {
+                "error": (
+                    "This delegated task requires explicit owner approval in "
+                    "Full Power mode."
+                ),
+                "approval": approval,
+            }
         if completion is None:
             raise RuntimeError("Delegated Responses turn did not complete")
         detailed_text = completion["text"]

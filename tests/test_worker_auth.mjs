@@ -15,7 +15,9 @@ const {
   handleResponsesProxy,
   isPublicRoute,
   isResponsesRoute,
+  normalizeFunctionTools,
   responseHeaders,
+  toolBridgeTimeoutMs,
   validateAccessIdentity,
 } = workerModule;
 
@@ -106,6 +108,13 @@ test("Full Power routes and bridge URL derivation are narrowly scoped", () => {
   assert.equal(isResponsesRoute("GET", "/responses/sessions/search"), true);
   assert.equal(isResponsesRoute("POST", "/responses/sessions/example_123/resume"), true);
   assert.equal(isResponsesRoute("POST", "/responses/sessions/example_123/turns"), true);
+  assert.equal(
+    isResponsesRoute(
+      "POST",
+      "/responses/sessions/example_123/approvals/approval_123",
+    ),
+    true,
+  );
   assert.equal(isResponsesRoute("DELETE", "/responses/sessions/example_123"), false);
   assert.equal(isResponsesRoute("POST", "/responses/arbitrary"), false);
   assert.equal(
@@ -252,4 +261,106 @@ test("all Worker responses use the hardened response header policy", () => {
   assert.equal(headers["cache-control"], "no-store");
   assert.equal(headers["content-security-policy"], "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
   assert.equal(headers["referrer-policy"], "no-referrer");
+});
+
+test("realtime excludes long-running tools and aligns bridge timeouts", () => {
+  const tools = normalizeFunctionTools([
+    {
+      type: "function",
+      name: "get_current_time",
+      parameters: { type: "object", properties: {} },
+    },
+    {
+      type: "function",
+      name: "sync_vector_store",
+      parameters: { type: "object", properties: {} },
+    },
+    {
+      type: "function",
+      name: "delegate_advanced_task",
+      parameters: { type: "object", properties: {} },
+    },
+  ], 10);
+  assert.deepEqual(
+    tools.map((tool) => tool.name),
+    ["get_current_time", "delegate_advanced_task"],
+  );
+  assert.equal(toolBridgeTimeoutMs("get_current_time"), 85000);
+  assert.equal(toolBridgeTimeoutMs("delegate_advanced_task"), 280000);
+});
+
+test("browser module initializes with Full Power helpers in shared scope", async () => {
+  const html = await readFile(
+    new URL("../webrtc_client.html", import.meta.url),
+    "utf8",
+  );
+  const moduleMatch = html.match(/<script type="module">([\s\S]*?)<\/script>/);
+  assert.ok(moduleMatch, "browser module script must exist");
+  const moduleSource = moduleMatch[1].replace(
+    /import\s*\{[\s\S]*?\}\s*from\s*"\/assets\/pj_web_utils\.js";/,
+    `const CONTRACT_VERSION = "test";
+     const createRequestId = () => "request-test";
+     const shorten = (value) => String(value);
+     const parseErrorBody = () => "";
+     const fetchWithTimeout = async (url) => new Response(
+       JSON.stringify(url.endsWith("/health") ? { ok: true } : { tools: [] }),
+       { status: 200, headers: { "content-type": "application/json" } },
+     );`,
+  );
+
+  const listeners = new Map();
+  const elements = new Map();
+  const makeElement = (id = "") => ({
+    id,
+    value: "",
+    textContent: "",
+    innerHTML: "",
+    disabled: false,
+    scrollTop: 0,
+    scrollHeight: 0,
+    classList: { toggle() {} },
+    appendChild() {},
+    replaceChildren() {},
+    focus() {},
+    querySelectorAll() { return []; },
+    addEventListener(type, handler) {
+      listeners.set(`${id}:${type}`, handler);
+    },
+  });
+  const document = {
+    getElementById(id) {
+      if (!elements.has(id)) elements.set(id, makeElement(id));
+      return elements.get(id);
+    },
+    createElement() {
+      return makeElement();
+    },
+  };
+  const window = {
+    location: {
+      hostname: "localhost",
+      protocol: "http:",
+      origin: "http://localhost:3001",
+    },
+  };
+  const localStorage = { getItem() { return null; }, setItem() {} };
+  const navigator = { clipboard: { writeText: async () => {} } };
+  const initialize = new Function(
+    "window",
+    "document",
+    "localStorage",
+    "navigator",
+    moduleSource,
+  );
+
+  assert.doesNotThrow(() => initialize(
+    window,
+    document,
+    localStorage,
+    navigator,
+  ));
+  assert.equal(typeof listeners.get("startBtn:click"), "function");
+  assert.equal(typeof listeners.get("fullPowerModeBtn:click"), "function");
+  assert.equal(typeof listeners.get("refreshSessionsBtn:click"), "function");
+  await new Promise((resolve) => setImmediate(resolve));
 });
