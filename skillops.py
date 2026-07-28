@@ -26,6 +26,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -69,7 +70,7 @@ RESERVED_NAMES = {
     "save_note", "search_notes", "get_active_browser_tab", "run_shortcut",
     "observe_pattern", "list_observations", "create_skill", "activate_skill",
     "review_skills", "deprecate_skill", "learn_from_vector_store",
-    "sync_vector_store", "get_vector_sync_status",
+    "sync_vector_store", "get_vector_sync_status", "list_coding_capabilities",
     "list_doc_templates", "create_doc_template", "draft_document",
     "revise_document", "finalize_document", "export_document",
     "list_documents", "get_document",
@@ -188,6 +189,51 @@ def _db():
             last_attempt_at TEXT,
             PRIMARY KEY (vector_store_id, source_file_id)
         )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS skillops_coding_capabilities (
+            item_id TEXT PRIMARY KEY,
+            canonical_title TEXT NOT NULL,
+            tool_family TEXT NOT NULL,
+            surface TEXT NOT NULL,
+            version_scope TEXT DEFAULT '',
+            corpus_status TEXT DEFAULT '',
+            requires_current_docs_check INTEGER DEFAULT 0,
+            source_page_url TEXT DEFAULT '',
+            source_record_id TEXT DEFAULT '',
+            source_content_sha256 TEXT DEFAULT '',
+            record_sha256 TEXT NOT NULL,
+            version INTEGER DEFAULT 1,
+            what_it_teaches TEXT DEFAULT '',
+            appropriate_tasks_json TEXT DEFAULT '[]',
+            workflow_json TEXT DEFAULT '[]',
+            safety_controls_json TEXT DEFAULT '[]',
+            authoritative_sources_json TEXT DEFAULT '[]',
+            metadata_json TEXT DEFAULT '{}',
+            source_file_id TEXT DEFAULT '',
+            source_run_id TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS skillops_corpus_import_runs (
+            run_id TEXT PRIMARY KEY,
+            parent_run_id TEXT DEFAULT '',
+            corpus_type TEXT NOT NULL,
+            corpus_version TEXT DEFAULT '',
+            source_file_id TEXT DEFAULT '',
+            source_sha256 TEXT NOT NULL,
+            dry_run INTEGER DEFAULT 0,
+            overwrite_existing INTEGER DEFAULT 0,
+            items_total INTEGER DEFAULT 0,
+            records_created INTEGER DEFAULT 0,
+            records_updated INTEGER DEFAULT 0,
+            records_unchanged INTEGER DEFAULT 0,
+            records_skipped_existing INTEGER DEFAULT 0,
+            items_skipped_invalid INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'running',
+            error TEXT,
+            details_json TEXT DEFAULT '',
+            started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            finished_at TEXT
+        )""")
         existing_run_columns = {
             row[1] for row in conn.execute(
                 "PRAGMA table_info(skillops_learning_runs)"
@@ -201,6 +247,9 @@ def _db():
             "files_skipped_unsupported": "INTEGER DEFAULT 0",
             "files_failed": "INTEGER DEFAULT 0",
             "guidance_records_imported": "INTEGER DEFAULT 0",
+            "capabilities_created": "INTEGER DEFAULT 0",
+            "capabilities_updated": "INTEGER DEFAULT 0",
+            "capabilities_unchanged": "INTEGER DEFAULT 0",
         }.items():
             if column not in existing_run_columns:
                 conn.execute(
@@ -604,6 +653,464 @@ def _read_openai_file_content(file_id: str, api_key: str,
     return "".join(chunks), False
 
 
+def _markdown_heading_section(text: str, heading: str) -> str:
+    match = re.search(
+        rf"^####\s+{re.escape(heading)}\s*$"
+        rf"(.*?)(?=^####\s+|\Z)",
+        text or "",
+        flags=re.M | re.S | re.I,
+    )
+    return match.group(1).strip() if match else ""
+
+
+def _markdown_section_list(text: str, heading: str,
+                           ordered: bool = False) -> list:
+    section = _markdown_heading_section(text, heading)
+    if not section:
+        return []
+    pattern = r"^\s*\d+[.)]\s+(.+?)\s*$" if ordered \
+        else r"^\s*-\s+(.+?)\s*$"
+    values = []
+    seen = set()
+    for match in re.finditer(pattern, section, flags=re.M):
+        value = match.group(1).strip()
+        key = value.lower()
+        if value and key not in seen:
+            values.append(value)
+            seen.add(key)
+    return values
+
+
+def _parse_coding_capability_corpus(text: str) -> dict:
+    import docops
+
+    text = text or ""
+    blocks = docops._extract_item_blocks(text)
+    start_count = len(re.findall(
+        r"^---ITEM_START(?:[^\r\n]*)$",
+        text,
+        flags=re.M | re.I,
+    ))
+    end_count = len(re.findall(
+        r"^---ITEM_END(?:[^\r\n]*)$",
+        text,
+        flags=re.M | re.I,
+    ))
+    errors = []
+    invalid = 0
+    if start_count != end_count or len(blocks) != start_count:
+        invalid += max(1, max(start_count, end_count) - len(blocks))
+        errors.append(
+            "coding corpus has incomplete or unmatched ITEM markers "
+            f"(starts={start_count}, ends={end_count}, complete={len(blocks)})"
+        )
+    declared_match = re.search(
+        r"^\s*record_count:\s*(\d+)\s*$",
+        text,
+        flags=re.M | re.I,
+    )
+    declared_count = int(declared_match.group(1)) if declared_match else None
+    if declared_count is not None and declared_count != len(blocks):
+        invalid += abs(declared_count - len(blocks))
+        errors.append(
+            "coding corpus item count does not match record_count "
+            f"(declared={declared_count}, complete={len(blocks)})"
+        )
+    version_match = re.search(
+        r"^\s*corpus_version:\s*(\S+)\s*$",
+        text,
+        flags=re.M | re.I,
+    )
+    corpus_version = version_match.group(1) if version_match else ""
+    records = []
+    seen_ids = set()
+    for index, block in enumerate(blocks, start=1):
+        marker_id = block["marker_id"]
+        end_marker_id = block["end_marker_id"]
+        if marker_id != end_marker_id:
+            invalid += 1
+            errors.append(
+                f"item {index}: marker IDs do not match "
+                f"(start={marker_id!r}, end={end_marker_id!r})"
+            )
+            continue
+        metadata = docops._parse_knowledge_pack_block(block["content"])
+        item_id = str(metadata.get("item_id") or marker_id or "").strip()
+        title = str(metadata.get("canonical_title") or "").strip()
+        tool_family = str(metadata.get("tool_family") or "").strip()
+        surface = str(metadata.get("surface") or "").strip()
+        if not item_id or not title or not tool_family or not surface:
+            invalid += 1
+            errors.append(
+                f"item {index}: capability record requires item_id, "
+                "canonical_title, tool_family, and surface"
+            )
+            continue
+        if item_id != marker_id:
+            invalid += 1
+            errors.append(
+                f"item {index}: item_id {item_id!r} does not match "
+                f"marker {marker_id!r}"
+            )
+            continue
+        if item_id in seen_ids:
+            invalid += 1
+            errors.append(f"item {index}: duplicate item_id {item_id!r}")
+            continue
+        seen_ids.add(item_id)
+        record_sha256 = hashlib.sha256(
+            block["content"].encode("utf-8")
+        ).hexdigest()
+        records.append({
+            "item_id": item_id,
+            "canonical_title": title,
+            "tool_family": tool_family,
+            "surface": surface,
+            "version_scope": str(metadata.get("version_scope") or "").strip(),
+            "corpus_status": str(metadata.get("corpus_status") or "").strip(),
+            "requires_current_docs_check": bool(
+                docops._is_truthy(metadata.get("requires_current_docs_check"))
+            ),
+            "source_page_url": str(
+                metadata.get("source_page_url") or ""
+            ).strip(),
+            "source_record_id": str(
+                metadata.get("source_record_id") or item_id
+            ).strip(),
+            "source_content_sha256": str(
+                metadata.get("content_sha256") or ""
+            ).strip(),
+            "record_sha256": record_sha256,
+            "what_it_teaches": docops._extract_markdown_field(
+                block["content"],
+                "What this item teaches",
+            ),
+            "appropriate_tasks": _markdown_section_list(
+                block["content"],
+                "Appropriate tasks",
+            ),
+            "workflow": _markdown_section_list(
+                block["content"],
+                "Recommended operating workflow",
+                ordered=True,
+            ),
+            "safety_controls": _markdown_section_list(
+                block["content"],
+                "Safety and governance controls",
+            ),
+            "authoritative_sources": _markdown_section_list(
+                block["content"],
+                "Current authoritative sources",
+            ),
+            "metadata": metadata,
+        })
+    return {
+        "corpus_type": "ai_coding_capabilities",
+        "corpus_version": corpus_version,
+        "declared_record_count": declared_count,
+        "items_total": len(blocks),
+        "records": records,
+        "items_skipped_invalid": invalid,
+        "errors": errors,
+    }
+
+
+def _is_coding_capability_corpus(text: str) -> bool:
+    candidate = text or ""
+    header_matches = re.match(
+        r"\s*#\s+AI CODING TOOLS\s+[—-]+\s+"
+        r"VECTOR-STORE TRAINING CORPUS\s*$",
+        candidate,
+        flags=re.M | re.I,
+    )
+    if not header_matches or not re.search(
+        r"^##\s+TRAINING ITEMS\s*$",
+        candidate,
+        flags=re.M | re.I,
+    ):
+        return False
+    parsed = _parse_coding_capability_corpus(candidate)
+    return (
+        parsed["items_total"] > 0
+        and not parsed["errors"]
+        and len(parsed["records"]) == parsed["items_total"]
+    )
+
+
+def import_coding_capability_corpus_text(
+        corpus_text: str,
+        overwrite_existing: bool = True,
+        dry_run: bool = False,
+        source_file_id: str = "",
+        parent_run_id: str = "",
+        audit: bool = True) -> dict:
+    """Import structured coding-tool guidance into the capability registry."""
+    parsed = _parse_coding_capability_corpus(corpus_text)
+    import_run_id = "cap-" + str(uuid.uuid4())[:8]
+    source_sha256 = hashlib.sha256(
+        (corpus_text or "").encode("utf-8")
+    ).hexdigest()
+    now = datetime.now(timezone.utc).isoformat()
+    if audit:
+        with _db() as conn:
+            conn.execute(
+                "INSERT INTO skillops_corpus_import_runs "
+                "(run_id, parent_run_id, corpus_type, corpus_version, "
+                "source_file_id, source_sha256, dry_run, overwrite_existing, "
+                "status, details_json, started_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    import_run_id,
+                    parent_run_id,
+                    parsed["corpus_type"],
+                    parsed["corpus_version"],
+                    source_file_id,
+                    source_sha256,
+                    1 if dry_run else 0,
+                    1 if overwrite_existing else 0,
+                    "running",
+                    "{}",
+                    now,
+                ),
+            )
+
+    created = updated = unchanged = skipped_existing = 0
+    imports = []
+    if not parsed["errors"]:
+        with _db() as conn:
+            for record in parsed["records"]:
+                existing = conn.execute(
+                    "SELECT record_sha256, version "
+                    "FROM skillops_coding_capabilities WHERE item_id=?",
+                    (record["item_id"],),
+                ).fetchone()
+                if existing and existing[0] == record["record_sha256"]:
+                    action = "unchanged"
+                    version = existing[1]
+                    unchanged += 1
+                elif existing and not overwrite_existing:
+                    action = "skipped_existing"
+                    version = existing[1]
+                    skipped_existing += 1
+                elif dry_run:
+                    action = "would_update" if existing else "would_create"
+                    version = existing[1] + 1 if existing else 1
+                    if existing:
+                        updated += 1
+                    else:
+                        created += 1
+                else:
+                    values = (
+                        record["canonical_title"],
+                        record["tool_family"],
+                        record["surface"],
+                        record["version_scope"],
+                        record["corpus_status"],
+                        1 if record["requires_current_docs_check"] else 0,
+                        record["source_page_url"],
+                        record["source_record_id"],
+                        record["source_content_sha256"],
+                        record["record_sha256"],
+                        record["what_it_teaches"],
+                        json.dumps(record["appropriate_tasks"]),
+                        json.dumps(record["workflow"]),
+                        json.dumps(record["safety_controls"]),
+                        json.dumps(record["authoritative_sources"]),
+                        json.dumps(record["metadata"]),
+                        source_file_id,
+                        parent_run_id or import_run_id,
+                        now,
+                    )
+                    if existing:
+                        conn.execute(
+                            "UPDATE skillops_coding_capabilities SET "
+                            "canonical_title=?, tool_family=?, surface=?, "
+                            "version_scope=?, corpus_status=?, "
+                            "requires_current_docs_check=?, source_page_url=?, "
+                            "source_record_id=?, source_content_sha256=?, "
+                            "record_sha256=?, version=version+1, "
+                            "what_it_teaches=?, appropriate_tasks_json=?, "
+                            "workflow_json=?, safety_controls_json=?, "
+                            "authoritative_sources_json=?, metadata_json=?, "
+                            "source_file_id=?, source_run_id=?, updated_at=? "
+                            "WHERE item_id=?",
+                            values + (record["item_id"],),
+                        )
+                        action = "updated"
+                        version = existing[1] + 1
+                        updated += 1
+                    else:
+                        conn.execute(
+                            "INSERT INTO skillops_coding_capabilities "
+                            "(canonical_title, tool_family, surface, "
+                            "version_scope, corpus_status, "
+                            "requires_current_docs_check, source_page_url, "
+                            "source_record_id, source_content_sha256, "
+                            "record_sha256, what_it_teaches, "
+                            "appropriate_tasks_json, workflow_json, "
+                            "safety_controls_json, authoritative_sources_json, "
+                            "metadata_json, source_file_id, source_run_id, "
+                            "created_at, updated_at, item_id) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            values + (now, record["item_id"]),
+                        )
+                        action = "created"
+                        version = 1
+                        created += 1
+                imports.append({
+                    "item_id": record["item_id"],
+                    "canonical_title": record["canonical_title"],
+                    "tool_family": record["tool_family"],
+                    "surface": record["surface"],
+                    "version": version,
+                    "action": action,
+                })
+
+    status = "invalid" if parsed["errors"] else (
+        "dry_run_complete" if dry_run else "imported"
+    )
+    details = {
+        "imports": imports,
+        "errors": parsed["errors"],
+        "declared_record_count": parsed["declared_record_count"],
+    }
+    if audit:
+        with _db() as conn:
+            conn.execute(
+                "UPDATE skillops_corpus_import_runs SET "
+                "items_total=?, records_created=?, records_updated=?, "
+                "records_unchanged=?, records_skipped_existing=?, "
+                "items_skipped_invalid=?, status=?, error=?, details_json=?, "
+                "finished_at=? WHERE run_id=?",
+                (
+                    parsed["items_total"],
+                    created,
+                    updated,
+                    unchanged,
+                    skipped_existing,
+                    parsed["items_skipped_invalid"],
+                    status,
+                    "; ".join(parsed["errors"][:3]) or None,
+                    json.dumps(details),
+                    datetime.now(timezone.utc).isoformat(),
+                    import_run_id,
+                ),
+            )
+    return {
+        "status": status,
+        "run_id": import_run_id,
+        "corpus_type": parsed["corpus_type"],
+        "corpus_version": parsed["corpus_version"],
+        "items_total": parsed["items_total"],
+        "capabilities_created": created,
+        "capabilities_updated": updated,
+        "capabilities_unchanged": unchanged,
+        "capabilities_skipped_existing": skipped_existing,
+        "items_skipped_invalid": parsed["items_skipped_invalid"],
+        "imports": imports,
+        "errors": parsed["errors"],
+    }
+
+
+def _import_vector_content(text: str, *, overwrite_existing: bool,
+                           include_provisional: bool, dry_run: bool,
+                           source_file_id: str = "",
+                           parent_run_id: str = "",
+                           audit: bool = True) -> dict:
+    if _is_coding_capability_corpus(text):
+        return import_coding_capability_corpus_text(
+            text,
+            overwrite_existing=overwrite_existing,
+            dry_run=dry_run,
+            source_file_id=source_file_id,
+            parent_run_id=parent_run_id,
+            audit=audit,
+        )
+    import docops
+    return docops.import_doc_templates_from_knowledge_pack_text(
+        text,
+        overwrite_existing=overwrite_existing,
+        include_provisional=include_provisional,
+        dry_run=dry_run,
+    )
+
+
+def list_coding_capabilities(query: str = "", tool_family: str = "",
+                             limit: int = 50) -> dict:
+    """List structured coding capabilities learned from training corpora."""
+    query = str(query or "").strip()
+    tool_family = str(tool_family or "").strip()
+    limit = max(1, min(int(limit or 50), 100))
+    like = f"%{query}%"
+    family_like = f"%{tool_family}%"
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT item_id, canonical_title, tool_family, surface, "
+            "version_scope, corpus_status, requires_current_docs_check, "
+            "source_page_url, version, what_it_teaches, "
+            "appropriate_tasks_json, workflow_json, safety_controls_json, "
+            "authoritative_sources_json, updated_at "
+            "FROM skillops_coding_capabilities "
+            "WHERE (?='' OR canonical_title LIKE ? OR item_id LIKE ? "
+            "OR what_it_teaches LIKE ? OR surface LIKE ?) "
+            "AND (?='' OR tool_family LIKE ?) "
+            "ORDER BY tool_family, canonical_title LIMIT ?",
+            (
+                query, like, like, like, like,
+                tool_family, family_like, limit,
+            ),
+        ).fetchall()
+        audit_rows = conn.execute(
+            "SELECT run_id, corpus_version, source_file_id, dry_run, "
+            "items_total, records_created, records_updated, records_unchanged, "
+            "items_skipped_invalid, status, started_at, finished_at "
+            "FROM skillops_corpus_import_runs "
+            "WHERE corpus_type='ai_coding_capabilities' "
+            "ORDER BY started_at DESC LIMIT 10"
+        ).fetchall()
+    capabilities = [
+        {
+            "item_id": row[0],
+            "canonical_title": row[1],
+            "tool_family": row[2],
+            "surface": row[3],
+            "version_scope": row[4],
+            "corpus_status": row[5],
+            "requires_current_docs_check": bool(row[6]),
+            "source_page_url": row[7],
+            "version": row[8],
+            "what_it_teaches": row[9],
+            "appropriate_tasks": json.loads(row[10]),
+            "workflow": json.loads(row[11]),
+            "safety_controls": json.loads(row[12]),
+            "authoritative_sources": json.loads(row[13]),
+            "updated_at": row[14],
+        }
+        for row in rows
+    ]
+    return {
+        "count": len(capabilities),
+        "capabilities": capabilities,
+        "import_audit": [
+            {
+                "run_id": row[0],
+                "corpus_version": row[1],
+                "source_file_id": row[2],
+                "dry_run": bool(row[3]),
+                "items_total": row[4],
+                "records_created": row[5],
+                "records_updated": row[6],
+                "records_unchanged": row[7],
+                "items_skipped_invalid": row[8],
+                "status": row[9],
+                "started_at": row[10],
+                "finished_at": row[11],
+            }
+            for row in audit_rows
+        ],
+    }
+
+
 def learn_from_vector_store(
         dry_run: bool = False,
         max_files: int = 0,
@@ -649,6 +1156,9 @@ def learn_from_vector_store(
         "files_skipped_unavailable": 0,
         "templates_created": 0,
         "templates_updated": 0,
+        "capabilities_created": 0,
+        "capabilities_updated": 0,
+        "capabilities_unchanged": 0,
         "aliases_registered": 0,
         "items_skipped_provisional": 0,
         "items_skipped_invalid": 0,
@@ -673,8 +1183,6 @@ def learn_from_vector_store(
                 for entry in files
             },
         )
-
-        import docops
 
         for entry in files:
             content_file_id = entry.get("file_id") or entry.get("id")
@@ -715,14 +1223,25 @@ def learn_from_vector_store(
                     expected_bytes=metadata.get("bytes") or 0,
                 )
             totals["files_processed"] += 1
-            imported = docops.import_doc_templates_from_knowledge_pack_text(
+            imported = _import_vector_content(
                 text,
                 overwrite_existing=overwrite_existing,
                 include_provisional=include_provisional,
                 dry_run=dry_run,
+                source_file_id=content_file_id,
+                parent_run_id=run_id,
             )
             totals["templates_created"] += int(imported.get("templates_created", 0))
             totals["templates_updated"] += int(imported.get("templates_updated", 0))
+            totals["capabilities_created"] += int(
+                imported.get("capabilities_created", 0)
+            )
+            totals["capabilities_updated"] += int(
+                imported.get("capabilities_updated", 0)
+            )
+            totals["capabilities_unchanged"] += int(
+                imported.get("capabilities_unchanged", 0)
+            )
             totals["aliases_registered"] += int(imported.get("aliases_registered", 0))
             totals["items_skipped_provisional"] += int(
                 imported.get("items_skipped_provisional", 0)
@@ -739,8 +1258,14 @@ def learn_from_vector_store(
                 "purpose": metadata.get("purpose"),
                 "truncated": truncated,
                 "items_total": imported.get("items_total", 0),
+                "corpus_type": imported.get("corpus_type", "docops_templates"),
                 "templates_created": imported.get("templates_created", 0),
                 "templates_updated": imported.get("templates_updated", 0),
+                "capabilities_created": imported.get("capabilities_created", 0),
+                "capabilities_updated": imported.get("capabilities_updated", 0),
+                "capabilities_unchanged": imported.get(
+                    "capabilities_unchanged", 0
+                ),
                 "status": imported.get("status"),
             })
 
@@ -749,6 +1274,8 @@ def learn_from_vector_store(
             f"files_processed={totals['files_processed']}; "
             f"templates_created={totals['templates_created']}; "
             f"templates_updated={totals['templates_updated']}; "
+            f"capabilities_created={totals['capabilities_created']}; "
+            f"capabilities_updated={totals['capabilities_updated']}; "
             f"aliases_registered={totals['aliases_registered']}"
         )
         obs = observe_pattern(
@@ -767,7 +1294,9 @@ def learn_from_vector_store(
             conn.execute(
                 "UPDATE skillops_learning_runs SET "
                 "files_seen=?, files_processed=?, templates_created=?, "
-                "templates_updated=?, aliases_registered=?, "
+                "templates_updated=?, capabilities_created=?, "
+                "capabilities_updated=?, capabilities_unchanged=?, "
+                "aliases_registered=?, "
                 "items_skipped_provisional=?, items_skipped_invalid=?, "
                 "status='completed', error=NULL, details_json=?, finished_at=? "
                 "WHERE run_id=?",
@@ -776,6 +1305,9 @@ def learn_from_vector_store(
                     totals["files_processed"],
                     totals["templates_created"],
                     totals["templates_updated"],
+                    totals["capabilities_created"],
+                    totals["capabilities_updated"],
+                    totals["capabilities_unchanged"],
                     totals["aliases_registered"],
                     totals["items_skipped_provisional"],
                     totals["items_skipped_invalid"],
@@ -794,6 +1326,9 @@ def learn_from_vector_store(
             "files_skipped_unavailable": totals["files_skipped_unavailable"],
             "templates_created": totals["templates_created"],
             "templates_updated": totals["templates_updated"],
+            "capabilities_created": totals["capabilities_created"],
+            "capabilities_updated": totals["capabilities_updated"],
+            "capabilities_unchanged": totals["capabilities_unchanged"],
             "aliases_registered": totals["aliases_registered"],
             "items_skipped_provisional": totals["items_skipped_provisional"],
             "items_skipped_invalid": totals["items_skipped_invalid"],
@@ -1066,7 +1601,9 @@ def _finish_sync_run(run_id: str, status: str, totals: dict,
             "files_skipped_unavailable=?, files_skipped_unsupported=?, "
             "files_failed=?, templates_created=?, templates_updated=?, "
             "guidance_records_imported=?, "
-            "aliases_registered=?, items_skipped_provisional=?, "
+            "capabilities_created=?, capabilities_updated=?, "
+            "capabilities_unchanged=?, aliases_registered=?, "
+            "items_skipped_provisional=?, "
             "items_skipped_invalid=?, status=?, error=?, details_json=?, "
             "finished_at=? WHERE run_id=?",
             (
@@ -1079,6 +1616,9 @@ def _finish_sync_run(run_id: str, status: str, totals: dict,
                 totals["templates_created"],
                 totals["templates_updated"],
                 totals["guidance_records_imported"],
+                totals["capabilities_created"],
+                totals["capabilities_updated"],
+                totals["capabilities_unchanged"],
                 totals["aliases_registered"],
                 totals["items_skipped_provisional"],
                 totals["items_skipped_invalid"],
@@ -1120,7 +1660,7 @@ def sync_vector_store(
         include_provisional: bool = True,
         max_chars_per_file: int = DEFAULT_MAX_CHARS_PER_FILE,
         force: bool = False) -> dict:
-    """Synchronize downloadable vector files into governed DocOps/CodeOps."""
+    """Synchronize vector files into governed DocOps and coding registries."""
     max_files = max(0, int(max_files or 0))
     max_chars_per_file = max(
         10_000,
@@ -1140,6 +1680,9 @@ def sync_vector_store(
         "templates_created": 0,
         "templates_updated": 0,
         "guidance_records_imported": 0,
+        "capabilities_created": 0,
+        "capabilities_updated": 0,
+        "capabilities_unchanged": 0,
         "aliases_registered": 0,
         "items_skipped_provisional": 0,
         "items_skipped_invalid": 0,
@@ -1338,96 +1881,116 @@ def sync_vector_store(
                         reports.append(report)
                         continue
 
-                    docops_preflight = (
-                        docops.import_doc_templates_from_knowledge_pack_text(
-                            text,
-                            overwrite_existing=overwrite_existing,
-                            include_provisional=include_provisional,
-                            dry_run=True,
-                        )
-                    )
-                    docops_invalid = int(
-                        docops_preflight.get("items_skipped_invalid", 0)
-                    )
-                    docops_errors = docops_preflight.get("errors", [])
                     imported = {}
                     content_type = ""
-                    guidance_preflight = {}
-                    guidance_error = ""
-
-                    if (
-                        int(docops_preflight.get("items_total", 0)) > 0
-                        and not docops_invalid
-                        and not docops_errors
-                    ):
-                        content_type = "docops_knowledge_pack"
-                        imported = docops_preflight
+                    if _is_coding_capability_corpus(text):
+                        imported = import_coding_capability_corpus_text(
+                            text,
+                            overwrite_existing=overwrite_existing,
+                            dry_run=True,
+                            source_file_id=source_file_id,
+                            parent_run_id=run_id,
+                            audit=False,
+                        )
+                        content_type = "ai_coding_capabilities"
                         if not dry_run:
-                            imported = (
-                                docops.import_doc_templates_from_knowledge_pack_text(
-                                    text,
-                                    overwrite_existing=overwrite_existing,
-                                    include_provisional=include_provisional,
-                                    dry_run=False,
-                                )
+                            imported = import_coding_capability_corpus_text(
+                                text,
+                                overwrite_existing=overwrite_existing,
+                                dry_run=False,
+                                source_file_id=source_file_id,
+                                parent_run_id=run_id,
                             )
                     else:
-                        try:
-                            guidance_preflight = codeops.import_codeops_guidance(
+                        docops_preflight = (
+                            docops.import_doc_templates_from_knowledge_pack_text(
                                 text,
-                                source_label=filename,
-                                historical_context_acknowledged=True,
+                                overwrite_existing=overwrite_existing,
+                                include_provisional=include_provisional,
                                 dry_run=True,
                             )
-                        except ValueError as exc:
-                            guidance_error = str(exc)
-                        if int(guidance_preflight.get("record_count", 0)) > 0:
-                            content_type = "codeops_guidance"
-                            imported = guidance_preflight
+                        )
+                        docops_invalid = int(
+                            docops_preflight.get("items_skipped_invalid", 0)
+                        )
+                        docops_errors = docops_preflight.get("errors", [])
+                        guidance_preflight = {}
+                        guidance_error = ""
+
+                        if (
+                            int(docops_preflight.get("items_total", 0)) > 0
+                            and not docops_invalid
+                            and not docops_errors
+                        ):
+                            content_type = "docops_knowledge_pack"
+                            imported = docops_preflight
                             if not dry_run:
-                                imported = codeops.import_codeops_guidance(
+                                imported = (
+                                    docops.import_doc_templates_from_knowledge_pack_text(
+                                        text,
+                                        overwrite_existing=overwrite_existing,
+                                        include_provisional=include_provisional,
+                                        dry_run=False,
+                                    )
+                                )
+                        else:
+                            try:
+                                guidance_preflight = codeops.import_codeops_guidance(
                                     text,
                                     source_label=filename,
                                     historical_context_acknowledged=True,
+                                    dry_run=True,
                                 )
-                        elif "---ITEM_START:" not in text:
-                            totals["files_skipped_unsupported"] += 1
-                            report.update({
-                                "status": "skipped_unsupported_content",
-                                "content_sha256": content_sha256,
-                                "content_chars": len(text),
-                                "reason": (
-                                    "no supported DocOps or CodeOps ITEM blocks"
-                                ),
-                            })
-                            if not dry_run:
-                                _record_sync_handled(
-                                    vector_store_id,
-                                    source_file_id,
-                                    vector_store_file_id,
-                                    filename,
-                                    version_hash,
-                                    sync_policy_hash,
-                                    run_id,
-                                    "skipped_unsupported_content",
-                                    report["reason"],
+                            except ValueError as exc:
+                                guidance_error = str(exc)
+                            if int(guidance_preflight.get("record_count", 0)) > 0:
+                                content_type = "codeops_guidance"
+                                imported = guidance_preflight
+                                if not dry_run:
+                                    imported = codeops.import_codeops_guidance(
+                                        text,
+                                        source_label=filename,
+                                        historical_context_acknowledged=True,
+                                    )
+                            elif "---ITEM_START:" not in text:
+                                totals["files_skipped_unsupported"] += 1
+                                report.update({
+                                    "status": "skipped_unsupported_content",
+                                    "content_sha256": content_sha256,
+                                    "content_chars": len(text),
+                                    "reason": (
+                                        "no supported DocOps, CodeOps, or coding "
+                                        "capability ITEM blocks"
+                                    ),
+                                })
+                                if not dry_run:
+                                    _record_sync_handled(
+                                        vector_store_id,
+                                        source_file_id,
+                                        vector_store_file_id,
+                                        filename,
+                                        version_hash,
+                                        sync_policy_hash,
+                                        run_id,
+                                        "skipped_unsupported_content",
+                                        report["reason"],
+                                    )
+                                reports.append(report)
+                                continue
+                            else:
+                                error_parts = [
+                                    *[str(error) for error in docops_errors[:3]],
+                                ]
+                                if docops_invalid:
+                                    error_parts.append(
+                                        f"{docops_invalid} invalid DocOps item(s)"
+                                    )
+                                if guidance_error:
+                                    error_parts.append(guidance_error)
+                                raise RuntimeError(
+                                    "supported ITEM blocks were incomplete: "
+                                    + "; ".join(error_parts)
                                 )
-                            reports.append(report)
-                            continue
-                        else:
-                            error_parts = [
-                                *[str(error) for error in docops_errors[:3]],
-                            ]
-                            if docops_invalid:
-                                error_parts.append(
-                                    f"{docops_invalid} invalid DocOps item(s)"
-                                )
-                            if guidance_error:
-                                error_parts.append(guidance_error)
-                            raise RuntimeError(
-                                "supported ITEM blocks were incomplete: "
-                                + "; ".join(error_parts)
-                            )
 
                     invalid_count = int(
                         imported.get("items_skipped_invalid", 0)
@@ -1435,7 +1998,8 @@ def sync_vector_store(
                     import_errors = imported.get("errors", [])
                     if invalid_count or import_errors:
                         raise RuntimeError(
-                            f"import was incomplete: "
+                            f"{imported.get('corpus_type', content_type)} import "
+                            "was incomplete: "
                             f"{invalid_count} invalid item(s); "
                             f"{'; '.join(import_errors[:3])}"
                         )
@@ -1450,15 +2014,26 @@ def sync_vector_store(
                             "items_skipped_invalid",
                         ):
                             totals[key] += int(imported.get(key, 0))
-                    else:
+                    elif content_type == "codeops_guidance":
                         totals["guidance_records_imported"] += int(
                             imported.get("record_count", 0)
                         )
+                    else:
+                        for key in (
+                            "capabilities_created",
+                            "capabilities_updated",
+                            "capabilities_unchanged",
+                            "items_skipped_invalid",
+                        ):
+                            totals[key] += int(imported.get(key, 0))
                     report.update({
                         "status": (
                             "would_synchronize" if dry_run else "synchronized"
                         ),
                         "content_type": content_type,
+                        "corpus_type": imported.get(
+                            "corpus_type", content_type
+                        ),
                         "content_sha256": content_sha256,
                         "content_chars": len(text),
                         "items_total": imported.get(
@@ -1472,6 +2047,15 @@ def sync_vector_store(
                         ),
                         "guidance_records_imported": imported.get(
                             "record_count", 0
+                        ),
+                        "capabilities_created": imported.get(
+                            "capabilities_created", 0
+                        ),
+                        "capabilities_updated": imported.get(
+                            "capabilities_updated", 0
+                        ),
+                        "capabilities_unchanged": imported.get(
+                            "capabilities_unchanged", 0
                         ),
                     })
                     if not dry_run:
@@ -1562,7 +2146,9 @@ def get_vector_sync_status(limit: int = 10) -> dict:
             "files_seen, files_processed, files_skipped_unchanged, "
             "files_skipped_unavailable, files_skipped_unsupported, files_failed, "
             "templates_created, templates_updated, guidance_records_imported, "
-            "error, started_at, finished_at "
+            "capabilities_created, capabilities_updated, "
+            "capabilities_unchanged, error, "
+            "started_at, finished_at "
             "FROM skillops_learning_runs WHERE run_type='sync' "
             "ORDER BY started_at DESC LIMIT ?",
             (limit,),
@@ -1591,9 +2177,12 @@ def get_vector_sync_status(limit: int = 10) -> dict:
                 "templates_created": row[11],
                 "templates_updated": row[12],
                 "guidance_records_imported": row[13],
-                "error": row[14],
-                "started_at": row[15],
-                "finished_at": row[16],
+                "capabilities_created": row[14],
+                "capabilities_updated": row[15],
+                "capabilities_unchanged": row[16],
+                "error": row[17],
+                "started_at": row[18],
+                "finished_at": row[19],
             }
             for row in run_rows
         ],
@@ -1990,8 +2579,8 @@ SKILLOPS_SCHEMAS = [
      "parameters": {"type": "object", "properties": {}, "required": []}},
     {"type": "function", "name": "learn_from_vector_store",
      "description": ("Process every file in PJ's configured vector store and "
-                     "import ITEM specs into DocOps templates, including alias "
-                     "registration and persistent SkillOps learning-run audit."),
+                     "import supported ITEM corpora into DocOps templates or "
+                     "the coding-capability registry with persistent audit."),
      "parameters": {"type": "object", "properties": {
          "dry_run": {"type": "boolean",
                      "description": "Parse and report without mutating templates/aliases"},
@@ -2006,10 +2595,11 @@ SKILLOPS_SCHEMAS = [
      }, "required": []}},
     {"type": "function", "name": "sync_vector_store",
      "description": ("Idempotently synchronize hash-cached vector-store "
-                    "sources into DocOps templates or CodeOps guidance using "
-                    "durable deduplication, a cross-process lock, and run audit. "
-                    "Provider-hosted inputs without an approved local cache are "
-                    "classified as unavailable rather than partially imported."),
+                    "sources into DocOps templates, CodeOps guidance, or coding "
+                    "capabilities using durable deduplication, a cross-process "
+                    "lock, and run audit. Provider-hosted inputs without an "
+                    "approved local cache are classified as unavailable rather "
+                    "than partially imported."),
      "parameters": {"type": "object", "properties": {
         "dry_run": {"type": "boolean",
                     "description": "Report changes without mutating DocOps, CodeOps, or file sync state"},
@@ -2031,6 +2621,19 @@ SKILLOPS_SCHEMAS = [
         "limit": {"type": "integer",
                   "description": "Number of recent runs to return (1-50)"},
      }, "required": []}},
+    {"type": "function", "name": "list_coding_capabilities",
+     "description": ("List structured AI coding-tool capabilities learned from "
+                    "training corpora, including freshness requirements, "
+                    "appropriate tasks, workflows, safety controls, sources, "
+                    "and recent import audit."),
+     "parameters": {"type": "object", "properties": {
+        "query": {"type": "string",
+                  "description": "Optional title, ID, surface, or guidance search"},
+        "tool_family": {"type": "string",
+                        "description": "Optional tool-family filter"},
+        "limit": {"type": "integer",
+                  "description": "Maximum capabilities to return (1-100)"},
+     }, "required": []}},
     {"type": "function", "name": "deprecate_skill",
      "description": "Deprecate a generated skill so it no longer loads (reversible via activate_skill).",
      "parameters": {"type": "object", "properties": {
@@ -2047,5 +2650,6 @@ SKILLOPS_DISPATCH = {
     "learn_from_vector_store": learn_from_vector_store,
     "sync_vector_store": sync_vector_store,
     "get_vector_sync_status": get_vector_sync_status,
+    "list_coding_capabilities": list_coding_capabilities,
     "deprecate_skill": deprecate_skill,
 }

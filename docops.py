@@ -346,21 +346,22 @@ def _parse_knowledge_pack_block(block: str) -> dict:
     except Exception:
         pass
 
-    # 2) fenced JSON block
+    # 2) leading fenced YAML metadata takes precedence over examples in content.
+    yaml_fence = re.match(r"\s*```ya?ml\s*(.*?)\s*```", text, re.S | re.I)
+    if yaml_fence:
+        item = _parse_key_value_text(yaml_fence.group(1))
+    else:
+        item = {}
+
+    # 3) fenced JSON object (used when no YAML metadata is present).
     fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S | re.I)
-    if fenced:
+    if fenced and not item:
         try:
             parsed = json.loads(fenced.group(1))
             if isinstance(parsed, dict):
                 return parsed
         except Exception:
             pass
-
-    # 3) fenced YAML metadata plus Markdown instructional sections.
-    item = {}
-    yaml_fence = re.search(r"```ya?ml\s*(.*?)\s*```", text, re.S | re.I)
-    if yaml_fence:
-        item.update(_parse_key_value_text(yaml_fence.group(1)))
 
     # 4) simple key/value format (also fills fields omitted from YAML).
     for key, value in _parse_key_value_text(text).items():

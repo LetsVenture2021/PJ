@@ -291,6 +291,28 @@ corpus_status: "provisional_instructional_spec"
         self.assertEqual(result["items_skipped_invalid"], 0)
         self.assertEqual(result["imports"][0]["required_sections"], ["Summary"])
 
+    def test_fenced_json_metadata_survives_later_yaml_example(self):
+        payload = json.dumps({
+            "item_id": "JSON-YAML-1",
+            "canonical_title": "JSON With YAML Example",
+            "template_name": "json_with_yaml_example",
+            "required_sections": ["Summary"],
+        })
+        knowledge_pack = (
+            f"---ITEM_START: JSON-YAML-1---\n"
+            f"```json\n{payload}\n```\n"
+            "Example:\n```yaml\nunrelated: true\n```\n"
+            "---ITEM_END: JSON-YAML-1---\n"
+        )
+        result = docops.import_doc_templates_from_knowledge_pack_text(
+            knowledge_pack,
+            overwrite_existing=True,
+            include_provisional=True,
+            dry_run=True,
+        )
+        self.assertEqual(result["items_skipped_invalid"], 0)
+        self.assertEqual(result["imports"][0]["required_sections"], ["Summary"])
+
     def test_incomplete_item_markers_are_invalid(self):
         incomplete = """\
 source_record_count: 2
@@ -721,6 +743,324 @@ required_sections:
                 ):
                     result = skillops.sync_vector_store()
         self.assertEqual(result["status"], "locked")
+
+
+class TestCodingCapabilityCorpus(unittest.TestCase):
+    FULL_CORPUS_PATH = Path(os.getenv(
+        "PJ_CODING_CORPUS_PATH",
+        (
+            "/Users/matthewbernal/.copilot/workspaces/"
+            "78c81e10-227a-4773-868d-0e0ad54e5888/attachments/"
+            "9ad42745-f1dd-4977-8f7d-2e9783f33195-"
+            "AI_Coding_Tools_Vector_Training_Corpus_v1.0.md"
+        ),
+    ))
+    CAPABILITY_FIXTURES = (
+        ("DOC-415", "Codex Cloud - OpenAI Coding Agent Documentation",
+         "OpenAI Codex", "Cloud / web coding agent"),
+        ("DOC-43", "Codex IDE extension",
+         "OpenAI Codex", "IDE extension"),
+        ("DOC-407", "Codex SDK",
+         "OpenAI Codex", "SDK / programmatic and CI integration"),
+        ("DOC-405", "GPT5.1 Codex",
+         "OpenAI Codex", "CLI and shared configuration"),
+        ("DOC-400", "GPT-5.1-Codex-Max System Card",
+         "OpenAI Codex", "GPT-5.1-Codex-Max safety and model profile"),
+        ("DOC-393", "Guide - Using GPT-5.1 - AI Engineering",
+         "OpenAI GPT-5.1", "API engineering guide"),
+        ("DOC-397", "Front End Coding with GPT5",
+         "OpenAI GPT-5", "Front-end coding workflow"),
+        ("DOC-399", "5.1 For Developers- Blog",
+         "OpenAI GPT-5.1", "Developer release overview"),
+    )
+
+    def setUp(self):
+        self.original_db_path = skillops._DB_PATH
+        self.temp_db_path = Path(tempfile.mkstemp(suffix=".sqlite3")[1])
+        skillops._DB_PATH = self.temp_db_path
+        self.lock_path = Path(tempfile.mkdtemp()) / "coding-sync.lock"
+
+    def tearDown(self):
+        skillops._DB_PATH = self.original_db_path
+        self.temp_db_path.unlink(missing_ok=True)
+
+    def _eight_record_corpus(self):
+        items = []
+        for item_id, title, family, surface in self.CAPABILITY_FIXTURES:
+            items.append(f"""\
+---ITEM_START: {item_id}---
+```yaml
+item_id: "{item_id}"
+source_record_id: "{item_id}"
+canonical_title: "{title}"
+tool_family: "{family}"
+surface: "{surface}"
+version_scope: "verify_current"
+corpus_status: "training_ready_current_docs_override"
+requires_current_docs_check: true
+```
+### {title}
+**What this item teaches:** Guidance for {surface}.
+#### Appropriate tasks
+- select this capability for matching coding work
+#### Recommended operating workflow
+1. Verify current documentation.
+2. Execute a bounded task.
+#### Safety and governance controls
+- Use least privilege.
+#### Current authoritative sources
+- https://developers.openai.com/codex
+---ITEM_END: {item_id}---
+""")
+        return (
+            "# AI CODING TOOLS - VECTOR-STORE TRAINING CORPUS\n"
+            "corpus_version: 1.0.0\n"
+            "record_count: 8\n\n"
+            "## TRAINING ITEMS\n\n"
+            + "\n".join(items)
+        )
+
+    def test_yaml_metadata_precedes_embedded_json_examples(self):
+        corpus = """\
+# AI CODING TOOLS — VECTOR-STORE TRAINING CORPUS
+corpus_version: 1.0.0
+record_count: 1
+---ITEM_START: CAP-1---
+```yaml
+item_id: "CAP-1"
+source_record_id: "CAP-1"
+canonical_title: "Structured Coding Agent"
+tool_family: "Example Tools"
+surface: "SDK"
+version_scope: "verify_current"
+corpus_status: "training_ready_current_docs_override"
+requires_current_docs_check: true
+```
+### Structured Coding Agent
+**What this item teaches:** Structured automation.
+#### Appropriate tasks
+- automate bounded repository work
+#### Recommended operating workflow
+1. Define a bounded task.
+2. Validate the output.
+#### Safety and governance controls
+- Use least privilege.
+#### Current authoritative sources
+- https://example.com/current
+#### Source-derived reference content
+```json
+{"type": "object", "properties": {"wrong": {"type": "string"}}}
+```
+---ITEM_END: CAP-1---
+"""
+        result = skillops.import_coding_capability_corpus_text(
+            corpus,
+            dry_run=False,
+            source_file_id="representative.md",
+        )
+        self.assertEqual(result["items_total"], 1)
+        self.assertEqual(result["capabilities_created"], 1)
+        self.assertEqual(result["items_skipped_invalid"], 0)
+        capability = skillops.list_coding_capabilities()["capabilities"][0]
+        self.assertEqual(capability["item_id"], "CAP-1")
+        self.assertEqual(capability["canonical_title"], "Structured Coding Agent")
+        self.assertTrue(capability["requires_current_docs_check"])
+        self.assertEqual(
+            capability["workflow"],
+            ["Define a bounded task.", "Validate the output."],
+        )
+
+    def test_docops_content_with_capability_phrases_is_not_misrouted(self):
+        docops_text = """\
+---ITEM_START: DOCOPS-TOOL---
+item_id: DOCOPS-TOOL
+canonical_title: Tool Family Brief
+template_name: tool_family_brief
+description: Includes phrases also used by coding guidance.
+required_sections:
+- Summary
+tool_family: Example
+**What this item teaches:** This remains a DocOps template.
+---ITEM_END: DOCOPS-TOOL---
+"""
+        self.assertFalse(skillops._is_coding_capability_corpus(docops_text))
+        result = skillops._import_vector_content(
+            docops_text,
+            overwrite_existing=True,
+            include_provisional=True,
+            dry_run=True,
+        )
+        self.assertEqual(result["items_total"], 1)
+        self.assertEqual(result["templates_created"], 1)
+
+    def test_corpus_header_without_capability_metadata_is_not_misrouted(self):
+        docops_text = """\
+# AI CODING TOOLS - VECTOR-STORE TRAINING CORPUS
+corpus_version: 1.0.0
+record_count: 1
+## TRAINING ITEMS
+---ITEM_START: DOCOPS-1---
+item_id: DOCOPS-1
+canonical_title: Ordinary DocOps Template
+template_name: ordinary_docops_template
+required_sections:
+- Summary
+---ITEM_END: DOCOPS-1---
+"""
+        self.assertFalse(skillops._is_coding_capability_corpus(docops_text))
+
+    def test_quoted_false_freshness_flag_stays_false(self):
+        corpus = self._eight_record_corpus().replace(
+            "requires_current_docs_check: true",
+            'requires_current_docs_check: "false"',
+            1,
+        )
+        result = skillops.import_coding_capability_corpus_text(
+            corpus,
+            dry_run=False,
+            source_file_id="quoted-false.md",
+        )
+        self.assertEqual(result["items_skipped_invalid"], 0)
+        first = skillops.list_coding_capabilities(
+            query="DOC-415",
+        )["capabilities"][0]
+        self.assertFalse(first["requires_current_docs_check"])
+
+    def test_eight_record_import_is_idempotent_and_audited(self):
+        text = self._eight_record_corpus()
+        dry_run = skillops.import_coding_capability_corpus_text(
+            text,
+            dry_run=True,
+            source_file_id="coding-corpus.md",
+        )
+        self.assertEqual(dry_run["items_total"], 8)
+        self.assertEqual(dry_run["capabilities_created"], 8)
+        self.assertEqual(dry_run["items_skipped_invalid"], 0)
+
+        imported = skillops.import_coding_capability_corpus_text(
+            text,
+            dry_run=False,
+            source_file_id="coding-corpus.md",
+        )
+        self.assertEqual(imported["capabilities_created"], 8)
+        repeated = skillops.import_coding_capability_corpus_text(
+            text,
+            dry_run=False,
+            source_file_id="coding-corpus.md",
+        )
+        self.assertEqual(repeated["capabilities_created"], 0)
+        self.assertEqual(repeated["capabilities_updated"], 0)
+        self.assertEqual(repeated["capabilities_unchanged"], 8)
+
+        listed = skillops.list_coding_capabilities()
+        self.assertEqual(listed["count"], 8)
+        self.assertGreaterEqual(len(listed["import_audit"]), 3)
+        self.assertEqual(
+            {row["item_id"] for row in listed["capabilities"]},
+            {
+                "DOC-415", "DOC-43", "DOC-407", "DOC-405",
+                "DOC-400", "DOC-393", "DOC-397", "DOC-399",
+            },
+        )
+        self.assertTrue(all(
+            row["requires_current_docs_check"]
+            for row in listed["capabilities"]
+        ))
+
+    def test_full_coding_corpus_attachment_when_available(self):
+        if not self.FULL_CORPUS_PATH.exists():
+            self.skipTest("AI coding tools corpus attachment is not available")
+        result = skillops.import_coding_capability_corpus_text(
+            self.FULL_CORPUS_PATH.read_text(),
+            dry_run=True,
+            source_file_id=self.FULL_CORPUS_PATH.name,
+        )
+        self.assertEqual(result["items_total"], 8)
+        self.assertEqual(result["capabilities_created"], 8)
+        self.assertEqual(result["items_skipped_invalid"], 0)
+
+    def test_automatic_sync_routes_coding_corpus_to_capability_registry(self):
+        text = self._eight_record_corpus()
+        entry = {
+            "id": "vs-file-coding",
+            "file_id": "file-coding",
+            "created_at": 300,
+        }
+        metadata = {
+            "id": "file-coding",
+            "filename": "coding-corpus.md",
+            "bytes": len(text.encode("utf-8")),
+            "created_at": 300,
+        }
+        with (
+            mock.patch.object(skillops, "_SYNC_LOCK_PATH", self.lock_path),
+            mock.patch.object(
+                skillops, "_require_vector_store_id", return_value="vs-test"
+            ),
+            mock.patch.object(
+                skillops, "_require_openai_api_key", return_value="test-key"
+            ),
+            mock.patch.object(
+                skillops, "_list_vector_store_files", return_value=[entry]
+            ),
+            mock.patch.object(
+                skillops,
+                "_list_openai_file_metadata",
+                return_value={"file-coding": metadata},
+            ),
+            mock.patch.object(
+                skillops, "_get_openai_file_metadata", return_value=metadata
+            ),
+            mock.patch.object(
+                skillops,
+                "_read_openai_file_content",
+                return_value=(text, False),
+            ),
+        ):
+            result = skillops.sync_vector_store()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["capabilities_created"], 8)
+        self.assertEqual(result["templates_created"], 0)
+        self.assertEqual(
+            result["file_reports"][0]["corpus_type"],
+            "ai_coding_capabilities",
+        )
+
+    def test_on_demand_learning_routes_coding_corpus(self):
+        text = self._eight_record_corpus()
+        entry = {"id": "vs-file-learn", "file_id": "file-learn"}
+        metadata = {
+            "id": "file-learn",
+            "filename": "coding-corpus.md",
+            "bytes": len(text.encode("utf-8")),
+        }
+        with (
+            mock.patch.object(
+                skillops, "_require_vector_store_id", return_value="vs-test"
+            ),
+            mock.patch.object(
+                skillops, "_require_openai_api_key", return_value="test-key"
+            ),
+            mock.patch.object(
+                skillops, "_list_vector_store_files", return_value=[entry]
+            ),
+            mock.patch.object(
+                skillops,
+                "_list_openai_file_metadata",
+                return_value={"file-learn": metadata},
+            ),
+            mock.patch.object(
+                skillops,
+                "_read_openai_file_content",
+                return_value=(text, False),
+            ),
+        ):
+            result = skillops.learn_from_vector_store(
+                overwrite_existing=True,
+            )
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["capabilities_created"], 8)
+        self.assertEqual(result["templates_created"], 0)
 
 
 class TestConfig(unittest.TestCase):
