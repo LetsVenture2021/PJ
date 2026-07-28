@@ -21,7 +21,6 @@ files = [
   "pj_contract.py",
   "realtime_config.py",
   "runtime_config.py",
-  "ops/shared/errors.py",
   "ops/shared/interfaces.py",
   "ops/shared/retry.py",
   "ops/shared/validation.py",
