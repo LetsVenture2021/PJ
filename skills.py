@@ -293,11 +293,18 @@ import strategyops as _strategyops
 TOOL_SCHEMAS.extend(_strategyops.STRATEGYOPS_SCHEMAS)
 DISPATCH_TABLE.update(_strategyops.STRATEGYOPS_DISPATCH)
 
+# --- CodeOps: governed repository knowledge and bounded engineering tools -----
+import codeops as _codeops
+
+TOOL_SCHEMAS.extend(_codeops.CODEOPS_SCHEMAS)
+DISPATCH_TABLE.update(_codeops.CODEOPS_DISPATCH)
+
 _gen_schemas, _gen_dispatch = _skillops.load_generated_skills()
 TOOL_SCHEMAS.extend(_gen_schemas)
 DISPATCH_TABLE.update(_gen_dispatch)
 
 _POLICY_MODES = {"allow", "deny", "approval"}
+_MANDATORY_APPROVAL_TOOLS = {"apply_codeops_file_edit"}
 
 
 def _parse_tool_csv(env_name: str) -> set:
@@ -334,6 +341,8 @@ def _load_tool_policy() -> dict:
 def _tool_policy_mode(tool_name: str) -> str:
     policy = _load_tool_policy()
     mode = policy["tools"].get(tool_name, policy["default"])
+    if tool_name in _MANDATORY_APPROVAL_TOOLS and mode != "deny":
+        mode = "approval"
     return mode if mode in _POLICY_MODES else "allow"
 
 
@@ -352,6 +361,8 @@ def dispatch(name: str, arguments: dict):
     if policy_mode == "approval" and not approval_granted:
         _skillops.record_invocation(name, False, 0, "blocked_by_policy_approval")
         return {"error": f"Tool '{name}' requires explicit approval (_approved=true)."}
+    if name in _MANDATORY_APPROVAL_TOOLS:
+        args["_approval_granted"] = approval_granted
     start = _time.monotonic()
     try:
         result = fn(**args)
