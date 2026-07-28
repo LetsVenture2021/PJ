@@ -10,6 +10,7 @@ import chatlog
 import realtime_config
 import realtime_server
 import responses_runtime
+import skills
 
 
 def obj(**values):
@@ -92,7 +93,9 @@ class TestResponsesRuntime(unittest.TestCase):
             environ={"READY_TOKEN": "super-secret-value"},
         )
 
-        self.assertEqual(manifest["local_functions"]["count"], 52)
+        self.assertEqual(
+            manifest["local_functions"]["count"], len(skills.TOOL_SCHEMAS)
+        )
         self.assertEqual(
             [server["status"] for server in manifest["mcp_servers"]],
             ["configured", "degraded", "disabled"],
@@ -126,7 +129,9 @@ class TestResponsesRuntime(unittest.TestCase):
     def test_realtime_keeps_direct_tools_and_adds_delegation_only_there(self):
         session = realtime_config.realtime_session_config()
         self.assertEqual(session["model"], realtime_config.REALTIME_MODEL)
-        self.assertEqual(len(session["tools"]), 53)
+        self.assertEqual(
+            len(session["tools"]), len(skills.TOOL_SCHEMAS) + 1
+        )
         self.assertEqual(
             session["tools"][-1]["name"], "delegate_advanced_task"
         )
@@ -425,7 +430,10 @@ class TestResponsesRoutes(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200)
         capabilities = response.get_json()["capabilities"]
-        self.assertEqual(capabilities["local_functions"]["count"], 52)
+        self.assertEqual(
+            capabilities["local_functions"]["count"],
+            len(skills.TOOL_SCHEMAS),
+        )
         self.assertNotIn("headers", json.dumps(capabilities))
 
 
