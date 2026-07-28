@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from runtime_config import ConfigError, load_tool_policy
+
 _DB_PATH = Path(__file__).resolve().parent / "pj_data.sqlite3"
 _TOOL_POLICY_PATH = Path(
     os.getenv("PJ_TOOL_POLICY_PATH",
@@ -418,27 +420,14 @@ def _load_tool_policy() -> dict:
         "default": "allow",
         "tools": {name: "approval" for name in _BUILTIN_APPROVAL_TOOLS},
     }
-    if _TOOL_POLICY_PATH.exists():
-        try:
-            loaded = json.loads(_TOOL_POLICY_PATH.read_text())
-            if isinstance(loaded, dict):
-                default_mode = loaded.get("default", "allow")
-                if default_mode in _POLICY_MODES:
-                    policy["default"] = default_mode
-                tools = loaded.get("tools", {})
-                if isinstance(tools, dict):
-                    for name, mode in tools.items():
-                        if isinstance(name, str) and mode in _POLICY_MODES:
-                            policy["tools"][name] = mode
-        except Exception:
-            # Invalid policy files should not break core dispatch.
-            pass
-
-    for tool_name in _parse_tool_csv("PJ_DENY_TOOLS"):
-        policy["tools"][tool_name] = "deny"
-    for tool_name in _parse_tool_csv("PJ_APPROVAL_TOOLS"):
-        if policy["tools"].get(tool_name) != "deny":
-            policy["tools"][tool_name] = "approval"
+    try:
+        loaded = load_tool_policy(_TOOL_POLICY_PATH)
+    except ConfigError:
+        if _TOOL_POLICY_PATH.exists():
+            raise
+        loaded = {"default": "allow", "tools": {}}
+    policy["default"] = loaded["default"]
+    policy["tools"].update(loaded["tools"])
     return policy
 
 

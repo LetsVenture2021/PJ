@@ -1,0 +1,407 @@
+#!/usr/bin/env python3
+"""Unified, profile-aware runtime configuration for PJ."""
+from __future__ import annotations
+
+import copy
+import json
+import os
+import tomllib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Mapping
+
+
+BASE_DIR = Path(__file__).resolve().parent
+PROFILES = {"dev", "staging", "prod"}
+PROFILE_REQUIRED_ENV = {
+    "dev": (),
+    "staging": ("OPENAI_API_KEY",),
+    "prod": ("OPENAI_API_KEY", "PJ_OWNER_EMAILS", "PJ_TOOL_BRIDGE_TOKEN"),
+}
+POLICY_MODES = {"allow", "deny", "approval"}
+WORKER_ENV_NAMES = (
+    "PJ_ALLOWED_ORIGINS",
+    "CF_ACCESS_TEAM_DOMAIN",
+    "CF_ACCESS_AUD",
+    "PJ_TOOL_BRIDGE_URL",
+    "PJ_TOOL_SCHEMAS_URL",
+    "PJ_RESPONSES_BRIDGE_URL",
+    "CF_ACCESS_CERT_CACHE_TTL_MS",
+)
+
+
+class ConfigError(ValueError):
+    """Raised when runtime configuration cannot be loaded or validated."""
+
+
+@dataclass(frozen=True)
+class RuntimeConfig:
+    profile: str
+    assistant: dict[str, Any]
+    mcp_servers: list[dict[str, Any]]
+    tool_policy: dict[str, Any]
+    realtime: dict[str, Any]
+    worker: dict[str, Any]
+    sources: dict[str, Path]
+
+
+def _read_json(path: Path, *, default: Any = None) -> Any:
+    if not path.is_file():
+        if default is not None:
+            return copy.deepcopy(default)
+        raise ConfigError(f"Required configuration file not found: {path}")
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise ConfigError(
+            f"Invalid JSON in {path}: line {exc.lineno}, column {exc.colno}: {exc.msg}"
+        ) from exc
+
+
+def _read_json_env(name: str, environ: Mapping[str, str], expected_type: type) -> Any:
+    raw = environ.get(name)
+    if raw is None:
+        return None
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(f"{name} must contain valid JSON: {exc.msg}") from exc
+    if not isinstance(value, expected_type):
+        raise ConfigError(f"{name} must contain a JSON {expected_type.__name__}")
+    return value
+
+
+def _deep_merge(target: dict[str, Any], updates: Mapping[str, Any]) -> None:
+    for key, value in updates.items():
+        if isinstance(value, Mapping) and isinstance(target.get(key), dict):
+            _deep_merge(target[key], value)
+        else:
+            target[key] = copy.deepcopy(value)
+
+
+def _parse_env_value(raw: str) -> Any:
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def _apply_nested_env_overrides(
+    sections: dict[str, Any], environ: Mapping[str, str]
+) -> None:
+    prefix = "PJ_CONFIG__"
+    for name in sorted(environ):
+        if not name.startswith(prefix):
+            continue
+        path = [part.lower() for part in name[len(prefix):].split("__") if part]
+        if len(path) < 2 or path[0] not in sections:
+            raise ConfigError(
+                f"{name} must target a section and field, for example "
+                "PJ_CONFIG__ASSISTANT__MODEL"
+            )
+        current = sections[path[0]]
+        for part in path[1:-1]:
+            if not isinstance(current, dict):
+                raise ConfigError(f"{name} traverses a non-object configuration value")
+            current = current.setdefault(part, {})
+        if not isinstance(current, dict):
+            raise ConfigError(f"{name} targets a non-object configuration value")
+        current[path[-1]] = _parse_env_value(environ[name])
+
+
+def _select_profile(
+    profile: str | None, environ: Mapping[str, str]
+) -> str:
+    selected = (profile or environ.get("PJ_PROFILE") or "dev").strip().lower()
+    if selected not in PROFILES:
+        choices = ", ".join(sorted(PROFILES))
+        raise ConfigError(f"Invalid PJ profile {selected!r}; expected one of: {choices}")
+    return selected
+
+
+def _apply_profile_overlay(
+    config: dict[str, Any], profile: str, *, source: Path
+) -> dict[str, Any]:
+    profiles = config.pop("profiles", {})
+    if not isinstance(profiles, dict):
+        raise ConfigError(f"{source}: profiles must be an object")
+    overlay = profiles.get(profile, {})
+    if not isinstance(overlay, dict):
+        raise ConfigError(f"{source}: profiles.{profile} must be an object")
+    _deep_merge(config, overlay)
+    return config
+
+
+def _normalize_assistant(config: Any, base_dir: Path, source: Path) -> dict[str, Any]:
+    if not isinstance(config, dict):
+        raise ConfigError(f"{source} must contain a JSON object")
+    for key in ("name", "model"):
+        if not isinstance(config.get(key), str) or not config[key].strip():
+            raise ConfigError(f"{source} must define a non-empty {key}")
+
+    instruction_files = config.get("instruction_files")
+    if instruction_files is None:
+        instruction_files = [config.get("instructions_file")]
+    if (
+        not isinstance(instruction_files, list)
+        or not instruction_files
+        or any(not isinstance(item, str) or not item.strip() for item in instruction_files)
+    ):
+        raise ConfigError(
+            f"{source} must define instruction_files or legacy instructions_file"
+        )
+    instruction_files = list(dict.fromkeys(item.strip() for item in instruction_files))
+    instruction_parts = []
+    resolved_base = base_dir.resolve()
+    for filename in instruction_files:
+        path = (base_dir / filename).resolve()
+        try:
+            path.relative_to(resolved_base)
+        except ValueError as exc:
+            raise ConfigError("Instruction files must remain within the project") from exc
+        if not path.is_file():
+            raise ConfigError(f"Instruction file not found: {path}")
+        instruction_parts.append(path.read_text())
+    config["instructions"] = "\n\n".join(instruction_parts)
+    config["instructions_source"] = instruction_files[0]
+    config["instruction_files"] = instruction_files
+    config.setdefault("instructions_file", instruction_files[0])
+
+    vector_store_ids = config.get("vector_store_ids")
+    if vector_store_ids is None:
+        vector_store_ids = (
+            [config["vector_store_id"]] if config.get("vector_store_id") else []
+        )
+    if (
+        not isinstance(vector_store_ids, list)
+        or any(not isinstance(item, str) or not item.strip() for item in vector_store_ids)
+    ):
+        raise ConfigError("vector_store_ids must be a list of non-empty strings")
+    vector_store_ids = list(dict.fromkeys(item.strip() for item in vector_store_ids))
+    config["vector_store_ids"] = vector_store_ids
+    if vector_store_ids:
+        config.setdefault("vector_store_id", vector_store_ids[0])
+    return config
+
+
+def _normalize_mcp_servers(servers: Any, source: Path) -> list[dict[str, Any]]:
+    if not isinstance(servers, list):
+        raise ConfigError(f"{source} must contain a JSON list")
+    labels: set[str] = set()
+    normalized = []
+    for index, server in enumerate(servers):
+        if not isinstance(server, dict):
+            raise ConfigError(f"{source}: server {index} must be an object")
+        label = server.get("label")
+        url = server.get("url")
+        if not isinstance(label, str) or not label.strip():
+            raise ConfigError(f"{source}: server {index} must define a non-empty label")
+        if label in labels:
+            raise ConfigError(f"{source}: duplicate MCP server label {label!r}")
+        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+            raise ConfigError(f"{source}: MCP server {label!r} must define an HTTP(S) URL")
+        labels.add(label)
+        normalized.append(copy.deepcopy(server))
+    return normalized
+
+
+def load_tool_policy(
+    path: str | Path | None = None, *, environ: Mapping[str, str] | None = None
+) -> dict[str, Any]:
+    environ = os.environ if environ is None else environ
+    source = Path(
+        path
+        or environ.get("PJ_TOOL_POLICY_PATH")
+        or (BASE_DIR / "tool_policy.json")
+    )
+    policy = _read_json(source, default={"default": "allow", "tools": {}})
+    override = _read_json_env("PJ_TOOL_POLICY_JSON", environ, dict)
+    if override is not None:
+        _deep_merge(policy, override)
+    if not isinstance(policy, dict):
+        raise ConfigError(f"{source} must contain a JSON object")
+    default_mode = policy.get("default", "allow")
+    tools = policy.get("tools", {})
+    if default_mode not in POLICY_MODES:
+        raise ConfigError(f"{source}: default must be allow, deny, or approval")
+    if not isinstance(tools, dict):
+        raise ConfigError(f"{source}: tools must be an object")
+    for name, mode in tools.items():
+        if not isinstance(name, str) or mode not in POLICY_MODES:
+            raise ConfigError(
+                f"{source}: tool policy entries must map names to allow, deny, or approval"
+            )
+    result = {"default": default_mode, "tools": copy.deepcopy(tools)}
+    for name in _split_csv(environ.get("PJ_DENY_TOOLS", "")):
+        result["tools"][name] = "deny"
+    for name in _split_csv(environ.get("PJ_APPROVAL_TOOLS", "")):
+        if result["tools"].get(name) != "deny":
+            result["tools"][name] = "approval"
+    return result
+
+
+def load_mcp_config(
+    path: str | Path | None = None, *, environ: Mapping[str, str] | None = None
+) -> list[dict[str, Any]]:
+    environ = os.environ if environ is None else environ
+    source = Path(
+        path
+        or environ.get("PJ_MCP_SERVERS_PATH")
+        or (BASE_DIR / "mcp_servers.json")
+    )
+    servers = _read_json(source, default=[])
+    override = _read_json_env("PJ_MCP_SERVERS_JSON", environ, list)
+    if override is not None:
+        servers = override
+    return _normalize_mcp_servers(servers, source)
+
+
+def _split_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _load_worker_config(path: Path, profile: str) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("rb") as handle:
+            manifest = tomllib.load(handle)
+    except tomllib.TOMLDecodeError as exc:
+        raise ConfigError(f"Invalid TOML in {path}: {exc}") from exc
+    worker = copy.deepcopy(manifest.get("vars", {}))
+    if not isinstance(worker, dict):
+        raise ConfigError(f"{path}: vars must be a TOML table")
+    profile_vars = (
+        manifest.get("env", {}).get(profile, {}).get("vars", {})
+        if isinstance(manifest.get("env", {}), dict)
+        else {}
+    )
+    if not isinstance(profile_vars, dict):
+        raise ConfigError(f"{path}: env.{profile}.vars must be a TOML table")
+    _deep_merge(worker, profile_vars)
+    return worker
+
+
+def _validate_required_env(
+    profile: str, environ: Mapping[str, str], *, extra: str = ""
+) -> None:
+    required = list(PROFILE_REQUIRED_ENV[profile])
+    required.extend(_split_csv(extra))
+    missing = sorted(
+        set(name for name in required if not str(environ.get(name, "")).strip())
+    )
+    if missing:
+        raise ConfigError(
+            f"Profile {profile!r} requires environment variable(s): "
+            + ", ".join(missing)
+        )
+
+
+def load_runtime_config(
+    base_dir: str | Path = BASE_DIR,
+    *,
+    environ: Mapping[str, str] | None = None,
+    profile: str | None = None,
+    validate_required: bool = True,
+) -> RuntimeConfig:
+    """Load all PJ configuration sources and apply profile/environment overrides."""
+    base_dir = Path(base_dir)
+    environ = os.environ if environ is None else environ
+    selected = _select_profile(profile, environ)
+
+    assistant_path = Path(
+        environ.get("PJ_ASSISTANT_CONFIG_PATH", base_dir / "config.json")
+    )
+    mcp_path = Path(environ.get("PJ_MCP_SERVERS_PATH", base_dir / "mcp_servers.json"))
+    policy_path = Path(
+        environ.get("PJ_TOOL_POLICY_PATH", base_dir / "tool_policy.json")
+    )
+    worker_path = Path(
+        environ.get(
+            "PJ_WRANGLER_CONFIG_PATH",
+            base_dir / (
+                "wrangler.toml"
+                if (base_dir / "wrangler.toml").is_file()
+                else "wrangler.toml.example"
+            ),
+        )
+    )
+
+    assistant = _read_json(assistant_path)
+    if not isinstance(assistant, dict):
+        raise ConfigError(f"{assistant_path} must contain a JSON object")
+    assistant = _apply_profile_overlay(
+        copy.deepcopy(assistant), selected, source=assistant_path
+    )
+    mcp_servers = load_mcp_config(mcp_path, environ=environ)
+    tool_policy = load_tool_policy(policy_path, environ=environ)
+    sections: dict[str, Any] = {
+        "assistant": assistant,
+        "mcp_servers": mcp_servers,
+        "tool_policy": tool_policy,
+        "realtime": {
+            "model": "gpt-realtime-2.1",
+            "voice": "marin",
+        },
+        "worker": _load_worker_config(worker_path, selected),
+    }
+
+    if environ.get("PJ_MODEL"):
+        sections["assistant"]["model"] = environ["PJ_MODEL"]
+    if environ.get("PJ_VECTOR_STORE_IDS") is not None:
+        sections["assistant"]["vector_store_ids"] = _split_csv(
+            environ["PJ_VECTOR_STORE_IDS"]
+        )
+    if environ.get("PJ_REALTIME_MODEL"):
+        sections["realtime"]["model"] = environ["PJ_REALTIME_MODEL"]
+    if environ.get("PJ_REALTIME_VOICE"):
+        sections["realtime"]["voice"] = environ["PJ_REALTIME_VOICE"]
+    for name in WORKER_ENV_NAMES:
+        if environ.get(name) is not None:
+            sections["worker"][name] = environ[name]
+
+    overrides = _read_json_env("PJ_CONFIG_OVERRIDES", environ, dict)
+    if overrides is not None:
+        _deep_merge(sections, overrides)
+    _apply_nested_env_overrides(sections, environ)
+
+    if validate_required:
+        _validate_required_env(
+            selected, environ, extra=environ.get("PJ_REQUIRED_ENV", "")
+        )
+    assistant = _normalize_assistant(
+        sections["assistant"], base_dir, assistant_path
+    )
+    mcp_servers = _normalize_mcp_servers(sections["mcp_servers"], mcp_path)
+    tool_policy = sections["tool_policy"]
+    if (
+        not isinstance(tool_policy, dict)
+        or tool_policy.get("default") not in POLICY_MODES
+        or not isinstance(tool_policy.get("tools"), dict)
+        or any(mode not in POLICY_MODES for mode in tool_policy["tools"].values())
+    ):
+        raise ConfigError("tool_policy overrides must use allow, deny, or approval")
+    realtime = sections["realtime"]
+    if not isinstance(realtime, dict) or any(
+        not isinstance(realtime.get(key), str) or not realtime[key].strip()
+        for key in ("model", "voice")
+    ):
+        raise ConfigError("realtime.model and realtime.voice must be non-empty strings")
+    worker = sections["worker"]
+    if not isinstance(worker, dict):
+        raise ConfigError("worker configuration must be an object")
+
+    return RuntimeConfig(
+        profile=selected,
+        assistant=assistant,
+        mcp_servers=mcp_servers,
+        tool_policy=tool_policy,
+        realtime=copy.deepcopy(realtime),
+        worker=copy.deepcopy(worker),
+        sources={
+            "assistant": assistant_path,
+            "mcp_servers": mcp_path,
+            "tool_policy": policy_path,
+            "worker": worker_path,
+        },
+    )
