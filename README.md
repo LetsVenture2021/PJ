@@ -1,195 +1,317 @@
 # PJ
 
-PJ is a Python-first AI operations platform for building and running specialized “ops” workflows (code, docs, images, prompts, chat logs, strategy, presentations, and skills), with realtime voice/chat interfaces and optional MCP/tool integrations.
+PJ is a Python assistant runtime built on the OpenAI Responses and Realtime
+APIs. It has a terminal client, durable local tools and chat history, terminal
+voice, a local browser client, and an optional Cloudflare Worker edge proxy.
 
-This repository appears to power an orchestrated assistant runtime where:
-- Core behavior is implemented in Python modules (`*ops.py`, runtime/server files).
-- Realtime/web interaction is supported through WebRTC + backend worker components.
-- Configuration and policy are driven by JSON/TOML/text instruction assets.
-- Tests, schemas, scripts, and generated skills support development and runtime behavior.
+## What works
 
----
+### Text assistant and local tools
 
-## Repository at a glance
+- Interactive and one-shot Responses API conversations with streamed text,
+  function calls, required prompt refinement, and optional JSON Schema output.
+- SQLite-backed chat history, search/resume, tasks, notes, contacts,
+  commitments, decisions, risks, projects, opportunities, and generated skills.
+- Local tool families for code, documents, presentations, images, strategy,
+  prompts, web checks, and skill lifecycle management. Approval-sensitive tools
+  are declared in `tool_policy.json`.
+- OpenAI web search and configured File Search vector stores. Optional MCP
+  connectors are assembled from `mcp_servers.json`; connectors with missing
+  environment secrets are omitted.
 
-**Repo:** `LetsVenture2021/PJ`  
-**Description:** PJ project  
-**Primary language:** Python (86.2%)  
-**Secondary languages:** JavaScript, HTML, Shell
+### Documents, presentations, and images
 
----
+- Versioned Markdown documents and immutable downloadable artifacts.
+- Exports to `md`, `html`, `pdf`, `docx`, `rtf`, `xlsx`, and governed native
+  `pptx`. PowerPoint exports include validation and preview generation.
+- Safe local SVG creation, raster/SVG registration, asset lookup, feedback, and
+  deletion with lineage retained.
+- Paid OpenAI image generation with explicit enablement, budget checks, and a
+  required idempotency key.
 
-## Project structure
+### Realtime and browser use
 
-```text
-.github/
-  workflows/
-    ci.yml                       # CI workflow
+- Terminal microphone/speaker mode over WebRTC, with server VAD, transcription,
+  interruption, tool calls, and a microphone calibration meter.
+- A Flask server on port `3001` serving a loopback-only browser client and
+  endpoints for Realtime signaling, Full Power Responses sessions, approvals,
+  artifacts, and an authenticated local tool bridge.
+- The browser offers **Fast Voice**, **Full Power Voice**, and **Full Power
+  Text**, including saved conversation history and structured JSON output.
+- A Cloudflare Worker proxies the same API surfaces, obtains Realtime sessions
+  from OpenAI, validates Cloudflare Access identity, and bridges privileged
+  tool/Responses calls to the private Flask runtime.
 
-assets/                          # Static assets used by UI/runtime
+### Governed knowledge and integrations
 
-docs/                            # Documentation files
-documents/                       # Content/document sources
+- Vector-store source ingestion/synchronization into DocOps, CodeOps, and the
+  governed n8n capability corpus, including release receipts and fail-closed
+  validation.
+- A standalone stdio Hugging Face MCP server for bounded public Hub discovery
+  and token-authenticated inference. See
+  [`docs/huggingface-mcp-server.md`](docs/huggingface-mcp-server.md).
 
-generated_skills/                # Auto/generated skill artifacts
-schemas/                         # JSON/schema contracts
-scripts/                         # Utility and automation scripts
-tests/                           # Test suite
+## Prerequisites and setup
 
-chatlog.py                       # Chat log handling + related ops
-chiefops.py                      # Orchestration/“chief” operations logic
-codeops.py                       # Code-focused operations
-docops.py                        # Document-focused operations
-imageops.py                      # Image-focused operations
-presentationops.py               # Presentation-focused operations
-promptops.py                     # Prompt-focused operations
-skillops.py                      # Skill management/generation orchestration
-strategyops.py                   # Strategy/planning operations
-skills.py                        # Skill model/registry helpers
+- Python **3.11** (the version exercised by CI) and `pip`.
+- An OpenAI API key for assistant, voice, provider image, and remote ingestion
+  flows. Local deterministic tools and most tests mock provider calls.
+- Node.js 20+ with the built-in `node:test` runner for Worker tests.
+- A microphone, speakers, and PortAudio-compatible audio devices for terminal
+  voice.
+- A Cloudflare account, an existing DNS zone, Wrangler, and Cloudflare Access
+  only when deploying the Worker.
 
-pj.py                            # Main Python entrypoint (CLI/runtime)
-pj                               # Shell launcher/helper script
-pj_contract.py                   # Contract/interface definitions
-pj_instructions.txt              # System instruction corpus/config text
-
-responses_runtime.py             # Response/runtime execution layer
-realtime_server.py               # Realtime server (Python)
-realtime_config.py               # Realtime runtime config
-pj_realtime_backend_worker.js    # Realtime backend worker (JavaScript)
-
-voice.py                         # Voice processing/runtime
-webrtc_client.html               # WebRTC browser client UI
-
-huggingface_mcp_server.py        # MCP server integration (Hugging Face)
-mcp_servers.json                 # MCP server registry/config
-tool_policy.json                 # Tool usage policy config
-
-config.json                      # Main app/runtime configuration
-requirements.txt                 # Python dependencies
-wrangler.toml.example            # Cloudflare Worker/Wrangler example config
-.gitignore                       # Git ignore rules
-```
-
----
-
-## Core architecture
-
-PJ is organized around **domain-specific ops modules**:
-- `codeops.py`, `docops.py`, `imageops.py`, `presentationops.py`, `promptops.py`, `strategyops.py`
-- `skillops.py` + `skills.py` for skill lifecycle and orchestration
-- `chiefops.py` as high-level coordinator
-
-Runtime and interfaces are layered on top:
-- `responses_runtime.py` for response orchestration
-- `realtime_server.py` + `realtime_config.py` for realtime services
-- `pj_realtime_backend_worker.js` and `webrtc_client.html` for web realtime interaction
-- `voice.py` for voice-specific workflows
-
-Configuration and guardrails are centralized in:
-- `config.json`
-- `tool_policy.json`
-- `mcp_servers.json`
-- `pj_instructions.txt`
-- `wrangler.toml.example` (deploy/runtime example)
-
----
-
-## Prerequisites
-
-- Python 3.10+ (recommended)
-- `pip` / virtualenv
-- (Optional) Node.js if working with JS worker/dev tooling
-- (Optional) Cloudflare Wrangler if deploying worker components
-
----
-
-## Setup
+The `./pj` launcher is a zsh script that specifically expects `venv/bin/python`
+and `~/.env`, so use that virtual-environment name:
 
 ```bash
-# 1) Clone
 git clone https://github.com/LetsVenture2021/PJ.git
 cd PJ
-
-# 2) Create and activate virtual environment
-python -m venv .venv
-source .venv/bin/activate   # macOS/Linux
-# .venv\Scripts\activate    # Windows (PowerShell)
-
-# 3) Install Python dependencies
-pip install -r requirements.txt
+python3.11 -m venv venv
+source venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
----
-
-## Configuration
-
-Start by reviewing and customizing:
-
-- `config.json`
-- `tool_policy.json`
-- `mcp_servers.json`
-- `pj_instructions.txt`
-- `wrangler.toml.example` (copy to `wrangler.toml` when needed)
-
-If your environment requires API keys/secrets (LLM, STT/TTS, MCP tools, cloud deploy), set them as environment variables or in your secure runtime config layer (do not commit secrets).
-
----
-
-## Running
-
-Because this repo contains multiple runtime surfaces, common starting points are:
+Create `~/.env` for the launcher, or export variables in the current shell when
+using `python pj.py` directly:
 
 ```bash
-# Main runtime / orchestrator
-python pj.py
-
-# Realtime server
-python realtime_server.py
+cat >> ~/.env <<'EOF'
+OPENAI_API_KEY=your-openai-api-key
+EOF
+chmod 600 ~/.env
 ```
 
-If your setup uses the backend worker + client:
-- backend: `pj_realtime_backend_worker.js`
-- browser client: `webrtc_client.html`
+Do not commit secrets. Both `.env` and runtime files (`*.sqlite3`, `state.json`,
+`documents/exports/`) are ignored. Review these tracked settings before use:
 
-For MCP/Hugging Face integration:
+- `config.json`: model, instructions, vector stores, prompt refinement, and
+  built-in OpenAI tool toggles.
+- `mcp_servers.json`: MCP URLs, enablement, and approval policy. Header values
+  can reference `$NAME` or `${NAME}` environment variables. The checked-in
+  `******` values are placeholders, not credentials.
+- `tool_policy.json`: local tools that require explicit approval.
+- `pj_instructions.txt`: assistant instructions.
+
+The checked-in `config.json` contains project-specific model and vector-store
+IDs; access to those resources is not provisioned by this repository.
+
+## Primary user flows
+
+Run commands from the repository root with the virtual environment active.
+
+### Terminal chat
+
+```bash
+# Interactive, continuing the latest local chat
+./pj
+
+# One request, then exit
+./pj "Summarize my open tasks"
+
+# Validate a structured response against the checked-in schema
+./pj --json schemas/task_triage.json "Triage these tasks: ..."
+```
+
+Interactive palette keys are `/` for commands, `#` for local tools, `%` for
+features/connectors, and `$` for generated skills. `/new`, `/chats`,
+`/resume`, `/history`, and `/search` operate on durable SQLite history.
+Feature toggles write to `config.json` or `mcp_servers.json`.
+
+To avoid the launcher, activate the environment, export `OPENAI_API_KEY`, and
+replace `./pj` with `python pj.py`.
+
+### Image operations
+
+```bash
+./pj image status
+./pj image controlled 1200 630 --title "Launch"
+./pj image get ASSET_ID
+./pj image feedback ASSET_ID 5 --comments "Approved"
+./pj image delete ASSET_ID
+```
+
+Controlled SVG creation is local. Provider generation is fail-closed unless all
+of the following are set:
+
+```bash
+export PJ_IMAGE_GENERATION_ENABLED=1
+export PJ_IMAGE_BUDGET_USD=1.00
+export PJ_IMAGE_ESTIMATED_CALL_USD=0.10
+./pj image generate "A restrained product illustration" \
+  --idempotency-key launch-illustration-v1
+```
+
+### Terminal voice
+
+```bash
+./pj voice
+./pj voice --meter
+./pj voice --no-gate
+```
+
+`--meter` reports suggested noise and barge-in thresholds. `--no-gate` disables
+local echo suppression and is intended for headphones. Optional controls
+include `PJ_REALTIME_MODEL`, `PJ_REALTIME_VOICE`, `PJ_VOICE_LANG`,
+`PJ_NOISE_FLOOR_RMS`, `PJ_BARGE_IN_RMS`, `PJ_BARGE_IN_HOLD_MS`, and
+`PJ_VAD_EAGERNESS`.
+
+### Local browser and private runtime
+
+```bash
+export OPENAI_API_KEY=...
+python realtime_server.py
+# Open http://127.0.0.1:3001/
+```
+
+The development server binds to `127.0.0.1:3001` by default. Opening `/` creates
+a same-origin loopback owner session, allowing the browser to use protected
+tool and Responses routes without exposing a bearer token to JavaScript.
+
+For a non-development process, Gunicorn is included in `requirements.txt`:
+
+```bash
+export OPENAI_API_KEY=...
+export PJ_TOOL_BRIDGE_TOKEN='a-long-random-secret'
+gunicorn --bind 127.0.0.1:3001 realtime_server:app
+```
+
+Keep this service private or place it behind TLS and access controls. Set
+`PJ_REALTIME_BIND_HOST` only for the Flask development command; Gunicorn's
+`--bind` controls its listener. The built-in HTML client is deliberately
+loopback-only when `realtime_server.py` starts.
+
+### Hugging Face MCP server
+
 ```bash
 python huggingface_mcp_server.py
 ```
 
----
+It speaks MCP over stdio. Public metadata search needs no token; inference and
+authorized repositories require `HF_TOKEN`.
 
-## Testing
+### Knowledge ingestion
+
+These are operator workflows, not automatic startup tasks:
 
 ```bash
-# Run tests
-pytest -q
+python scripts/vector_store_ingest.py SOURCE.txt \
+  --corpus-type other --version 1.0.0
+python scripts/vector_store_sync.py --dry-run
+python scripts/vector_store_sync.py
 ```
 
-CI is configured in:
-- `.github/workflows/ci.yml`
+Ingestion needs `OPENAI_API_KEY` and a configured vector store. Governed n8n
+ingestion additionally requires an independent evaluation receipt; inspect each
+script's `--help` before changing a corpus.
 
----
+## Tests
 
-## Development notes
+CI installs `requirements.txt` on Python 3.11 and runs exactly:
 
-- Add new capability domains as dedicated `*ops.py` modules.
-- Keep orchestration concerns in `chiefops.py` / `responses_runtime.py`.
-- Keep policy and tool constraints in JSON policy/config files.
-- Place reusable automation in `scripts/`.
-- Place contracts/schemas in `schemas/` and keep tests updated in `tests/`.
+```bash
+python -m unittest discover tests -v
+node --test tests/test_worker_auth.mjs
+```
 
----
+The Python suite uses temporary databases and mocked provider calls. On macOS,
+one CodeOps sandbox test can run with `/usr/bin/sandbox-exec`; where that
+executable is absent the test explicitly skips. The Node suite imports the
+Worker directly and does not require a Cloudflare account.
 
-## Suggested next improvements
+## Deployment
 
-1. Add module-level docs for each `*ops.py` file.
-2. Document required environment variables in a dedicated “Configuration Reference”.
-3. Add a single canonical local-dev start command (Makefile or task runner).
-4. Add architecture diagrams for runtime flow (request → orchestration → tool/policy → response).
+### Cloudflare Worker
 
----
+`wrangler.toml.example` is the repository's only complete deployment manifest.
+It deploys API routes only; it does **not** deploy `webrtc_client.html` or
+`assets/`.
+
+1. Install and authenticate Wrangler:
+
+   ```bash
+   npm install --global wrangler
+   wrangler login
+   cp wrangler.toml.example wrangler.toml
+   ```
+
+2. Edit `wrangler.toml`:
+   - set the Worker name and route domain/zone for the existing Cloudflare zone;
+   - set `PJ_ALLOWED_ORIGINS`;
+   - set the Cloudflare Access team domain and application audience in
+     `CF_ACCESS_TEAM_DOMAIN` and `CF_ACCESS_AUD`;
+   - point `PJ_TOOL_BRIDGE_URL` and `PJ_TOOL_SCHEMAS_URL` at the private
+     `realtime_server.py` deployment. Optionally set
+     `PJ_RESPONSES_BRIDGE_URL` when it is not derivable from the tool URL.
+
+3. In Cloudflare Zero Trust, create an Access application covering every API
+   route in the manifest and an owner-only Allow policy. The Worker also checks
+   the Access assertion audience and owner email; Access configuration is not
+   created by Wrangler.
+
+4. Store secrets:
+
+   ```bash
+   wrangler secret put OPENAI_API_KEY
+   wrangler secret put PJ_OWNER_EMAILS
+   wrangler secret put PJ_TOOL_BRIDGE_TOKEN
+   ```
+
+   `PJ_TOOL_BRIDGE_TOKEN` must exactly match the private runtime's environment.
+   `PJ_OWNER_EMAILS` is a comma-separated allowlist.
+
+5. Validate and deploy:
+
+   ```bash
+   node --test tests/test_worker_auth.mjs
+   wrangler deploy
+   curl https://YOUR_DOMAIN/health
+   ```
+
+Only `GET /health` and CORS preflight are public. `/session`, `/token`,
+`/tool-schemas`, `/execute-tool`, and `/responses/*` require a valid Cloudflare
+Access identity. Full local tools and Full Power routes also require a reachable
+private runtime and matching bridge token; without it the Worker remains useful
+only for its direct Realtime path and reports degraded capability in `/health`.
+
+### Browser frontend
+
+The repository contains the static client (`webrtc_client.html` and `assets/`)
+but no Pages, static-host, container, or other frontend deployment manifest.
+The Worker routes intentionally exclude `/` and `/assets/*`. Serve those files
+with an existing static frontend deployment, or use the loopback Flask client;
+there is no repository-backed production frontend deployment command to run.
+
+## Known gaps and operational limits
+
+- Python 3.11 is the only version exercised in CI; no package metadata declares
+  a broader supported range.
+- The `./pj` convenience launcher is zsh-specific, always sources `~/.env`, and
+  hard-codes `venv/bin/python`. Use `python pj.py` on other platforms.
+- The Flask server uses the development server when run directly. No container,
+  system service, managed-host manifest, database migration tool, or production
+  private-runtime deployment recipe is included.
+- State is local: chat/tool data uses SQLite, response continuation uses
+  `state.json`, and exports are filesystem artifacts. The repository does not
+  provide shared storage or multi-instance coordination.
+- DOCX and RTF conversion invokes macOS `textutil`; PPTX is accepted only for a
+  governed presentation document.
+- The current OpenAI image adapter implements generation, but binary edit and
+  variation calls return explicit `*_adapter_unavailable` errors. Paid
+  generation defaults to disabled and a zero-dollar budget.
+- Realtime deliberately excludes approval-sensitive and long-running tools;
+  Full Power Voice delegates advanced work to the text Responses runtime.
+- The Worker cannot execute local tools by itself. Its bridge URLs and token
+  must target a separately operated private runtime.
+- SIP webhook handling exists at `POST /webhook`, but the Wrangler manifest
+  does not route or deploy that endpoint and the repository contains no SIP
+  provisioning artifact.
+- Several entries in the checked-in MCP configuration are enabled while their
+  authorization values remain placeholders; those integrations are not ready
+  until valid environment-backed headers are configured.
 
 ## License
 
-No license file was detected in the repository root.  
-If this project is intended for open-source use, add a `LICENSE` file.
+Apache License 2.0; see [LICENSE](LICENSE).
