@@ -11,6 +11,7 @@ import realtime_config
 import realtime_server
 import responses_runtime
 import skills
+import voice
 
 
 def obj(**values):
@@ -163,6 +164,123 @@ class TestResponsesRuntime(unittest.TestCase):
         )
         self.assertEqual(
             realtime_server._function_tool_schemas(), session["tools"]
+        )
+
+    def test_document_tool_emits_artifact_before_public_result(self):
+        function_response = obj(
+            id="resp_document",
+            output_text="",
+            output=[obj(
+                type="function_call",
+                name="draft_document",
+                call_id="call_document",
+                arguments=json.dumps({
+                    "template": "meeting_memo",
+                    "title": "Download",
+                    "sections_json": "{}",
+                }),
+            )],
+        )
+        client = FakeClient([
+            [obj(type="response.completed", response=function_response)],
+            final_stream("Document ready.", response_id="resp_done"),
+        ])
+        artifact = {
+            "artifact_id": "ART-" + ("a" * 32),
+            "doc_id": "DOC-test",
+            "version": 1,
+            "format": "md",
+            "filename": "document.md",
+            "mime_type": "text/markdown; charset=utf-8",
+            "byte_size": 12,
+            "sha256": "b" * 64,
+            "status": "ready",
+            "audience_ready": False,
+            "download_url": "/responses/artifacts/ART-" + ("a" * 32),
+        }
+        orchestrator = responses_runtime.ResponsesOrchestrator(
+            client,
+            self.cfg,
+            dispatcher=lambda _name, _arguments: {
+                "status": "draft",
+                "path": "/private/document.md",
+                "artifact": artifact,
+            },
+        )
+        with patch.object(
+            responses_runtime,
+            "_verified_artifact_from_result",
+            return_value=artifact,
+        ):
+            events = list(orchestrator.stream_turn("Create a document"))
+
+        event_types = [event["type"] for event in events]
+        self.assertLess(
+            event_types.index("artifact.ready"),
+            event_types.index("tool.result"),
+        )
+        tool_result = next(
+            event for event in events if event["type"] == "tool.result"
+        )
+        self.assertNotIn("path", tool_result["result"])
+        continuation_output = json.loads(
+            client.responses.calls[1]["input"][0]["output"]
+        )
+        self.assertNotIn("path", continuation_output)
+        self.assertEqual(events[-1]["artifacts"], [artifact])
+
+    def test_path_redaction_preserves_repository_relative_paths(self):
+        result = responses_runtime.redact_server_paths({
+            "matches": [
+                {"path": "src/example.py", "line": 3},
+                {"path": "/private/project/secret.py", "line": 4},
+            ],
+            "output_path": "reports/result.json",
+            "source_path": r"C:\private\source.py",
+        })
+        self.assertEqual(result["matches"][0]["path"], "src/example.py")
+        self.assertNotIn("path", result["matches"][1])
+        self.assertEqual(result["output_path"], "reports/result.json")
+        self.assertNotIn("source_path", result)
+        embedded = responses_runtime.redact_server_paths({
+            "artifact_error": (
+                "copy failed: /Users/private/document.md; "
+                "see https://example.test/docs/path"
+            ),
+        })
+        self.assertNotIn("/Users/private/document.md", embedded["artifact_error"])
+        self.assertIn("[server path redacted]", embedded["artifact_error"])
+        self.assertIn(
+            "https://example.test/docs/path", embedded["artifact_error"]
+        )
+        download_url = "/responses/artifacts/ART-" + ("c" * 32)
+        self.assertEqual(
+            responses_runtime.redact_server_paths(download_url),
+            download_url,
+        )
+
+    def test_terminal_voice_sanitizes_tool_results(self):
+        with (
+            patch.object(
+                voice,
+                "dispatch_realtime_function",
+                return_value={
+                    "path": "/Users/private/document.md",
+                    "artifact": {
+                        "download_url":
+                            "/responses/artifacts/ART-" + ("d" * 32),
+                    },
+                },
+            ),
+            patch("builtins.print"),
+        ):
+            output = json.loads(
+                voice._run_tool_call("draft_document", "{}")
+            )
+        self.assertNotIn("path", output)
+        self.assertEqual(
+            output["artifact"]["download_url"],
+            "/responses/artifacts/ART-" + ("d" * 32),
         )
 
     def test_recursive_local_tool_turn_streams_typed_events_and_continuity(self):

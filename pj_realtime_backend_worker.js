@@ -72,7 +72,8 @@ function corsHeaders(corsOrigin) {
     "access-control-allow-methods": "GET,POST,OPTIONS",
     "access-control-allow-headers":
       "content-type,authorization,x-pj-client-request-id,x-pj-contract-version",
-    "access-control-expose-headers": "x-request-id,x-pj-contract-version",
+    "access-control-expose-headers":
+      "x-request-id,x-pj-contract-version,content-disposition,etag",
   };
 }
 
@@ -91,6 +92,31 @@ function responseHeaders(corsOrigin, requestId, contentType = "application/json"
     vary: "Origin",
     ...corsHeaders(corsOrigin),
   };
+}
+
+
+function safeAttachmentDisposition(value) {
+  if (typeof value !== "string" || !/^attachment(?:;|$)/i.test(value)) {
+    return null;
+  }
+  const encoded = value.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
+  const quoted = value.match(/filename\s*=\s*"([^"]*)"/i);
+  const bare = value.match(/filename\s*=\s*([^;]+)/i);
+  let candidate = encoded?.[1] || quoted?.[1] || bare?.[1] || "";
+  try {
+    candidate = decodeURIComponent(candidate.trim());
+  } catch {
+    return null;
+  }
+  const basename = candidate.replaceAll("\\", "/").split("/").pop()?.trim() || "";
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9._ -]{0,159}$/.test(basename) ||
+    basename === "." ||
+    basename === ".."
+  ) {
+    return null;
+  }
+  return `attachment; filename="${basename.replaceAll('"', "")}"`;
 }
 
 function trimDetail(detail) {
@@ -508,6 +534,12 @@ function isResponsesRoute(method, pathname) {
     if (method === "GET" && pathname === "/responses/sessions/search") {
       return true;
     }
+    if (
+      method === "GET" &&
+      /^\/responses\/artifacts\/ART-[a-f0-9]{32}$/.test(pathname)
+    ) {
+      return true;
+    }
     return method === "POST" && (
       /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/resume$/.test(pathname) ||
       /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/turns$/.test(pathname) ||
@@ -580,9 +612,13 @@ async function handleResponsesProxy(
     }
 
     const isStreamingTurn = /\/turns$/.test(inboundUrl.pathname);
+    const isArtifactDownload =
+      /^\/responses\/artifacts\/ART-[a-f0-9]{32}$/.test(inboundUrl.pathname);
     const headers = {
       ...bridgeHeaders(env, requestId),
-      accept: isStreamingTurn ? "text/event-stream" : "application/json",
+      accept: isStreamingTurn
+        ? "text/event-stream"
+        : (isArtifactDownload ? "application/octet-stream" : "application/json"),
     };
     let body;
     if (request.method === "POST") {
@@ -610,17 +646,34 @@ async function handleResponsesProxy(
       const upstreamContentType =
         bridgeResponse.headers.get("content-type") ||
         (isStreamingTurn ? "text/event-stream" : "application/json");
-      const contentType = upstreamContentType.includes("text/event-stream")
+      const isEventStream = upstreamContentType.includes("text/event-stream");
+      const isJson = upstreamContentType.includes("application/json");
+      const contentType = isEventStream
         ? "text/event-stream"
-        : "application/json";
+        : (isArtifactDownload && !isJson
+          ? upstreamContentType.split(";")[0].trim()
+          : "application/json");
       const responseHeaderSet = responseHeaders(corsOrigin, requestId, contentType);
-      if (contentType === "text/event-stream") {
+      if (isEventStream) {
         responseHeaderSet["x-accel-buffering"] = "no";
+      }
+      if (isArtifactDownload && !isJson) {
+        const safeDisposition = safeAttachmentDisposition(
+          bridgeResponse.headers.get("content-disposition") || "",
+        );
+        const etag = bridgeResponse.headers.get("etag") || "";
+        if (safeDisposition) {
+          responseHeaderSet["content-disposition"] = safeDisposition;
+        }
+        if (/^"[A-Za-z0-9._-]{1,160}"$/.test(etag)) {
+          responseHeaderSet.etag = etag;
+        }
       }
       logEvent(requestId, "responses.bridge_complete", {
         path: inboundUrl.pathname,
         status: bridgeResponse.status,
-        streaming: contentType === "text/event-stream",
+        streaming: isEventStream,
+        artifact: isArtifactDownload && !isJson,
       });
       return new Response(bridgeResponse.body, {
         status: bridgeResponse.status,
@@ -1187,6 +1240,7 @@ export {
   isPublicRoute,
   isResponsesRoute,
   responseHeaders,
+  safeAttachmentDisposition,
   normalizeFunctionTools,
   toolBridgeTimeoutMs,
   validateAccessClaims,
