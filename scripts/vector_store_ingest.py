@@ -2,6 +2,7 @@
 """Upload an approved text source, cache it locally, and index it for PJ."""
 import argparse
 import hashlib
+import io
 import json
 import os
 import subprocess
@@ -95,17 +96,22 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Upload and cache a UTF-8 source so PJ can automatically import "
-            "supported DocOps or CodeOps ITEM blocks."
+            "supported DocOps, CodeOps, coding, or governed n8n ITEM blocks."
         )
     )
     parser.add_argument("source", type=Path)
     parser.add_argument("--filename", default="")
     parser.add_argument(
         "--corpus-type",
-        choices=("codeops", "docops", "other"),
+        choices=("codeops", "docops", "n8n", "other"),
         default="other",
     )
     parser.add_argument("--version", default="")
+    parser.add_argument(
+        "--evaluation-receipt",
+        type=Path,
+        help="Required independent JSON evaluation receipt for an n8n corpus",
+    )
     parser.add_argument(
         "--keychain-service",
         default="pj-openai-api-key",
@@ -117,20 +123,57 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    source = args.source.expanduser().resolve(strict=True)
-    if not source.is_file() or source.is_symlink():
+    source_input = args.source.expanduser()
+    if source_input.is_symlink():
         raise ValueError("source must be a regular non-symlink file")
+    source = source_input.resolve(strict=True)
+    if not source.is_file():
+        raise ValueError("source must be a regular non-symlink file")
+    if source.stat().st_size > skillops.MAX_MAX_CHARS_PER_FILE:
+        raise ValueError(
+            f"source exceeds {skillops.MAX_MAX_CHARS_PER_FILE} bytes"
+        )
     content = source.read_bytes()
-    content.decode("utf-8")
     if len(content) > skillops.MAX_MAX_CHARS_PER_FILE:
         raise ValueError(
             f"source exceeds {skillops.MAX_MAX_CHARS_PER_FILE} bytes"
         )
+    source_text = content.decode("utf-8")
 
     filename = str(args.filename or source.name)
     if not filename or Path(filename).name != filename:
         raise ValueError("filename must be a basename")
     source_sha256 = hashlib.sha256(content).hexdigest()
+    corpus_type = args.corpus_type
+    version = str(args.version or "")
+    n8n_preflight = None
+    n8n_evaluation_receipt = None
+    if args.corpus_type == "n8n":
+        if args.evaluation_receipt is None:
+            raise ValueError(
+                "--evaluation-receipt is required for an n8n corpus"
+            )
+        n8n_evaluation_receipt = skillops.load_n8n_evaluation_receipt(
+            args.evaluation_receipt
+        )
+        n8n_preflight = skillops.preflight_n8n_corpus_text(
+            source_text,
+            n8n_evaluation_receipt,
+        )
+        if not n8n_preflight["ingestion_ready"]:
+            raise ValueError(
+                "n8n corpus failed local preflight before credential access: "
+                + "; ".join(n8n_preflight["errors"][:5])
+            )
+        corpus_type = skillops.N8N_CORPUS_TYPE
+        declared_version = str(n8n_preflight.get("corpus_version") or "")
+        if version and version != declared_version:
+            raise ValueError(
+                "--version does not match the n8n corpus_version "
+                f"({version!r} != {declared_version!r})"
+            )
+        version = declared_version
+
     api_key = _api_key(args.keychain_service)
     vector_store_id = skillops._require_vector_store_id()
     file_id = _cached_file_id(source_sha256, filename)
@@ -152,14 +195,14 @@ def main() -> int:
             metadata_response.raise_for_status()
 
     if not reused:
-        with source.open("rb") as handle:
-            response = requests.post(
-                "https://api.openai.com/v1/files",
-                headers={"Authorization": f"Bearer {api_key}"},
-                data={"purpose": "user_data"},
-                files={"file": (filename, handle, "text/markdown")},
-                timeout=180,
-            )
+        handle = io.BytesIO(content)
+        response = requests.post(
+            "https://api.openai.com/v1/files",
+            headers={"Authorization": f"Bearer {api_key}"},
+            data={"purpose": "user_data"},
+            files={"file": (filename, handle, "text/markdown")},
+            timeout=180,
+        )
         response.raise_for_status()
         file_id = response.json()["id"]
 
@@ -178,8 +221,8 @@ def main() -> int:
                 "file_id": file_id,
                 "attributes": {
                     "source_sha256": source_sha256,
-                    "corpus_type": args.corpus_type,
-                    "version": str(args.version or ""),
+                    "corpus_type": corpus_type,
+                    "version": version,
                 },
             },
             timeout=60,
@@ -199,6 +242,12 @@ def main() -> int:
         filename=filename,
         source_sha256=source_sha256,
     )
+    evaluation_cache = None
+    if n8n_evaluation_receipt is not None:
+        evaluation_cache = skillops.cache_n8n_evaluation_receipt(
+            source_sha256,
+            n8n_evaluation_receipt,
+        )
     print(json.dumps({
         "status": "indexed_and_cached",
         "file_id": file_id,
@@ -209,6 +258,10 @@ def main() -> int:
         "indexing_status": membership.get("status"),
         "cache_status": cached["status"],
         "reused": reused,
+        "corpus_type": corpus_type,
+        "corpus_version": version,
+        "preflight": n8n_preflight,
+        "evaluation_cache": evaluation_cache,
     }, indent=2, sort_keys=True))
     return 0
 

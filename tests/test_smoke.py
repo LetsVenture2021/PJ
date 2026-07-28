@@ -7,6 +7,7 @@ Run with:
 All module-level _DB_PATH globals are redirected to a temp database so
 tests never touch the real pj_data.sqlite3.
 """
+import hashlib
 import json
 import os
 import plistlib
@@ -25,6 +26,7 @@ _TMP_DB = Path(tempfile.mkstemp(suffix=".sqlite3")[1])
 
 import skills, skillops, docops, chiefops, chatlog, codeops  # noqa: E402
 import realtime_server  # noqa: E402
+from scripts import vector_store_ingest  # noqa: E402
 
 for _mod in (skills, skillops, docops, chiefops, chatlog, codeops):
     _mod._DB_PATH = _TMP_DB
@@ -848,6 +850,614 @@ required_sections:
                 ):
                     result = skillops.sync_vector_store()
         self.assertEqual(result["status"], "locked")
+
+
+class TestN8nCapabilityCorpus(unittest.TestCase):
+    def setUp(self):
+        self.original_skillops_db_path = skillops._DB_PATH
+        self.original_docops_db_path = docops._DB_PATH
+        self.original_codeops_db_path = codeops._DB_PATH
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.temp_db_path = Path(self.temp_dir.name) / "n8n.sqlite3"
+        skillops._DB_PATH = self.temp_db_path
+        docops._DB_PATH = self.temp_db_path
+        codeops._DB_PATH = self.temp_db_path
+        self.lock_path = Path(self.temp_dir.name) / "n8n-sync.lock"
+        self.cache_path = Path(self.temp_dir.name) / "vector-source-cache"
+
+    def tearDown(self):
+        skillops._DB_PATH = self.original_skillops_db_path
+        docops._DB_PATH = self.original_docops_db_path
+        codeops._DB_PATH = self.original_codeops_db_path
+        self.temp_dir.cleanup()
+
+    @staticmethod
+    def _corpus(*, count=40, top5_passed=9):
+        preamble = f"""\
+# n8n Capability Training Corpus
+corpus_type: n8n_capabilities
+corpus_version: 1.0.0
+record_count: {count}
+canonical_pages_total: 40
+canonical_pages_covered: 40
+inaccessible_sources_total: 0
+inaccessible_sources_dispositioned: 0
+retrieval_cases_total: 10
+retrieval_top5_passed: {top5_passed}
+security_warning_cases_total: 5
+security_warning_cases_passed: 5
+invented_node_parameters: 0
+credential_exposures: 0
+
+"""
+        items = []
+        for index in range(1, count + 1):
+            item_id = f"N8N-{index:03d}"
+            items.append(f"""\
+---ITEM_START: {item_id}---
+```yaml
+item_id: {item_id}
+canonical_title: n8n Capability {index}
+domain: n8n
+surface: Cloud and self-hosted
+version_scope: verify_current
+corpus_status: active
+requires_current_docs_check: true
+source_page_url: https://docs.n8n.io/capability-{index}
+source_record_id: SOURCE-{index:03d}
+content_sha256: {index:064x}
+taxonomy: [workflow, security]
+```
+**What this capability teaches:** Build governed n8n workflow {index}.
+#### Task types
+- Workflow design
+- Operational review
+#### Recommended operating workflow
+1. Inspect current documentation.
+2. Validate node parameters.
+3. Request approval before activation.
+#### Output contract
+Return a validated workflow specification with evidence and rollback guidance.
+#### Safety and governance controls
+- Never expose credentials.
+- Require approval before activation.
+#### Cloud and self-hosted differences
+- Verify feature availability for the selected deployment.
+#### Version constraints
+- Recheck node parameters against current documentation.
+#### Validation checklist
+- Validate every node and connection.
+#### Failure modes
+- Reject invented node parameters.
+#### Current authoritative sources
+- https://docs.n8n.io/capability-{index}
+#### Freshness requirements
+- Revalidate before deployment.
+#### Approval policy
+Human approval is required before workflow activation or credential changes.
+---ITEM_END: {item_id}---
+""")
+        return preamble + "\n".join(items)
+
+    @staticmethod
+    def _receipt(corpus_text):
+        parsed = skillops._parse_n8n_capability_corpus(corpus_text)
+        metrics = {
+            field: parsed["declared_evaluation"]["metrics"][field]
+            for field in skillops._N8N_EVALUATION_FIELDS
+        }
+        return {
+            "schema_version": "1",
+            "evaluation_id": (
+                "n8n-eval-"
+                + hashlib.sha256(corpus_text.encode("utf-8")).hexdigest()[:12]
+            ),
+            "evaluated_at": "2026-07-28T00:00:00+00:00",
+            "evaluator": "network-free-regression-suite",
+            "evidence_sha256": "e" * 64,
+            "corpus_sha256": hashlib.sha256(
+                corpus_text.encode("utf-8")
+            ).hexdigest(),
+            "corpus_version": parsed["corpus_version"],
+            "registry_sha256": skillops._n8n_records_sha256(
+                parsed["records"]
+            ),
+            "metrics": metrics,
+        }
+
+    @staticmethod
+    def _approval(corpus_text, receipt):
+        return {
+            "corpus_sha256": hashlib.sha256(
+                corpus_text.encode("utf-8")
+            ).hexdigest(),
+            "corpus_version": "1.0.0",
+            "evaluation_receipt_sha256": (
+                skillops._n8n_receipt_sha256(receipt)
+            ),
+        }
+
+    def _run_sync(self, corpus_text, **kwargs):
+        receipt = self._receipt(corpus_text)
+        approval = self._approval(corpus_text, receipt)
+        entry = {
+            "id": "vs-file-n8n",
+            "file_id": "file-n8n",
+            "created_at": 500,
+            "attributes": {
+                "corpus_type": skillops.N8N_CORPUS_TYPE,
+                "version": "1.0.0",
+            },
+        }
+        metadata = {
+            "id": "file-n8n",
+            "filename": "n8n-capability-corpus.md",
+            "bytes": len(corpus_text.encode("utf-8")),
+            "created_at": 500,
+            "purpose": "assistants_output",
+        }
+        with (
+            mock.patch.object(skillops, "_SYNC_LOCK_PATH", self.lock_path),
+            mock.patch.object(
+                skillops, "_VECTOR_SOURCE_CACHE_DIR", self.cache_path
+            ),
+            mock.patch.object(
+                skillops, "_require_vector_store_id", return_value="vs-n8n"
+            ),
+            mock.patch.object(
+                skillops, "_require_openai_api_key", return_value="test-key"
+            ),
+            mock.patch.object(
+                skillops, "_list_vector_store_files", return_value=[entry]
+            ),
+            mock.patch.object(
+                skillops,
+                "_list_openai_file_metadata",
+                return_value={"file-n8n": metadata},
+            ),
+            mock.patch.object(
+                skillops,
+                "_read_openai_file_content",
+                return_value=(corpus_text, False),
+            ),
+            mock.patch.object(
+                skillops,
+                "_load_n8n_evaluation_receipt_for_corpus",
+                return_value=receipt,
+            ),
+            mock.patch.object(
+                skillops,
+                "_load_n8n_release_approval",
+                return_value=approval,
+            ),
+        ):
+            return skillops.sync_vector_store(
+                include_provisional=False,
+                **kwargs,
+            )
+
+    def test_valid_corpus_uses_shared_registry_and_release_gates(self):
+        corpus = self._corpus()
+        first = self._run_sync(corpus)
+        self.assertEqual(first["status"], "completed")
+        self.assertEqual(first["capabilities_created"], 40)
+
+        n8n = skillops.list_n8n_capabilities(limit=100)
+        coding = skillops.list_coding_capabilities(limit=100)
+        self.assertEqual(n8n["count"], 40)
+        self.assertEqual(coding["count"], 0)
+        self.assertEqual(n8n["capabilities"][0]["item_id"], "N8N-001")
+
+        second = self._run_sync(corpus)
+        self.assertEqual(second["files_skipped_unchanged"], 1)
+        receipt = self._receipt(corpus)
+        with mock.patch.object(
+            skillops,
+            "_load_n8n_release_approval",
+            return_value=self._approval(corpus, receipt),
+        ):
+            status = skillops.get_n8n_corpus_status()
+        self.assertTrue(status["production_ready"])
+        self.assertEqual(status["census"]["by_status"], {"synchronized": 1})
+        self.assertEqual(status["census"]["pending_count"], 0)
+
+        sync_file = skillops.get_vector_sync_status(limit=1)["files"][0]
+        self.assertEqual(sync_file["last_attempt_status"], "skipped_unchanged")
+        self.assertEqual(sync_file["terminal_status"], "synchronized")
+
+    def test_unapproved_corpus_and_self_reported_metrics_cannot_release(self):
+        corpus = self._corpus()
+        receipt = self._receipt(corpus)
+        with mock.patch.object(
+            skillops,
+            "_load_n8n_release_approval",
+            return_value={
+                "corpus_sha256": "",
+                "corpus_version": "",
+                "evaluation_receipt_sha256": "",
+            },
+        ):
+            preflight = skillops.preflight_n8n_corpus_text(corpus, receipt)
+            imported = skillops.import_n8n_capability_corpus_text(
+                corpus,
+                source_file_id="file-unapproved",
+                evaluation_receipt=receipt,
+            )
+
+        self.assertTrue(preflight["evaluation"]["passed"])
+        self.assertFalse(preflight["evaluation"]["approved"])
+        self.assertFalse(preflight["ingestion_ready"])
+        self.assertEqual(imported["status"], "invalid")
+        self.assertEqual(imported["capabilities_created"], 0)
+
+    def test_structural_security_and_evaluation_failures_block_import(self):
+        valid = self._corpus()
+        invalid_corpora = {
+            "missing output contract": valid.replace(
+                "#### Output contract\n"
+                "Return a validated workflow specification with evidence and "
+                "rollback guidance.\n",
+                "",
+                1,
+            ),
+            "malformed source hash": valid.replace(f"{1:064x}", "NOT-A-HASH", 1),
+            "credential material": valid.replace(
+                "#### Approval policy",
+                "api_key: abcdefghijklmnopqrstuvwxyz123456\n"
+                "#### Approval policy",
+                1,
+            ),
+            "source URL query": valid.replace(
+                "https://docs.n8n.io/capability-1",
+                "https://docs.n8n.io/capability-1?token=redacted",
+                1,
+            ),
+            "low retrieval score": self._corpus(top5_passed=8),
+            "inconsistent evaluation metrics": valid.replace(
+                "canonical_pages_covered: 40",
+                "canonical_pages_covered: 41",
+                1,
+            ),
+        }
+        for label, corpus in invalid_corpora.items():
+            with self.subTest(label=label):
+                receipt = self._receipt(corpus)
+                with mock.patch.object(
+                    skillops,
+                    "_load_n8n_release_approval",
+                    return_value=self._approval(corpus, receipt),
+                ):
+                    preflight = skillops.preflight_n8n_corpus_text(
+                        corpus,
+                        receipt,
+                    )
+                    self.assertFalse(preflight["ingestion_ready"])
+                    result = skillops.import_n8n_capability_corpus_text(
+                        corpus,
+                        dry_run=False,
+                        source_file_id=f"file-{label}",
+                        evaluation_receipt=receipt,
+                    )
+                self.assertEqual(result["status"], "invalid")
+                self.assertEqual(result["capabilities_created"], 0)
+        self.assertEqual(
+            skillops.get_n8n_corpus_status(include_census=False)[
+                "capability_count"
+            ],
+            0,
+        )
+
+    def test_authoritative_import_retires_records_missing_from_new_version(self):
+        original = self._corpus()
+        original_receipt = self._receipt(original)
+        with mock.patch.object(
+            skillops,
+            "_load_n8n_release_approval",
+            return_value=self._approval(original, original_receipt),
+        ):
+            imported = skillops.import_n8n_capability_corpus_text(
+                original,
+                dry_run=False,
+                source_file_id="file-n8n-v1",
+                evaluation_receipt=original_receipt,
+            )
+        self.assertEqual(imported["capabilities_created"], 40)
+
+        revised = original.replace("N8N-040", "N8N-140")
+        revised_receipt = self._receipt(revised)
+        with mock.patch.object(
+            skillops,
+            "_load_n8n_release_approval",
+            return_value=self._approval(revised, revised_receipt),
+        ):
+            updated = skillops.import_n8n_capability_corpus_text(
+                revised,
+                dry_run=False,
+                source_file_id="file-n8n-v2",
+                evaluation_receipt=revised_receipt,
+            )
+        self.assertEqual(updated["capabilities_created"], 1)
+        self.assertEqual(updated["capabilities_retired"], 1)
+        capabilities = skillops.list_n8n_capabilities(limit=100)
+        ids = {item["item_id"] for item in capabilities["capabilities"]}
+        self.assertEqual(capabilities["count"], 40)
+        self.assertNotIn("N8N-040", ids)
+        self.assertIn("N8N-140", ids)
+
+    def test_changed_records_cannot_be_skipped_as_successful_import(self):
+        original = self._corpus()
+        original_receipt = self._receipt(original)
+        with mock.patch.object(
+            skillops,
+            "_load_n8n_release_approval",
+            return_value=self._approval(original, original_receipt),
+        ):
+            first = skillops.import_n8n_capability_corpus_text(
+                original,
+                source_file_id="file-original",
+                evaluation_receipt=original_receipt,
+            )
+        self.assertEqual(first["status"], "imported")
+
+        revised = original.replace(
+            "canonical_title: n8n Capability 1",
+            "canonical_title: Changed n8n Capability 1",
+            1,
+        )
+        revised_receipt = self._receipt(revised)
+        with mock.patch.object(
+            skillops,
+            "_load_n8n_release_approval",
+            return_value=self._approval(revised, revised_receipt),
+        ):
+            skipped = skillops.import_n8n_capability_corpus_text(
+                revised,
+                overwrite_existing=False,
+                source_file_id="file-revised",
+                evaluation_receipt=revised_receipt,
+            )
+        self.assertEqual(skipped["status"], "invalid")
+        self.assertEqual(skipped["capabilities_updated"], 0)
+        current = skillops.list_n8n_capabilities(
+            query="N8N-001",
+            limit=1,
+        )["capabilities"][0]
+        self.assertEqual(current["canonical_title"], "n8n Capability 1")
+
+    def test_empty_full_sync_invalidates_stale_census(self):
+        corpus = self._corpus()
+        self._run_sync(corpus)
+        with (
+            mock.patch.object(skillops, "_SYNC_LOCK_PATH", self.lock_path),
+            mock.patch.object(
+                skillops, "_require_vector_store_id", return_value="vs-n8n"
+            ),
+            mock.patch.object(
+                skillops, "_require_openai_api_key", return_value="test-key"
+            ),
+            mock.patch.object(
+                skillops, "_list_vector_store_files", return_value=[]
+            ),
+            mock.patch.object(
+                skillops, "_list_openai_file_metadata", return_value={}
+            ),
+        ):
+            empty = skillops.sync_vector_store()
+        self.assertEqual(empty["status"], "completed")
+        receipt = self._receipt(corpus)
+        with mock.patch.object(
+            skillops,
+            "_load_n8n_release_approval",
+            return_value=self._approval(corpus, receipt),
+        ):
+            status = skillops.get_n8n_corpus_status()
+        self.assertFalse(status["production_ready"])
+        self.assertEqual(status["census"]["by_status"], {"absent": 1})
+        self.assertIn(
+            "evaluated_source_synchronized",
+            status["blocked_reasons"],
+        )
+
+    def test_limited_sync_cannot_establish_production_readiness(self):
+        corpus = self._corpus()
+        limited = self._run_sync(corpus, max_files=1)
+        self.assertEqual(limited["status"], "completed")
+        receipt = self._receipt(corpus)
+        with mock.patch.object(
+            skillops,
+            "_load_n8n_release_approval",
+            return_value=self._approval(corpus, receipt),
+        ):
+            status = skillops.get_n8n_corpus_status()
+
+        self.assertFalse(status["production_ready"])
+        self.assertEqual(status["latest_sync"]["status"], "no_recorded_sync")
+        self.assertIn("synchronization_healthy", status["blocked_reasons"])
+
+    def test_lock_contention_does_not_supersede_healthy_full_sync(self):
+        corpus = self._corpus()
+        self._run_sync(corpus)
+        with mock.patch.object(
+            skillops, "_SYNC_LOCK_PATH", self.lock_path
+        ):
+            with skillops._vector_sync_lock() as acquired:
+                self.assertTrue(acquired)
+                with mock.patch.object(
+                    skillops,
+                    "_require_vector_store_id",
+                    return_value="vs-n8n",
+                ):
+                    locked = skillops.sync_vector_store()
+        self.assertEqual(locked["status"], "locked")
+        receipt = self._receipt(corpus)
+        with mock.patch.object(
+            skillops,
+            "_load_n8n_release_approval",
+            return_value=self._approval(corpus, receipt),
+        ):
+            status = skillops.get_n8n_corpus_status()
+        self.assertTrue(status["production_ready"])
+        self.assertEqual(status["latest_sync"]["status"], "completed")
+
+    def test_invalid_sync_is_terminal_and_dry_run_is_mutation_free(self):
+        invalid = self._corpus(top5_passed=8)
+        dry_run = self._run_sync(invalid, dry_run=True)
+        self.assertEqual(dry_run["status"], "partial_failed")
+        self.assertEqual(
+            skillops.get_n8n_corpus_status()["census"]["count"],
+            0,
+        )
+
+        synchronized = self._run_sync(invalid)
+        self.assertEqual(synchronized["status"], "partial_failed")
+        status = skillops.get_n8n_corpus_status()
+        self.assertEqual(status["capability_count"], 0)
+        self.assertEqual(status["census"]["by_status"], {"invalid": 1})
+        self.assertEqual(status["census"]["pending_count"], 0)
+
+    def test_plan_only_input_is_not_a_production_corpus(self):
+        plan = """\
+# n8n Capability Corpus Implementation Plan
+Create a 40-80 record governed corpus, then evaluate and synchronize it.
+"""
+        preflight = skillops.preflight_n8n_corpus_text(plan)
+        self.assertEqual(preflight["status"], "blocked")
+        self.assertFalse(preflight["ingestion_ready"])
+        self.assertEqual(preflight["records_valid"], 0)
+
+    def test_model_callable_learning_and_sync_require_approval(self):
+        for tool_name in ("learn_from_vector_store", "sync_vector_store"):
+            with self.subTest(tool_name=tool_name):
+                result = skills.dispatch(tool_name, {"dry_run": True})
+                self.assertIn("requires explicit approval", result["error"])
+
+    def test_capability_snapshot_reports_blocked_n8n_state(self):
+        snapshot = skills.get_pj_capability_snapshot()
+        self.assertEqual(snapshot["n8n_capabilities"]["count"], 0)
+        self.assertEqual(snapshot["n8n_capabilities"]["status"], "blocked")
+        self.assertFalse(
+            snapshot["n8n_capabilities"]["production_ready"]
+        )
+
+    def test_generated_skill_cannot_override_capability_snapshot(self):
+        errors = skillops._validate_code(
+            "get_pj_capability_snapshot",
+            "def run(**kwargs):\n    return {'forged': True}\n",
+        )
+        self.assertIn(
+            "'get_pj_capability_snapshot' is a reserved built-in skill name",
+            errors,
+        )
+
+    def test_ingestion_preflight_runs_before_credential_access(self):
+        source = Path(self.temp_dir.name) / "n8n-plan.md"
+        source.write_text("# n8n plan\nNo production records.\n")
+        receipt = Path(self.temp_dir.name) / "evaluation.json"
+        receipt.write_text("{}")
+        argv = [
+            "vector_store_ingest.py",
+            str(source),
+            "--corpus-type",
+            "n8n",
+            "--evaluation-receipt",
+            str(receipt),
+        ]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(vector_store_ingest, "_api_key") as api_key,
+        ):
+            with self.assertRaisesRegex(ValueError, "before credential access"):
+                vector_store_ingest.main()
+        api_key.assert_not_called()
+
+    def test_ingestion_uploads_preflighted_bytes_after_source_changes(self):
+        source = Path(self.temp_dir.name) / "n8n-corpus.md"
+        corpus = self._corpus()
+        original_bytes = corpus.encode("utf-8")
+        source.write_bytes(original_bytes)
+        receipt_value = self._receipt(corpus)
+        receipt = Path(self.temp_dir.name) / "evaluation.json"
+        receipt.write_text(json.dumps(receipt_value))
+        argv = [
+            "vector_store_ingest.py",
+            str(source),
+            "--corpus-type",
+            "n8n",
+            "--evaluation-receipt",
+            str(receipt),
+        ]
+        uploaded = {}
+
+        def mutate_source_after_preflight(_service):
+            source.write_text("mutated after preflight")
+            return "test-api-key"
+
+        def post(url, **kwargs):
+            response = mock.Mock()
+            response.raise_for_status.return_value = None
+            if url == "https://api.openai.com/v1/files":
+                uploaded["bytes"] = kwargs["files"]["file"][1].read()
+                uploaded["authorization"] = kwargs["headers"]["Authorization"]
+                response.json.return_value = {"id": "file-uploaded"}
+            else:
+                response.json.return_value = {"status": "in_progress"}
+            return response
+
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(
+                skillops,
+                "_load_n8n_release_approval",
+                return_value=self._approval(corpus, receipt_value),
+            ),
+            mock.patch.object(
+                vector_store_ingest,
+                "_api_key",
+                side_effect=mutate_source_after_preflight,
+            ),
+            mock.patch.object(
+                skillops,
+                "_require_vector_store_id",
+                return_value="vs-n8n",
+            ),
+            mock.patch.object(
+                vector_store_ingest,
+                "_cached_file_id",
+                return_value="",
+            ),
+            mock.patch.object(
+                vector_store_ingest,
+                "_membership",
+                return_value=(404, {}),
+            ),
+            mock.patch.object(
+                vector_store_ingest,
+                "_wait_until_indexed",
+                return_value={"status": "completed"},
+            ),
+            mock.patch.object(
+                vector_store_ingest.requests,
+                "post",
+                side_effect=post,
+            ),
+            mock.patch.object(
+                skillops,
+                "cache_vector_source",
+                return_value={"status": "cached"},
+            ),
+            mock.patch.object(
+                skillops,
+                "cache_n8n_evaluation_receipt",
+                return_value={"status": "cached"},
+            ),
+            mock.patch("builtins.print"),
+        ):
+            result = vector_store_ingest.main()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(source.read_text(), "mutated after preflight")
+        self.assertEqual(uploaded["bytes"], original_bytes)
+        self.assertEqual(uploaded["authorization"], "Bearer test-api-key")
 
 
 class TestCodingCapabilityCorpus(unittest.TestCase):

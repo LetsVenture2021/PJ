@@ -36,6 +36,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -54,13 +55,24 @@ _VECTOR_SOURCE_CACHE_DIR = Path(
     or Path.home() / "Library" / "Application Support" / "PJ"
     / "vector-source-cache"
 )
+_N8N_EVALUATION_RECEIPT_DIR = Path(
+    os.getenv("PJ_N8N_EVALUATION_RECEIPT_DIR")
+    or Path.home() / "Library" / "Application Support" / "PJ"
+    / "n8n-evaluation-receipts"
+)
 
 DEFAULT_MAX_CHARS_PER_FILE = 5_000_000
 MAX_MAX_CHARS_PER_FILE = 25_000_000
 MAX_SYNC_REPORT_DETAILS = 200
-SYNC_IMPORTER_REVISION = "coding-capability-registry-v1"
+SYNC_IMPORTER_REVISION = "domain-capability-registry-n8n-v2"
 DEFAULT_REQUEST_RETRIES = 4
 DEFAULT_RETRY_BACKOFF_SECONDS = 0.5
+N8N_CORPUS_TYPE = "n8n_capabilities"
+N8N_MIN_CAPABILITIES = 40
+N8N_MAX_CAPABILITIES = 80
+N8N_MIN_INVENTORY_COVERAGE = 0.95
+N8N_MIN_TOP5_RETRIEVAL = 0.90
+N8N_MAX_EVALUATION_RECEIPT_BYTES = 128_000
 DOWNLOADABLE_FILE_PURPOSES = {
     "assistants_output", "batch_output", "fine-tune-results"
 }
@@ -72,6 +84,8 @@ RESERVED_NAMES = {
     "observe_pattern", "list_observations", "create_skill", "activate_skill",
     "review_skills", "deprecate_skill", "learn_from_vector_store",
     "sync_vector_store", "get_vector_sync_status", "list_coding_capabilities",
+    "list_n8n_capabilities", "get_n8n_corpus_status",
+    "get_pj_capability_snapshot",
     "list_doc_templates", "create_doc_template", "draft_document",
     "revise_document", "finalize_document", "export_document",
     "list_documents", "get_document",
@@ -211,8 +225,52 @@ def _db():
             metadata_json TEXT DEFAULT '{}',
             source_file_id TEXT DEFAULT '',
             source_run_id TEXT DEFAULT '',
+            active INTEGER DEFAULT 1,
+            retired_at TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS skillops_n8n_source_census (
+            source_file_id TEXT PRIMARY KEY,
+            vector_store_id TEXT DEFAULT '',
+            vector_store_file_id TEXT DEFAULT '',
+            filename TEXT DEFAULT '',
+            canonical_url TEXT DEFAULT '',
+            classification TEXT NOT NULL DEFAULT 'n8n_source',
+            disposition_status TEXT NOT NULL DEFAULT 'pending',
+            disposition_detail TEXT DEFAULT '',
+            terminal INTEGER NOT NULL DEFAULT 0,
+            content_sha256 TEXT DEFAULT '',
+            content_chars INTEGER DEFAULT 0,
+            source_version TEXT DEFAULT '',
+            last_seen_run_id TEXT DEFAULT '',
+            metadata_json TEXT DEFAULT '{}',
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            terminal_at TEXT
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS skillops_n8n_evaluations (
+            evaluation_id TEXT PRIMARY KEY,
+            corpus_version TEXT DEFAULT '',
+            source_file_id TEXT DEFAULT '',
+            corpus_sha256 TEXT DEFAULT '',
+            registry_sha256 TEXT DEFAULT '',
+            receipt_sha256 TEXT DEFAULT '',
+            evidence_source TEXT DEFAULT '',
+            capability_count INTEGER NOT NULL DEFAULT 0,
+            canonical_pages_total INTEGER NOT NULL DEFAULT 0,
+            canonical_pages_covered INTEGER NOT NULL DEFAULT 0,
+            inaccessible_sources_total INTEGER NOT NULL DEFAULT 0,
+            inaccessible_sources_dispositioned INTEGER NOT NULL DEFAULT 0,
+            retrieval_cases_total INTEGER NOT NULL DEFAULT 0,
+            retrieval_top5_passed INTEGER NOT NULL DEFAULT 0,
+            security_warning_cases_total INTEGER NOT NULL DEFAULT 0,
+            security_warning_cases_passed INTEGER NOT NULL DEFAULT 0,
+            invented_node_parameters INTEGER NOT NULL DEFAULT 0,
+            credential_exposures INTEGER NOT NULL DEFAULT 0,
+            gate_passed INTEGER NOT NULL DEFAULT 0,
+            details_json TEXT DEFAULT '{}',
+            evaluated_at TEXT NOT NULL
         )""")
         conn.execute("""CREATE TABLE IF NOT EXISTS skillops_corpus_import_runs (
             run_id TEXT PRIMARY KEY,
@@ -278,11 +336,70 @@ def _db():
                 "PRAGMA table_info(skillops_vector_sync_files)"
             ).fetchall()
         }
-        if "sync_policy_hash" not in existing_sync_columns:
-            conn.execute(
-                "ALTER TABLE skillops_vector_sync_files "
-                "ADD COLUMN sync_policy_hash TEXT"
-            )
+        for column, definition in {
+            "sync_policy_hash": "TEXT",
+            "terminal_status": "TEXT",
+            "terminal_detail": "TEXT",
+            "terminal_at": "TEXT",
+        }.items():
+            if column not in existing_sync_columns:
+                conn.execute(
+                    f"ALTER TABLE skillops_vector_sync_files "
+                    f"ADD COLUMN {column} {definition}"
+                )
+        capability_columns = {
+            row[1] for row in conn.execute(
+                "PRAGMA table_info(skillops_coding_capabilities)"
+            ).fetchall()
+        }
+        for column, definition in {
+            "corpus_type": "TEXT DEFAULT 'ai_coding_capabilities'",
+            "taxonomy_json": "TEXT DEFAULT '[]'",
+            "task_types_json": "TEXT DEFAULT '[]'",
+            "output_contract": "TEXT DEFAULT ''",
+            "cloud_self_hosted_json": "TEXT DEFAULT '[]'",
+            "version_constraints_json": "TEXT DEFAULT '[]'",
+            "validation_json": "TEXT DEFAULT '[]'",
+            "failure_modes_json": "TEXT DEFAULT '[]'",
+            "freshness_json": "TEXT DEFAULT '[]'",
+            "approval_policy": "TEXT DEFAULT ''",
+            "active": "INTEGER DEFAULT 1",
+            "retired_at": "TEXT",
+        }.items():
+            if column not in capability_columns:
+                conn.execute(
+                    f"ALTER TABLE skillops_coding_capabilities "
+                    f"ADD COLUMN {column} {definition}"
+                )
+        conn.execute(
+            "UPDATE skillops_coding_capabilities "
+            "SET corpus_type='ai_coding_capabilities' "
+            "WHERE corpus_type IS NULL OR corpus_type=''"
+        )
+        conn.execute(
+            "UPDATE skillops_coding_capabilities SET active=1 "
+            "WHERE active IS NULL"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_skillops_capabilities_corpus "
+            "ON skillops_coding_capabilities(corpus_type, canonical_title)"
+        )
+        evaluation_columns = {
+            row[1] for row in conn.execute(
+                "PRAGMA table_info(skillops_n8n_evaluations)"
+            ).fetchall()
+        }
+        for column, definition in {
+            "corpus_sha256": "TEXT DEFAULT ''",
+            "registry_sha256": "TEXT DEFAULT ''",
+            "receipt_sha256": "TEXT DEFAULT ''",
+            "evidence_source": "TEXT DEFAULT ''",
+        }.items():
+            if column not in evaluation_columns:
+                conn.execute(
+                    f"ALTER TABLE skillops_n8n_evaluations "
+                    f"ADD COLUMN {column} {definition}"
+                )
         yield conn
         conn.commit()
     finally:
@@ -338,8 +455,12 @@ def _load_runtime_config() -> dict:
 
 def _require_vector_store_id() -> str:
     cfg = _load_runtime_config()
+    configured = cfg.get("vector_store_ids")
+    if isinstance(configured, list) and configured:
+        configured = configured[0]
     vector_store_id = str(
-        cfg.get("vector_store_id") or os.getenv("PJ_VECTOR_STORE_ID") or ""
+        configured or cfg.get("vector_store_id")
+        or os.getenv("PJ_VECTOR_STORE_ID") or ""
     ).strip()
     if not vector_store_id:
         raise ValueError(
@@ -951,6 +1072,15 @@ def _looks_like_coding_capability_corpus(text: str) -> bool:
     candidate = text or ""
     first_marker = re.search(r"^---ITEM_START", candidate, flags=re.M | re.I)
     preamble = candidate[:first_marker.start()] if first_marker else candidate
+    if (
+        re.search(
+            rf"^\s*corpus_type\s*:\s*{re.escape(N8N_CORPUS_TYPE)}\s*$",
+            preamble,
+            flags=re.M | re.I,
+        )
+        or re.search(r"^\s*#\s+.*\bn8n\b.*\bcorpus\b", preamble, flags=re.M | re.I)
+    ):
+        return False
     first_item = re.search(
         r"^---ITEM_START(?:[^\r\n]*)\r?\n"
         r"(?P<body>.*?)(?=^---ITEM_(?:END|START)|\Z)",
@@ -1103,7 +1233,8 @@ def import_coding_capability_corpus_text(
                     continue
                 existing = conn.execute(
                     "SELECT record_sha256, version "
-                    "FROM skillops_coding_capabilities WHERE item_id=?",
+                    "FROM skillops_coding_capabilities "
+                    "WHERE item_id=? AND corpus_type='ai_coding_capabilities'",
                     (record["item_id"],),
                 ).fetchone()
                 if existing and existing[0] == record["record_sha256"]:
@@ -1146,6 +1277,7 @@ def import_coding_capability_corpus_text(
                     if existing:
                         conn.execute(
                             "UPDATE skillops_coding_capabilities SET "
+                            "corpus_type='ai_coding_capabilities', "
                             "canonical_title=?, tool_family=?, surface=?, "
                             "version_scope=?, corpus_status=?, "
                             "requires_current_docs_check=?, source_page_url=?, "
@@ -1164,7 +1296,7 @@ def import_coding_capability_corpus_text(
                     else:
                         conn.execute(
                             "INSERT INTO skillops_coding_capabilities "
-                            "(canonical_title, tool_family, surface, "
+                            "(corpus_type, canonical_title, tool_family, surface, "
                             "version_scope, corpus_status, "
                             "requires_current_docs_check, source_page_url, "
                             "source_record_id, source_content_sha256, "
@@ -1173,7 +1305,8 @@ def import_coding_capability_corpus_text(
                             "safety_controls_json, authoritative_sources_json, "
                             "metadata_json, source_file_id, source_run_id, "
                             "created_at, updated_at, item_id) "
-                            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            "VALUES ('ai_coding_capabilities',?,?,?,?,?,?,?,?,?,"
+                            "?,?,?,?,?,?,?,?,?,?,?,?)",
                             values + (now, record["item_id"]),
                         )
                         action = "created"
@@ -1237,6 +1370,1131 @@ def import_coding_capability_corpus_text(
     }
 
 
+def _preamble_scalar(preamble: str, name: str) -> str:
+    match = re.search(
+        rf"^\s*{re.escape(name)}\s*:\s*(.*?)\s*$",
+        preamble or "",
+        flags=re.M | re.I,
+    )
+    return match.group(1).strip().strip("\"'") if match else ""
+
+
+def _metadata_string_list(value) -> list[str]:
+    if isinstance(value, list):
+        raw = value
+    elif isinstance(value, str):
+        candidate = value.strip()
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            parsed = None
+        raw = parsed if isinstance(parsed, list) else candidate.split(",")
+    else:
+        raw = []
+    values = []
+    seen = set()
+    for item in raw:
+        text = str(item or "").strip().strip("\"'")
+        if text and text.casefold() not in seen:
+            values.append(text)
+            seen.add(text.casefold())
+    return values
+
+
+def _safe_https_source_url(value: str) -> str:
+    candidate = str(value or "").strip()
+    try:
+        parsed = urlsplit(candidate)
+        port = parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme.casefold() != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        return ""
+    host = parsed.hostname.casefold()
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = host if port is None else f"{host}:{port}"
+    return urlunsplit(("https", netloc, parsed.path or "/", "", ""))
+
+
+def _markdown_section_text(text: str, heading: str) -> str:
+    return _markdown_heading_section(text, heading).strip()
+
+
+_N8N_EVALUATION_FIELDS = (
+    "canonical_pages_total",
+    "canonical_pages_covered",
+    "inaccessible_sources_total",
+    "inaccessible_sources_dispositioned",
+    "retrieval_cases_total",
+    "retrieval_top5_passed",
+    "security_warning_cases_total",
+    "security_warning_cases_passed",
+    "invented_node_parameters",
+    "credential_exposures",
+)
+_N8N_SECRET_PATTERNS = (
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    re.compile(r"\b(?:sk|ghp|glpat|xox[baprs])[-_][A-Za-z0-9_-]{16,}\b"),
+    re.compile(
+        r"""(?ix)\b(?:api[_ -]?key|password|secret|access[_ -]?token)\s*
+        [:=]\s*["']?
+        (?!example\b|placeholder\b|redacted\b|replace[_ -]?me\b|your[_ -]?)
+        [A-Za-z0-9/+_.=-]{16,}"""
+    ),
+)
+
+
+def _n8n_records_sha256(records: list[dict]) -> str:
+    registry = [
+        {
+            "item_id": record["item_id"],
+            "record_sha256": record["record_sha256"],
+        }
+        for record in sorted(records, key=lambda item: item["item_id"])
+    ]
+    return hashlib.sha256(
+        json.dumps(
+            registry,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _n8n_receipt_sha256(receipt: dict) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            receipt,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _load_n8n_release_approval() -> dict:
+    config = _load_runtime_config()
+    configured = config.get("n8n_release_approval")
+    configured = configured if isinstance(configured, dict) else {}
+    return {
+        "corpus_sha256": str(
+            os.getenv("PJ_N8N_APPROVED_CORPUS_SHA256")
+            or configured.get("corpus_sha256")
+            or ""
+        ).strip().lower(),
+        "corpus_version": str(
+            os.getenv("PJ_N8N_APPROVED_CORPUS_VERSION")
+            or configured.get("corpus_version")
+            or ""
+        ).strip(),
+        "evaluation_receipt_sha256": str(
+            os.getenv("PJ_N8N_APPROVED_EVALUATION_SHA256")
+            or configured.get("evaluation_receipt_sha256")
+            or ""
+        ).strip().lower(),
+    }
+
+
+def load_n8n_evaluation_receipt(path: Path) -> dict:
+    source = Path(path).expanduser()
+    if source.is_symlink():
+        raise ValueError("n8n evaluation receipt must not be a symlink")
+    source = source.resolve(strict=True)
+    if not source.is_file():
+        raise ValueError("n8n evaluation receipt must be a regular file")
+    if source.stat().st_size > N8N_MAX_EVALUATION_RECEIPT_BYTES:
+        raise ValueError("n8n evaluation receipt exceeds the safety limit")
+    try:
+        receipt = json.loads(source.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("n8n evaluation receipt is not valid JSON") from exc
+    if not isinstance(receipt, dict):
+        raise ValueError("n8n evaluation receipt must be a JSON object")
+    return receipt
+
+
+def cache_n8n_evaluation_receipt(
+        corpus_sha256: str, receipt: dict) -> dict:
+    corpus_sha256 = str(corpus_sha256 or "").strip().lower()
+    if not re.fullmatch(r"[a-f0-9]{64}", corpus_sha256):
+        raise ValueError("invalid n8n corpus SHA-256")
+    if not isinstance(receipt, dict):
+        raise ValueError("n8n evaluation receipt must be an object")
+    payload = json.dumps(
+        receipt,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    if len(payload) > N8N_MAX_EVALUATION_RECEIPT_BYTES:
+        raise ValueError("n8n evaluation receipt exceeds the safety limit")
+    if (
+        _N8N_EVALUATION_RECEIPT_DIR.exists()
+        and _N8N_EVALUATION_RECEIPT_DIR.is_symlink()
+    ):
+        raise RuntimeError(
+            "n8n evaluation receipt directory must not be a symlink"
+        )
+    _N8N_EVALUATION_RECEIPT_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(_N8N_EVALUATION_RECEIPT_DIR, 0o700)
+    destination = _N8N_EVALUATION_RECEIPT_DIR / f"{corpus_sha256}.json"
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=_N8N_EVALUATION_RECEIPT_DIR,
+            prefix=f".{corpus_sha256}.",
+            delete=False,
+        ) as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temporary = Path(handle.name)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+    finally:
+        if temporary:
+            temporary.unlink(missing_ok=True)
+    return {
+        "status": "cached",
+        "corpus_sha256": corpus_sha256,
+        "receipt_sha256": _n8n_receipt_sha256(receipt),
+    }
+
+
+def _load_n8n_evaluation_receipt_for_corpus(
+        corpus_sha256: str) -> dict | None:
+    config = _load_runtime_config()
+    configured_path = str(
+        os.getenv("PJ_N8N_EVALUATION_RECEIPT_PATH")
+        or config.get("n8n_evaluation_receipt_path")
+        or ""
+    ).strip()
+    if configured_path:
+        receipt = load_n8n_evaluation_receipt(Path(configured_path))
+        if str(receipt.get("corpus_sha256") or "").strip().lower() == corpus_sha256:
+            return receipt
+    cached_path = _N8N_EVALUATION_RECEIPT_DIR / f"{corpus_sha256}.json"
+    if cached_path.exists():
+        return load_n8n_evaluation_receipt(cached_path)
+    return None
+
+
+def _n8n_evaluation_gates(
+        capability_count: int,
+        metrics: dict,
+        *,
+        source_integrity: bool) -> dict:
+    canonical_total = int(metrics.get("canonical_pages_total", 0))
+    canonical_covered = int(metrics.get("canonical_pages_covered", 0))
+    inaccessible_total = int(metrics.get("inaccessible_sources_total", 0))
+    inaccessible_dispositioned = int(
+        metrics.get("inaccessible_sources_dispositioned", 0)
+    )
+    retrieval_total = int(metrics.get("retrieval_cases_total", 0))
+    retrieval_passed = int(metrics.get("retrieval_top5_passed", 0))
+    security_total = int(metrics.get("security_warning_cases_total", 0))
+    security_passed = int(metrics.get("security_warning_cases_passed", 0))
+    inventory_coverage = (
+        canonical_covered / canonical_total if canonical_total else 0.0
+    )
+    inaccessible_coverage = (
+        inaccessible_dispositioned / inaccessible_total
+        if inaccessible_total else 1.0
+    )
+    retrieval_top5 = (
+        retrieval_passed / retrieval_total if retrieval_total else 0.0
+    )
+    security_warning_retrieval = (
+        security_passed / security_total if security_total else 0.0
+    )
+    gates = {
+        "metric_consistency": all((
+            0 <= canonical_covered <= canonical_total,
+            0 <= inaccessible_dispositioned <= inaccessible_total,
+            0 <= retrieval_passed <= retrieval_total,
+            0 <= security_passed <= security_total,
+        )),
+        "capability_count": (
+            N8N_MIN_CAPABILITIES
+            <= int(capability_count)
+            <= N8N_MAX_CAPABILITIES
+        ),
+        "inventory_coverage": (
+            canonical_total > 0
+            and inventory_coverage >= N8N_MIN_INVENTORY_COVERAGE
+        ),
+        "inaccessible_source_disposition": inaccessible_coverage >= 1.0,
+        "top5_retrieval": (
+            retrieval_total > 0
+            and retrieval_top5 >= N8N_MIN_TOP5_RETRIEVAL
+        ),
+        "security_warning_retrieval": (
+            security_total > 0 and security_warning_retrieval >= 1.0
+        ),
+        "zero_invented_node_parameters": (
+            int(metrics.get("invented_node_parameters", -1)) == 0
+        ),
+        "zero_credential_exposure": (
+            int(metrics.get("credential_exposures", -1)) == 0
+        ),
+        "source_integrity": bool(source_integrity),
+    }
+    return {
+        "passed": all(gates.values()),
+        "gates": gates,
+        "metrics": {
+            **{key: int(metrics.get(key, 0)) for key in _N8N_EVALUATION_FIELDS},
+            "inventory_coverage": round(inventory_coverage, 6),
+            "inaccessible_disposition_coverage": round(
+                inaccessible_coverage, 6
+            ),
+            "top5_retrieval_rate": round(retrieval_top5, 6),
+            "security_warning_retrieval_rate": round(
+                security_warning_retrieval, 6
+            ),
+        },
+    }
+
+
+def _evaluate_n8n_receipt(
+        parsed: dict,
+        corpus_sha256: str,
+        receipt: dict | None) -> tuple[dict, list[str]]:
+    errors = []
+    expected_registry_sha256 = _n8n_records_sha256(parsed["records"])
+    if not isinstance(receipt, dict):
+        errors.append(
+            "an independent n8n evaluation receipt is required"
+        )
+        receipt = {}
+    metrics = receipt.get("metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    required_text = {
+        "evaluation_id": receipt.get("evaluation_id"),
+        "evaluated_at": receipt.get("evaluated_at"),
+        "evaluator": receipt.get("evaluator"),
+        "evidence_sha256": receipt.get("evidence_sha256"),
+    }
+    for name, value in required_text.items():
+        if not str(value or "").strip():
+            errors.append(f"n8n evaluation receipt is missing {name}")
+    if str(receipt.get("schema_version") or "") != "1":
+        errors.append("n8n evaluation receipt schema_version must be '1'")
+    if (
+        str(receipt.get("corpus_sha256") or "").strip().lower()
+        != corpus_sha256
+    ):
+        errors.append("n8n evaluation receipt corpus_sha256 does not match")
+    if (
+        str(receipt.get("corpus_version") or "").strip()
+        != parsed["corpus_version"]
+    ):
+        errors.append("n8n evaluation receipt corpus_version does not match")
+    if (
+        str(receipt.get("registry_sha256") or "").strip().lower()
+        != expected_registry_sha256
+    ):
+        errors.append("n8n evaluation receipt registry_sha256 does not match")
+    if not re.fullmatch(
+        r"[a-f0-9]{64}",
+        str(receipt.get("evidence_sha256") or "").strip().lower(),
+    ):
+        errors.append(
+            "n8n evaluation receipt evidence_sha256 must be a lowercase SHA-256"
+        )
+    normalized_metrics = {}
+    for field in _N8N_EVALUATION_FIELDS:
+        value = metrics.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            errors.append(
+                f"n8n evaluation receipt {field} must be a non-negative integer"
+            )
+            normalized_metrics[field] = 0
+        else:
+            normalized_metrics[field] = value
+    declared_metrics = parsed["declared_evaluation"]["metrics"]
+    if any(
+        int(declared_metrics.get(field, -1))
+        != normalized_metrics[field]
+        for field in _N8N_EVALUATION_FIELDS
+    ):
+        errors.append(
+            "n8n corpus-declared evaluation metrics do not match the "
+            "independent receipt"
+        )
+    evaluation = _n8n_evaluation_gates(
+        len(parsed["records"]),
+        normalized_metrics,
+        source_integrity=(
+            bool(parsed["records"])
+            and len(parsed["records"]) == parsed["items_total"]
+            and all(
+                record["source_content_sha256"]
+                for record in parsed["records"]
+            )
+        ),
+    )
+    receipt_sha256 = _n8n_receipt_sha256(receipt) if receipt else ""
+    approval = _load_n8n_release_approval()
+    approval_gates = {
+        "approved_corpus_digest": bool(
+            re.fullmatch(
+                r"[a-f0-9]{64}", approval["corpus_sha256"]
+            )
+            and approval["corpus_sha256"] == corpus_sha256
+        ),
+        "approved_corpus_version": bool(
+            approval["corpus_version"]
+            and approval["corpus_version"] == parsed["corpus_version"]
+        ),
+        "approved_evaluation_receipt": bool(
+            re.fullmatch(
+                r"[a-f0-9]{64}",
+                approval["evaluation_receipt_sha256"],
+            )
+            and approval["evaluation_receipt_sha256"] == receipt_sha256
+        ),
+    }
+    evaluation.update({
+        "passed": evaluation["passed"] and not errors,
+        "approval_gates": approval_gates,
+        "approved": all(approval_gates.values()),
+        "corpus_sha256": corpus_sha256,
+        "registry_sha256": expected_registry_sha256,
+        "receipt_sha256": receipt_sha256,
+        "evaluation_id": str(receipt.get("evaluation_id") or ""),
+        "evaluated_at": str(receipt.get("evaluated_at") or ""),
+        "evaluator": str(receipt.get("evaluator") or ""),
+        "evidence_sha256": str(receipt.get("evidence_sha256") or ""),
+        "evidence_source": "independent_receipt" if receipt else "",
+    })
+    return evaluation, errors
+
+
+def _looks_like_n8n_capability_corpus(text: str) -> bool:
+    candidate = text or ""
+    first_marker = re.search(r"^---ITEM_START", candidate, flags=re.M | re.I)
+    preamble = candidate[:first_marker.start()] if first_marker else candidate
+    first_item = re.search(
+        r"^---ITEM_START(?:[^\r\n]*)\r?\n"
+        r"(?P<body>.*?)(?=^---ITEM_(?:END|START)|\Z)",
+        candidate,
+        flags=re.M | re.S | re.I,
+    )
+    metadata = _parse_leading_item_metadata(
+        first_item.group("body") if first_item else ""
+    )
+    header_signal = bool(re.search(
+        r"^\s*#\s+.*\bn8n\b.*\b(?:capability|training)\b.*\bcorpus\b",
+        preamble,
+        flags=re.M | re.I,
+    ))
+    corpus_signal = (
+        _preamble_scalar(preamble, "corpus_type").casefold()
+        == N8N_CORPUS_TYPE
+    )
+    domain_signal = str(
+        metadata.get("domain")
+        or metadata.get("platform")
+        or metadata.get("tool_family")
+        or ""
+    ).strip().casefold() == "n8n"
+    contract_signals = sum(
+        bool(metadata.get(key))
+        for key in (
+            "source_page_url",
+            "source_record_id",
+            "content_sha256",
+            "corpus_status",
+        )
+    )
+    return bool(domain_signal and contract_signals >= 2 and (
+        header_signal or corpus_signal
+    ))
+
+
+def _parse_n8n_capability_corpus(text: str) -> dict:
+    import docops
+
+    text = text or ""
+    framing = _validate_item_corpus_framing(text)
+    blocks = framing["blocks"]
+    first_marker = re.search(r"^---ITEM_START", text, flags=re.M | re.I)
+    preamble = text[:first_marker.start()] if first_marker else text
+    errors = list(framing["errors"])
+    corpus_type = _preamble_scalar(preamble, "corpus_type")
+    corpus_version = _preamble_scalar(preamble, "corpus_version")
+    declared_raw = _preamble_scalar(preamble, "record_count")
+    if corpus_type.casefold() != N8N_CORPUS_TYPE:
+        errors.append(f"n8n corpus_type must be {N8N_CORPUS_TYPE!r}")
+    if not corpus_version:
+        errors.append("n8n corpus is missing required corpus_version")
+    if not re.fullmatch(r"[1-9]\d*", declared_raw):
+        declared_count = None
+        errors.append("n8n record_count must be a positive integer")
+    else:
+        declared_count = int(declared_raw)
+        if declared_count != len(blocks):
+            errors.append(
+                "n8n corpus item count does not match record_count "
+                f"(declared={declared_count}, complete={len(blocks)})"
+            )
+
+    metrics = {}
+    for field in _N8N_EVALUATION_FIELDS:
+        raw = _preamble_scalar(preamble, field)
+        if not re.fullmatch(r"\d+", raw):
+            errors.append(f"n8n corpus is missing non-negative integer {field}")
+            metrics[field] = 0
+        else:
+            metrics[field] = int(raw)
+
+    records = []
+    seen_ids = set()
+    for index, block in enumerate(blocks, start=1):
+        if block["marker_id"] != block["end_marker_id"]:
+            errors.append(f"item {index}: marker IDs do not match")
+            continue
+        metadata = _parse_leading_item_metadata(block["content"])
+        item_id = str(metadata.get("item_id") or block["marker_id"] or "").strip()
+        title = str(metadata.get("canonical_title") or "").strip()
+        domain = str(
+            metadata.get("domain")
+            or metadata.get("platform")
+            or metadata.get("tool_family")
+            or ""
+        ).strip()
+        source_page_url = str(metadata.get("source_page_url") or "").strip()
+        source_record_id = str(
+            metadata.get("source_record_id") or item_id
+        ).strip()
+        source_content_sha256 = str(
+            metadata.get("content_sha256") or ""
+        ).strip().lower()
+        if (
+            not item_id.startswith("N8N-")
+            or item_id != block["marker_id"]
+            or item_id in seen_ids
+        ):
+            errors.append(
+                f"item {index}: item_id must be a unique N8N- identifier "
+                "matching its marker"
+            )
+            continue
+        seen_ids.add(item_id)
+        freshness_raw = metadata.get("requires_current_docs_check")
+        if isinstance(freshness_raw, bool):
+            requires_current_docs_check = freshness_raw
+        elif (
+            isinstance(freshness_raw, str)
+            and freshness_raw.strip().casefold() in {"true", "false"}
+        ):
+            requires_current_docs_check = (
+                freshness_raw.strip().casefold() == "true"
+            )
+        else:
+            errors.append(
+                f"item {index}: requires_current_docs_check must be boolean"
+            )
+            continue
+
+        taxonomy = _metadata_string_list(metadata.get("taxonomy")) or (
+            _markdown_section_list(block["content"], "Taxonomy")
+        )
+        task_types = _markdown_section_list(
+            block["content"], "Task types"
+        )
+        workflow = _markdown_section_list(
+            block["content"], "Recommended operating workflow", ordered=True
+        )
+        output_contract = _markdown_section_text(
+            block["content"], "Output contract"
+        )
+        safety_controls = _markdown_section_list(
+            block["content"], "Safety and governance controls"
+        )
+        cloud_self_hosted = _markdown_section_list(
+            block["content"], "Cloud and self-hosted differences"
+        )
+        version_constraints = _markdown_section_list(
+            block["content"], "Version constraints"
+        )
+        validation = _markdown_section_list(
+            block["content"], "Validation checklist"
+        )
+        failure_modes = _markdown_section_list(
+            block["content"], "Failure modes"
+        )
+        authoritative_sources = _markdown_section_list(
+            block["content"], "Current authoritative sources"
+        )
+        freshness = _markdown_section_list(
+            block["content"], "Freshness requirements"
+        )
+        approval_policy = _markdown_section_text(
+            block["content"], "Approval policy"
+        )
+        what_it_teaches = (
+            docops._extract_markdown_field(
+                block["content"], "What this capability teaches"
+            )
+            or docops._extract_markdown_field(
+                block["content"], "What this item teaches"
+            )
+            or _markdown_section_text(
+                block["content"], "What this capability teaches"
+            )
+        )
+        missing = [
+            name for name, value in (
+                ("canonical_title", title),
+                ("domain=n8n", domain.casefold() == "n8n"),
+                ("source_page_url", source_page_url),
+                ("source_record_id", source_record_id),
+                ("content_sha256", source_content_sha256),
+                ("corpus_status", metadata.get("corpus_status")),
+                ("taxonomy", taxonomy),
+                ("task types", task_types),
+                ("workflow", workflow),
+                ("output contract", output_contract),
+                ("safety controls", safety_controls),
+                ("cloud/self-hosted differences", cloud_self_hosted),
+                ("version constraints", version_constraints),
+                ("validation", validation),
+                ("failure modes", failure_modes),
+                ("authoritative sources", authoritative_sources),
+                ("freshness", freshness),
+                ("approval policy", approval_policy),
+                ("what this capability teaches", what_it_teaches),
+            )
+            if not value
+        ]
+        if missing:
+            errors.append(
+                f"item {index}: missing required n8n fields: "
+                + ", ".join(missing)
+            )
+            continue
+        if (
+            _safe_https_source_url(source_page_url) != source_page_url
+            or any(
+                _safe_https_source_url(source) != source
+                for source in authoritative_sources
+            )
+        ):
+            errors.append(
+                f"item {index}: authoritative sources must be canonical HTTPS "
+                "URLs without credentials, queries, or fragments"
+            )
+            continue
+        if not re.fullmatch(r"[a-f0-9]{64}", source_content_sha256):
+            errors.append(
+                f"item {index}: content_sha256 must be a lowercase SHA-256"
+            )
+            continue
+        if source_page_url not in authoritative_sources:
+            errors.append(
+                f"item {index}: source_page_url must be included in "
+                "Current authoritative sources"
+            )
+            continue
+        if any(
+            pattern.search(block["content"])
+            for pattern in _N8N_SECRET_PATTERNS
+        ):
+            errors.append(f"item {index}: potential credential material detected")
+            continue
+        records.append({
+            "item_id": item_id,
+            "canonical_title": title,
+            "tool_family": "n8n",
+            "surface": str(
+                metadata.get("surface") or "Cloud and self-hosted"
+            ).strip(),
+            "version_scope": str(
+                metadata.get("version_scope") or ""
+            ).strip(),
+            "corpus_status": str(
+                metadata.get("corpus_status") or ""
+            ).strip(),
+            "requires_current_docs_check": requires_current_docs_check,
+            "provisional": (
+                docops._is_truthy(
+                    metadata.get("provisional", metadata.get("is_provisional"))
+                )
+                or str(metadata.get("corpus_status") or "").strip().casefold()
+                in {"draft", "experimental", "wip", "provisional"}
+            ),
+            "source_page_url": source_page_url,
+            "source_record_id": source_record_id,
+            "source_content_sha256": source_content_sha256,
+            "record_sha256": hashlib.sha256(
+                block["content"].encode("utf-8")
+            ).hexdigest(),
+            "what_it_teaches": what_it_teaches,
+            "task_types": task_types,
+            "workflow": workflow,
+            "safety_controls": safety_controls,
+            "authoritative_sources": authoritative_sources,
+            "taxonomy": taxonomy,
+            "output_contract": output_contract,
+            "cloud_self_hosted": cloud_self_hosted,
+            "version_constraints": version_constraints,
+            "validation": validation,
+            "failure_modes": failure_modes,
+            "freshness": freshness,
+            "approval_policy": approval_policy,
+            "metadata": metadata,
+        })
+
+    declared_evaluation = _n8n_evaluation_gates(
+        len(records),
+        metrics,
+        source_integrity=(
+            bool(records)
+            and len(records) == len(blocks)
+            and all(record["source_content_sha256"] for record in records)
+        ),
+    )
+    return {
+        "corpus_type": N8N_CORPUS_TYPE,
+        "corpus_version": corpus_version,
+        "declared_record_count": declared_count,
+        "items_total": len(blocks),
+        "records": records,
+        "items_skipped_invalid": max(0, len(blocks) - len(records)),
+        "errors": errors,
+        "declared_evaluation": declared_evaluation,
+    }
+
+
+def _prepare_n8n_corpus(
+        corpus_text: str,
+        evaluation_receipt: dict | None = None) -> dict:
+    parsed = _parse_n8n_capability_corpus(corpus_text)
+    corpus_sha256 = hashlib.sha256(
+        (corpus_text or "").encode("utf-8")
+    ).hexdigest()
+    receipt = evaluation_receipt
+    if receipt is None:
+        try:
+            receipt = _load_n8n_evaluation_receipt_for_corpus(corpus_sha256)
+        except (OSError, ValueError, RuntimeError) as exc:
+            parsed["errors"].append(str(exc))
+    evaluation, evaluation_errors = _evaluate_n8n_receipt(
+        parsed,
+        corpus_sha256,
+        receipt,
+    )
+    parsed["evaluation"] = evaluation
+    parsed["errors"].extend(evaluation_errors)
+    parsed["source_sha256"] = corpus_sha256
+    return parsed
+
+
+def preflight_n8n_corpus_text(
+        corpus_text: str,
+        evaluation_receipt: dict | None = None) -> dict:
+    parsed = _prepare_n8n_corpus(corpus_text, evaluation_receipt)
+    ingestion_ready = (
+        not parsed["errors"]
+        and parsed["evaluation"]["passed"]
+        and parsed["evaluation"]["approved"]
+        and len(parsed["records"]) == parsed["items_total"]
+    )
+    return {
+        "status": "ready" if ingestion_ready else "blocked",
+        "corpus_type": N8N_CORPUS_TYPE,
+        "corpus_version": parsed["corpus_version"],
+        "items_total": parsed["items_total"],
+        "records_valid": len(parsed["records"]),
+        "items_skipped_invalid": parsed["items_skipped_invalid"],
+        "ingestion_ready": ingestion_ready,
+        "evaluation": parsed["evaluation"],
+        "errors": parsed["errors"],
+    }
+
+
+def _record_n8n_evaluation(parsed: dict, source_file_id: str) -> str:
+    evaluation = parsed["evaluation"]
+    evaluation_id = evaluation["evaluation_id"]
+    metrics = evaluation["metrics"]
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO skillops_n8n_evaluations "
+            "(evaluation_id, corpus_version, source_file_id, corpus_sha256, "
+            "registry_sha256, receipt_sha256, evidence_source, capability_count, "
+            "canonical_pages_total, canonical_pages_covered, "
+            "inaccessible_sources_total, inaccessible_sources_dispositioned, "
+            "retrieval_cases_total, retrieval_top5_passed, "
+            "security_warning_cases_total, security_warning_cases_passed, "
+            "invented_node_parameters, credential_exposures, gate_passed, "
+            "details_json, evaluated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(evaluation_id) DO UPDATE SET "
+            "corpus_version=excluded.corpus_version, "
+            "source_file_id=excluded.source_file_id, "
+            "corpus_sha256=excluded.corpus_sha256, "
+            "registry_sha256=excluded.registry_sha256, "
+            "receipt_sha256=excluded.receipt_sha256, "
+            "evidence_source=excluded.evidence_source, "
+            "capability_count=excluded.capability_count, "
+            "canonical_pages_total=excluded.canonical_pages_total, "
+            "canonical_pages_covered=excluded.canonical_pages_covered, "
+            "inaccessible_sources_total=excluded.inaccessible_sources_total, "
+            "inaccessible_sources_dispositioned="
+            "excluded.inaccessible_sources_dispositioned, "
+            "retrieval_cases_total=excluded.retrieval_cases_total, "
+            "retrieval_top5_passed=excluded.retrieval_top5_passed, "
+            "security_warning_cases_total="
+            "excluded.security_warning_cases_total, "
+            "security_warning_cases_passed="
+            "excluded.security_warning_cases_passed, "
+            "invented_node_parameters=excluded.invented_node_parameters, "
+            "credential_exposures=excluded.credential_exposures, "
+            "gate_passed=excluded.gate_passed, "
+            "details_json=excluded.details_json, "
+            "evaluated_at=excluded.evaluated_at",
+            (
+                evaluation_id,
+                parsed["corpus_version"],
+                source_file_id,
+                parsed["source_sha256"],
+                evaluation["registry_sha256"],
+                evaluation["receipt_sha256"],
+                evaluation["evidence_source"],
+                len(parsed["records"]),
+                metrics["canonical_pages_total"],
+                metrics["canonical_pages_covered"],
+                metrics["inaccessible_sources_total"],
+                metrics["inaccessible_sources_dispositioned"],
+                metrics["retrieval_cases_total"],
+                metrics["retrieval_top5_passed"],
+                metrics["security_warning_cases_total"],
+                metrics["security_warning_cases_passed"],
+                metrics["invented_node_parameters"],
+                metrics["credential_exposures"],
+                1 if evaluation["passed"] else 0,
+                json.dumps(evaluation, sort_keys=True),
+                evaluation["evaluated_at"],
+            ),
+        )
+    return evaluation_id
+
+
+def import_n8n_capability_corpus_text(
+        corpus_text: str,
+        overwrite_existing: bool = True,
+        include_provisional: bool = False,
+        dry_run: bool = False,
+        source_file_id: str = "",
+        parent_run_id: str = "",
+        audit: bool = True,
+        evaluation_receipt: dict | None = None) -> dict:
+    """Import governed n8n records into the shared domain capability registry."""
+    parsed = _prepare_n8n_corpus(corpus_text, evaluation_receipt)
+    if not parsed["evaluation"]["passed"]:
+        failed_gates = [
+            name
+            for name, passed in parsed["evaluation"]["gates"].items()
+            if not passed
+        ]
+        parsed["errors"].append(
+            "n8n evaluation gates failed: " + ", ".join(failed_gates)
+        )
+    if not parsed["evaluation"]["approved"]:
+        failed_approval = [
+            name
+            for name, passed
+            in parsed["evaluation"]["approval_gates"].items()
+            if not passed
+        ]
+        parsed["errors"].append(
+            "n8n release approval gates failed: "
+            + ", ".join(failed_approval)
+        )
+    import_run_id = "n8n-" + str(uuid.uuid4())[:8]
+    source_sha256 = parsed["source_sha256"]
+    now = datetime.now(timezone.utc).isoformat()
+    if audit:
+        with _db() as conn:
+            conn.execute(
+                "INSERT INTO skillops_corpus_import_runs "
+                "(run_id, parent_run_id, corpus_type, corpus_version, "
+                "source_file_id, source_sha256, dry_run, overwrite_existing, "
+                "include_provisional, status, details_json, started_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    import_run_id,
+                    parent_run_id,
+                    N8N_CORPUS_TYPE,
+                    parsed["corpus_version"],
+                    source_file_id,
+                    source_sha256,
+                    1 if dry_run else 0,
+                    1 if overwrite_existing else 0,
+                    1 if include_provisional else 0,
+                    "running",
+                    "{}",
+                    now,
+                ),
+            )
+
+    created = updated = unchanged = skipped_existing = skipped_provisional = 0
+    retired = 0
+    imports = []
+    if not parsed["errors"]:
+        with _db() as conn:
+            collisions = [
+                record["item_id"]
+                for record in parsed["records"]
+                if (
+                    (row := conn.execute(
+                        "SELECT corpus_type FROM skillops_coding_capabilities "
+                        "WHERE item_id=?",
+                        (record["item_id"],),
+                    ).fetchone())
+                    and row[0] != N8N_CORPUS_TYPE
+                )
+            ]
+            if collisions:
+                parsed["errors"].append(
+                    "n8n capability IDs collide with another corpus: "
+                    + ", ".join(collisions[:5])
+                )
+            changed_existing = []
+            if not overwrite_existing and not collisions:
+                for record in parsed["records"]:
+                    existing_row = conn.execute(
+                        "SELECT record_sha256 "
+                        "FROM skillops_coding_capabilities "
+                        "WHERE item_id=? AND corpus_type=?",
+                        (record["item_id"], N8N_CORPUS_TYPE),
+                    ).fetchone()
+                    if (
+                        existing_row
+                        and existing_row[0] != record["record_sha256"]
+                    ):
+                        changed_existing.append(record["item_id"])
+                if changed_existing:
+                    parsed["errors"].append(
+                        "authoritative n8n import requires overwrite_existing "
+                        "for changed records: "
+                        + ", ".join(changed_existing[:5])
+                    )
+            for record in (
+                parsed["records"]
+                if not collisions and not changed_existing
+                else []
+            ):
+                if record["provisional"] and not include_provisional:
+                    skipped_provisional += 1
+                    imports.append({
+                        "item_id": record["item_id"],
+                        "action": "skipped_provisional",
+                    })
+                    continue
+                existing = conn.execute(
+                    "SELECT record_sha256, version, active "
+                    "FROM skillops_coding_capabilities "
+                    "WHERE item_id=? AND corpus_type=?",
+                    (record["item_id"], N8N_CORPUS_TYPE),
+                ).fetchone()
+                if existing and existing[0] == record["record_sha256"]:
+                    action = "unchanged"
+                    version = existing[1]
+                    unchanged += 1
+                    if not dry_run and not existing[2]:
+                        conn.execute(
+                            "UPDATE skillops_coding_capabilities SET "
+                            "active=1, retired_at=NULL, updated_at=? "
+                            "WHERE item_id=? AND corpus_type=?",
+                            (now, record["item_id"], N8N_CORPUS_TYPE),
+                        )
+                elif existing and not overwrite_existing:
+                    action = "skipped_existing"
+                    version = existing[1]
+                    skipped_existing += 1
+                elif dry_run:
+                    action = "would_update" if existing else "would_create"
+                    version = existing[1] + 1 if existing else 1
+                    if existing:
+                        updated += 1
+                    else:
+                        created += 1
+                else:
+                    values = (
+                        record["canonical_title"],
+                        record["tool_family"],
+                        record["surface"],
+                        record["version_scope"],
+                        record["corpus_status"],
+                        1 if record["requires_current_docs_check"] else 0,
+                        record["source_page_url"],
+                        record["source_record_id"],
+                        record["source_content_sha256"],
+                        record["record_sha256"],
+                        record["what_it_teaches"],
+                        json.dumps(record["task_types"]),
+                        json.dumps(record["workflow"]),
+                        json.dumps(record["safety_controls"]),
+                        json.dumps(record["authoritative_sources"]),
+                        json.dumps(record["metadata"], sort_keys=True),
+                        source_file_id,
+                        parent_run_id or import_run_id,
+                        json.dumps(record["taxonomy"]),
+                        json.dumps(record["task_types"]),
+                        record["output_contract"],
+                        json.dumps(record["cloud_self_hosted"]),
+                        json.dumps(record["version_constraints"]),
+                        json.dumps(record["validation"]),
+                        json.dumps(record["failure_modes"]),
+                        json.dumps(record["freshness"]),
+                        record["approval_policy"],
+                        now,
+                    )
+                    if existing:
+                        conn.execute(
+                            "UPDATE skillops_coding_capabilities SET "
+                            "canonical_title=?, tool_family=?, surface=?, "
+                            "version_scope=?, corpus_status=?, "
+                            "requires_current_docs_check=?, source_page_url=?, "
+                            "source_record_id=?, source_content_sha256=?, "
+                            "record_sha256=?, version=version+1, "
+                            "what_it_teaches=?, appropriate_tasks_json=?, "
+                            "workflow_json=?, safety_controls_json=?, "
+                            "authoritative_sources_json=?, metadata_json=?, "
+                            "source_file_id=?, source_run_id=?, taxonomy_json=?, "
+                            "task_types_json=?, output_contract=?, "
+                            "cloud_self_hosted_json=?, version_constraints_json=?, "
+                            "validation_json=?, failure_modes_json=?, "
+                            "freshness_json=?, approval_policy=?, active=1, "
+                            "retired_at=NULL, updated_at=? "
+                            "WHERE item_id=? AND corpus_type=?",
+                            values + (record["item_id"], N8N_CORPUS_TYPE),
+                        )
+                        action = "updated"
+                        version = existing[1] + 1
+                        updated += 1
+                    else:
+                        conn.execute(
+                            "INSERT INTO skillops_coding_capabilities "
+                            "(corpus_type, canonical_title, tool_family, surface, "
+                            "version_scope, corpus_status, "
+                            "requires_current_docs_check, source_page_url, "
+                            "source_record_id, source_content_sha256, "
+                            "record_sha256, what_it_teaches, "
+                            "appropriate_tasks_json, workflow_json, "
+                            "safety_controls_json, authoritative_sources_json, "
+                            "metadata_json, source_file_id, source_run_id, "
+                            "taxonomy_json, task_types_json, output_contract, "
+                            "cloud_self_hosted_json, version_constraints_json, "
+                            "validation_json, failure_modes_json, freshness_json, "
+                            "approval_policy, created_at, updated_at, item_id) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,"
+                            "?,?,?,?,?,?,?,?,?)",
+                            (
+                                N8N_CORPUS_TYPE,
+                                *values[:-1],
+                                now,
+                                values[-1],
+                                record["item_id"],
+                            ),
+                        )
+                        action = "created"
+                        version = 1
+                        created += 1
+                imports.append({
+                    "item_id": record["item_id"],
+                    "canonical_title": record["canonical_title"],
+                    "version": version,
+                    "action": action,
+                })
+            if not dry_run and not collisions and overwrite_existing:
+                active_ids = [
+                    record["item_id"]
+                    for record in parsed["records"]
+                    if include_provisional or not record["provisional"]
+                ]
+                exclusion = ""
+                parameters = [now, now, N8N_CORPUS_TYPE]
+                if active_ids:
+                    placeholders = ",".join("?" for _ in active_ids)
+                    exclusion = f" AND item_id NOT IN ({placeholders})"
+                    parameters.extend(active_ids)
+                cursor = conn.execute(
+                    "UPDATE skillops_coding_capabilities SET active=0, "
+                    "retired_at=?, updated_at=? WHERE corpus_type=? AND active=1 "
+                    + exclusion,
+                    tuple(parameters),
+                )
+                retired = cursor.rowcount
+
+    status = "invalid" if parsed["errors"] else (
+        "dry_run_complete" if dry_run else "imported"
+    )
+    evaluation_id = None
+    if status == "imported":
+        evaluation_id = _record_n8n_evaluation(parsed, source_file_id)
+    details = {
+        "imports": imports,
+        "errors": parsed["errors"],
+        "evaluation": parsed["evaluation"],
+        "evaluation_id": evaluation_id,
+        "capabilities_retired": retired,
+    }
+    if audit:
+        with _db() as conn:
+            conn.execute(
+                "UPDATE skillops_corpus_import_runs SET "
+                "items_total=?, records_created=?, records_updated=?, "
+                "records_unchanged=?, records_skipped_existing=?, "
+                "records_skipped_provisional=?, items_skipped_invalid=?, "
+                "status=?, error=?, details_json=?, finished_at=? WHERE run_id=?",
+                (
+                    parsed["items_total"],
+                    created,
+                    updated,
+                    unchanged,
+                    skipped_existing,
+                    skipped_provisional,
+                    parsed["items_skipped_invalid"],
+                    status,
+                    "; ".join(parsed["errors"][:3]) or None,
+                    json.dumps(details, sort_keys=True),
+                    datetime.now(timezone.utc).isoformat(),
+                    import_run_id,
+                ),
+            )
+    return {
+        "status": status,
+        "run_id": import_run_id,
+        "corpus_type": N8N_CORPUS_TYPE,
+        "corpus_version": parsed["corpus_version"],
+        "items_total": parsed["items_total"],
+        "capabilities_created": created,
+        "capabilities_updated": updated,
+        "capabilities_unchanged": unchanged,
+        "capabilities_skipped_existing": skipped_existing,
+        "capabilities_retired": retired,
+        "items_skipped_provisional": skipped_provisional,
+        "items_skipped_invalid": parsed["items_skipped_invalid"],
+        "evaluation": parsed["evaluation"],
+        "evaluation_id": evaluation_id,
+        "imports": imports,
+        "errors": parsed["errors"],
+    }
+
+
 def _import_vector_content(text: str, *, overwrite_existing: bool,
                            include_provisional: bool, dry_run: bool,
                            source_file_id: str = "",
@@ -1248,6 +2506,16 @@ def _import_vector_content(text: str, *, overwrite_existing: bool,
         return _invalid_vector_corpus_result(
             "invalid_item_corpus",
             framing,
+        )
+    if _looks_like_n8n_capability_corpus(text):
+        return import_n8n_capability_corpus_text(
+            text,
+            overwrite_existing=overwrite_existing,
+            include_provisional=include_provisional,
+            dry_run=dry_run,
+            source_file_id=source_file_id,
+            parent_run_id=parent_run_id,
+            audit=audit,
         )
     if _looks_like_coding_capability_corpus(text):
         return import_coding_capability_corpus_text(
@@ -1315,7 +2583,8 @@ def list_coding_capabilities(query: str = "", tool_family: str = "",
             "appropriate_tasks_json, workflow_json, safety_controls_json, "
             "authoritative_sources_json, updated_at "
             "FROM skillops_coding_capabilities "
-            "WHERE (?='' OR canonical_title LIKE ? OR item_id LIKE ? "
+            "WHERE corpus_type='ai_coding_capabilities' AND active=1 "
+            "AND (?='' OR canonical_title LIKE ? OR item_id LIKE ? "
             "OR what_it_teaches LIKE ? OR surface LIKE ?) "
             "AND (?='' OR tool_family LIKE ?) "
             "ORDER BY tool_family, canonical_title LIMIT ?",
@@ -1376,6 +2645,360 @@ def list_coding_capabilities(query: str = "", tool_family: str = "",
             }
             for row in audit_rows
         ],
+    }
+
+
+def list_n8n_capabilities(
+        query: str = "",
+        taxonomy: str = "",
+        task_type: str = "",
+        limit: int = 50) -> dict:
+    """List governed n8n capabilities without activating unsafe execution."""
+    query = str(query or "").strip()
+    taxonomy = str(taxonomy or "").strip()
+    task_type = str(task_type or "").strip()
+    limit = max(1, min(int(limit or 50), 100))
+    like = f"%{query}%"
+    taxonomy_like = f"%{taxonomy}%"
+    task_like = f"%{task_type}%"
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT item_id, canonical_title, surface, version_scope, "
+            "corpus_status, requires_current_docs_check, source_page_url, "
+            "source_record_id, source_content_sha256, version, "
+            "what_it_teaches, taxonomy_json, task_types_json, workflow_json, "
+            "output_contract, safety_controls_json, cloud_self_hosted_json, "
+            "version_constraints_json, validation_json, failure_modes_json, "
+            "authoritative_sources_json, freshness_json, approval_policy, "
+            "updated_at FROM skillops_coding_capabilities "
+            "WHERE corpus_type=? AND active=1 "
+            "AND (?='' OR canonical_title LIKE ? OR item_id LIKE ? "
+            "OR what_it_teaches LIKE ? OR output_contract LIKE ?) "
+            "AND (?='' OR taxonomy_json LIKE ?) "
+            "AND (?='' OR task_types_json LIKE ?) "
+            "ORDER BY canonical_title LIMIT ?",
+            (
+                N8N_CORPUS_TYPE,
+                query, like, like, like, like,
+                taxonomy, taxonomy_like,
+                task_type, task_like,
+                limit,
+            ),
+        ).fetchall()
+    capabilities = [
+        {
+            "item_id": row[0],
+            "canonical_title": row[1],
+            "surface": row[2],
+            "version_scope": row[3],
+            "corpus_status": row[4],
+            "requires_current_docs_check": bool(row[5]),
+            "source_page_url": row[6],
+            "source_record_id": row[7],
+            "source_content_sha256": row[8],
+            "version": row[9],
+            "what_it_teaches": row[10],
+            "taxonomy": json.loads(row[11] or "[]"),
+            "task_types": json.loads(row[12] or "[]"),
+            "workflow": json.loads(row[13] or "[]"),
+            "output_contract": row[14],
+            "safety_controls": json.loads(row[15] or "[]"),
+            "cloud_self_hosted_differences": json.loads(row[16] or "[]"),
+            "version_constraints": json.loads(row[17] or "[]"),
+            "validation": json.loads(row[18] or "[]"),
+            "failure_modes": json.loads(row[19] or "[]"),
+            "authoritative_sources": json.loads(row[20] or "[]"),
+            "freshness": json.loads(row[21] or "[]"),
+            "approval_policy": row[22],
+            "updated_at": row[23],
+        }
+        for row in rows
+    ]
+    return {
+        "count": len(capabilities),
+        "capabilities": capabilities,
+        "release": get_n8n_corpus_status(include_census=False),
+    }
+
+
+def get_n8n_corpus_status(include_census: bool = True) -> dict:
+    """Return n8n census, evaluation, synchronization, and release-gate state."""
+    with _db() as conn:
+        capability_row = conn.execute(
+            "SELECT COUNT(*), "
+            "SUM(CASE WHEN length(source_content_sha256)=64 THEN 1 ELSE 0 END), "
+            "MAX(version) FROM skillops_coding_capabilities "
+            "WHERE corpus_type=? AND active=1",
+            (N8N_CORPUS_TYPE,),
+        ).fetchone()
+        registry_rows = conn.execute(
+            "SELECT item_id, record_sha256 "
+            "FROM skillops_coding_capabilities "
+            "WHERE corpus_type=? AND active=1 ORDER BY item_id",
+            (N8N_CORPUS_TYPE,),
+        ).fetchall()
+        registry_sha256 = hashlib.sha256(
+            json.dumps(
+                [
+                    {"item_id": row[0], "record_sha256": row[1]}
+                    for row in registry_rows
+                ],
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest() if registry_rows else ""
+        evaluation_row = conn.execute(
+            "SELECT evaluation_id, corpus_version, source_file_id, "
+            "corpus_sha256, registry_sha256, receipt_sha256, evidence_source, "
+            "capability_count, canonical_pages_total, canonical_pages_covered, "
+            "inaccessible_sources_total, inaccessible_sources_dispositioned, "
+            "retrieval_cases_total, retrieval_top5_passed, "
+            "security_warning_cases_total, security_warning_cases_passed, "
+            "invented_node_parameters, credential_exposures, gate_passed, "
+            "details_json, evaluated_at FROM skillops_n8n_evaluations "
+            "ORDER BY evaluated_at DESC LIMIT 1"
+        ).fetchone()
+        import_row = conn.execute(
+            "SELECT run_id, corpus_version, source_file_id, source_sha256, status, "
+            "items_total, records_created, records_updated, records_unchanged, "
+            "items_skipped_invalid, started_at, finished_at "
+            "FROM skillops_corpus_import_runs "
+            "WHERE corpus_type=? AND dry_run=0 "
+            "ORDER BY started_at DESC LIMIT 1",
+            (N8N_CORPUS_TYPE,),
+        ).fetchone()
+        census_rows = conn.execute(
+            "SELECT disposition_status, terminal, COUNT(*) "
+            "FROM skillops_n8n_source_census "
+            "GROUP BY disposition_status, terminal"
+        ).fetchall()
+        sync_row = conn.execute(
+            "SELECT run_id, vector_store_id, status, max_files, "
+            "files_seen, files_processed, "
+            "files_skipped_unchanged, files_skipped_unavailable, "
+            "files_skipped_unsupported, files_failed, started_at, finished_at "
+            "FROM skillops_learning_runs "
+            "WHERE run_type='sync' AND dry_run=0 AND max_files=0 "
+            "AND status!='locked' "
+            "ORDER BY started_at DESC LIMIT 1"
+        ).fetchone()
+        census_detail_rows = conn.execute(
+            "SELECT source_file_id, filename, canonical_url, "
+            "disposition_status, disposition_detail, terminal, "
+            "content_sha256, content_chars, source_version, "
+            "last_seen_run_id, last_seen_at, terminal_at "
+            "FROM skillops_n8n_source_census "
+            "ORDER BY last_seen_at DESC LIMIT 100"
+        ).fetchall() if include_census else []
+        evaluated_source_row = None
+        if evaluation_row and evaluation_row[2]:
+            evaluated_source_row = conn.execute(
+                "SELECT disposition_status, terminal, last_seen_run_id, "
+                "content_sha256 "
+                "FROM skillops_n8n_source_census WHERE source_file_id=?",
+                (evaluation_row[2],),
+            ).fetchone()
+
+    capability_count = int(capability_row[0] or 0)
+    source_hash_count = int(capability_row[1] or 0)
+    evaluation = None
+    evaluation_gates = {
+        "metric_consistency": False,
+        "capability_count": False,
+        "inventory_coverage": False,
+        "inaccessible_source_disposition": False,
+        "top5_retrieval": False,
+        "security_warning_retrieval": False,
+        "zero_invented_node_parameters": False,
+        "zero_credential_exposure": False,
+        "source_integrity": False,
+    }
+    if evaluation_row:
+        evaluation = {
+            "evaluation_id": evaluation_row[0],
+            "corpus_version": evaluation_row[1],
+            "source_file_id": evaluation_row[2],
+            "corpus_sha256": evaluation_row[3],
+            "registry_sha256": evaluation_row[4],
+            "receipt_sha256": evaluation_row[5],
+            "evidence_source": evaluation_row[6],
+            "capability_count": evaluation_row[7],
+            "canonical_pages_total": evaluation_row[8],
+            "canonical_pages_covered": evaluation_row[9],
+            "inaccessible_sources_total": evaluation_row[10],
+            "inaccessible_sources_dispositioned": evaluation_row[11],
+            "retrieval_cases_total": evaluation_row[12],
+            "retrieval_top5_passed": evaluation_row[13],
+            "security_warning_cases_total": evaluation_row[14],
+            "security_warning_cases_passed": evaluation_row[15],
+            "invented_node_parameters": evaluation_row[16],
+            "credential_exposures": evaluation_row[17],
+            "gate_passed": bool(evaluation_row[18]),
+            "details": json.loads(evaluation_row[19] or "{}"),
+            "evaluated_at": evaluation_row[20],
+        }
+        evaluation_gates.update(
+            evaluation["details"].get("gates") or {}
+        )
+    evaluation_gates["capability_count"] = (
+        N8N_MIN_CAPABILITIES
+        <= capability_count
+        <= N8N_MAX_CAPABILITIES
+    )
+    evaluation_gates["source_integrity"] = (
+        capability_count > 0 and source_hash_count == capability_count
+    )
+
+    census_total = sum(int(row[2]) for row in census_rows)
+    census_terminal = sum(int(row[2]) for row in census_rows if row[1])
+    census_by_status = {}
+    for row in census_rows:
+        census_by_status[row[0]] = (
+            census_by_status.get(row[0], 0) + int(row[2])
+        )
+    sync = (
+        {
+            "run_id": sync_row[0],
+            "vector_store_id": sync_row[1],
+            "status": sync_row[2],
+            "max_files": sync_row[3],
+            "files_seen": sync_row[4],
+            "files_processed": sync_row[5],
+            "files_skipped_unchanged": sync_row[6],
+            "files_skipped_unavailable": sync_row[7],
+            "files_skipped_unsupported": sync_row[8],
+            "files_failed": sync_row[9],
+            "started_at": sync_row[10],
+            "finished_at": sync_row[11],
+        }
+        if sync_row else {"status": "no_recorded_sync"}
+    )
+    latest_import_healthy = bool(
+        import_row
+        and import_row[4] == "imported"
+        and int(import_row[5] or 0) == capability_count
+        and int(import_row[9] or 0) == 0
+    )
+    evaluation_matches_registry = bool(
+        evaluation
+        and import_row
+        and int(evaluation["capability_count"] or 0) == capability_count
+        and evaluation["corpus_version"] == import_row[1]
+        and evaluation["source_file_id"] == import_row[2]
+        and evaluation["corpus_sha256"] == import_row[3]
+        and evaluation["registry_sha256"] == registry_sha256
+    )
+    approval = _load_n8n_release_approval()
+    approval_gates = {
+        "approved_corpus_digest": bool(
+            evaluation
+            and approval["corpus_sha256"] == evaluation["corpus_sha256"]
+        ),
+        "approved_corpus_version": bool(
+            evaluation
+            and approval["corpus_version"] == evaluation["corpus_version"]
+        ),
+        "approved_evaluation_receipt": bool(
+            evaluation
+            and approval["evaluation_receipt_sha256"]
+            == evaluation["receipt_sha256"]
+        ),
+    }
+    release_gates = {
+        **evaluation_gates,
+        **approval_gates,
+        "latest_import_healthy": latest_import_healthy,
+        "evaluation_matches_registry": evaluation_matches_registry,
+        "evaluated_source_synchronized": bool(
+            evaluated_source_row
+            and evaluated_source_row[0] in {"synchronized", "duplicate"}
+            and evaluated_source_row[1]
+            and sync.get("run_id") == evaluated_source_row[2]
+            and evaluation
+            and evaluation["corpus_sha256"] == evaluated_source_row[3]
+        ),
+        "census_complete": census_total > 0 and census_terminal == census_total,
+        "synchronization_terminal": (
+            sync.get("status")
+            in {"completed", "partial_failed", "failed"}
+            and bool(sync.get("finished_at"))
+        ),
+        "synchronization_healthy": (
+            sync.get("status") == "completed"
+            and int(sync.get("files_failed") or 0) == 0
+            and int(sync.get("files_seen") or 0) > 0
+        ),
+    }
+    production_ready = all(release_gates.values())
+    latest_import = (
+        {
+            "run_id": import_row[0],
+            "corpus_version": import_row[1],
+            "source_file_id": import_row[2],
+            "source_sha256": import_row[3],
+            "status": import_row[4],
+            "items_total": import_row[5],
+            "records_created": import_row[6],
+            "records_updated": import_row[7],
+            "records_unchanged": import_row[8],
+            "items_skipped_invalid": import_row[9],
+            "started_at": import_row[10],
+            "finished_at": import_row[11],
+        }
+        if import_row else None
+    )
+    return {
+        "status": "ready" if production_ready else "blocked",
+        "production_ready": production_ready,
+        "ingestion_ready": (
+            all(evaluation_gates.values())
+            and all(approval_gates.values())
+        ),
+        "capability_count": capability_count,
+        "source_hash_count": source_hash_count,
+        "registry_version": int(capability_row[2] or 0),
+        "registry_sha256": registry_sha256,
+        "latest_import": latest_import,
+        "latest_evaluation": evaluation,
+        "latest_sync": sync,
+        "release_gates": release_gates,
+        "blocked_reasons": [
+            name for name, passed in release_gates.items() if not passed
+        ],
+        "thresholds": {
+            "capability_count_min": N8N_MIN_CAPABILITIES,
+            "capability_count_max": N8N_MAX_CAPABILITIES,
+            "inventory_coverage_min": N8N_MIN_INVENTORY_COVERAGE,
+            "top5_retrieval_min": N8N_MIN_TOP5_RETRIEVAL,
+            "security_warning_retrieval_required": 1.0,
+            "inaccessible_source_disposition_required": 1.0,
+            "invented_node_parameters_max": 0,
+            "credential_exposures_max": 0,
+        },
+        "census": {
+            "count": census_total,
+            "terminal_count": census_terminal,
+            "pending_count": census_total - census_terminal,
+            "by_status": census_by_status,
+            "sources": [
+                {
+                    "source_file_id": row[0],
+                    "filename": row[1],
+                    "canonical_url": row[2],
+                    "disposition_status": row[3],
+                    "disposition_detail": row[4],
+                    "terminal": bool(row[5]),
+                    "content_sha256": row[6],
+                    "content_chars": row[7],
+                    "source_version": row[8],
+                    "last_seen_run_id": row[9],
+                    "last_seen_at": row[10],
+                    "terminal_at": row[11],
+                }
+                for row in census_detail_rows
+            ],
+        },
     }
 
 
@@ -1755,11 +3378,165 @@ def _sync_version_hash(entry: dict, metadata: dict,
     })
 
 
+def _is_n8n_vector_source(entry: dict, metadata: dict, text: str = "") -> bool:
+    attributes = entry.get("attributes") or {}
+    corpus_type = str(attributes.get("corpus_type") or "").strip().casefold()
+    filename = str(
+        metadata.get("filename")
+        or entry.get("filename")
+        or ""
+    ).casefold()
+    return bool(
+        corpus_type in {"n8n", N8N_CORPUS_TYPE}
+        or "n8n" in filename
+        or (text and _looks_like_n8n_capability_corpus(text))
+    )
+
+
+def _record_n8n_source_census(
+        vector_store_id: str,
+        source_file_id: str,
+        vector_store_file_id: str,
+        filename: str,
+        run_id: str,
+        disposition_status: str,
+        *,
+        terminal: bool,
+        detail: str = "",
+        content_sha256: str = "",
+        content_chars: int = 0,
+        entry: dict = None,
+        metadata: dict = None,
+        preserve_disposition: bool = False):
+    now = datetime.now(timezone.utc).isoformat()
+    entry = entry or {}
+    metadata = metadata or {}
+    attributes = entry.get("attributes") or {}
+    canonical_url = str(
+        attributes.get("canonical_url")
+        or attributes.get("source_url")
+        or ""
+    ).strip()
+    canonical_url = _safe_https_source_url(canonical_url)
+    source_version = str(
+        attributes.get("version")
+        or metadata.get("created_at")
+        or entry.get("created_at")
+        or ""
+    ).strip()
+    safe_attributes = {
+        key: attributes.get(key)
+        for key in (
+            "canonical_url",
+            "corpus_type",
+            "source_sha256",
+            "source_url",
+            "version",
+        )
+        if attributes.get(key) not in (None, "")
+    }
+    safe_metadata = {
+        "purpose": metadata.get("purpose"),
+        "bytes": metadata.get("bytes"),
+        "created_at": metadata.get("created_at"),
+        "attributes": safe_attributes,
+    }
+    with _db() as conn:
+        existing = conn.execute(
+            "SELECT disposition_status, disposition_detail, terminal, "
+            "content_sha256, content_chars, terminal_at "
+            "FROM skillops_n8n_source_census WHERE source_file_id=?",
+            (source_file_id,),
+        ).fetchone()
+        if preserve_disposition and existing:
+            disposition_status = existing[0]
+            detail = existing[1] or ""
+            terminal = bool(existing[2])
+            content_sha256 = existing[3] or content_sha256
+            content_chars = int(existing[4] or content_chars)
+            terminal_at = existing[5]
+        else:
+            terminal_at = now if terminal else None
+        conn.execute(
+            "INSERT INTO skillops_n8n_source_census "
+            "(source_file_id, vector_store_id, vector_store_file_id, filename, "
+            "canonical_url, disposition_status, disposition_detail, terminal, "
+            "content_sha256, content_chars, source_version, last_seen_run_id, "
+            "metadata_json, first_seen_at, last_seen_at, terminal_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(source_file_id) DO UPDATE SET "
+            "vector_store_id=excluded.vector_store_id, "
+            "vector_store_file_id=excluded.vector_store_file_id, "
+            "filename=excluded.filename, canonical_url=excluded.canonical_url, "
+            "disposition_status=excluded.disposition_status, "
+            "disposition_detail=excluded.disposition_detail, "
+            "terminal=excluded.terminal, content_sha256=excluded.content_sha256, "
+            "content_chars=excluded.content_chars, "
+            "source_version=excluded.source_version, "
+            "last_seen_run_id=excluded.last_seen_run_id, "
+            "metadata_json=excluded.metadata_json, "
+            "last_seen_at=excluded.last_seen_at, terminal_at=excluded.terminal_at",
+            (
+                source_file_id,
+                vector_store_id,
+                vector_store_file_id,
+                filename,
+                canonical_url,
+                disposition_status,
+                (detail or "")[:1000],
+                1 if terminal else 0,
+                content_sha256,
+                int(content_chars or 0),
+                source_version,
+                run_id,
+                json.dumps(safe_metadata, sort_keys=True, default=str),
+                now,
+                now,
+                terminal_at,
+            ),
+        )
+
+
+def _mark_unseen_n8n_sources(
+        vector_store_id: str,
+        seen_source_ids: set[str],
+        run_id: str) -> int:
+    now = datetime.now(timezone.utc).isoformat()
+    parameters = [
+        "absent",
+        (
+            "Source was not present in the latest complete vector-store "
+            f"census ({run_id})."
+        ),
+        now,
+        vector_store_id,
+    ]
+    exclusion = ""
+    if seen_source_ids:
+        ordered_ids = sorted(seen_source_ids)
+        exclusion = (
+            " AND source_file_id NOT IN ("
+            + ",".join("?" for _ in ordered_ids)
+            + ")"
+        )
+        parameters.extend(ordered_ids)
+    with _db() as conn:
+        cursor = conn.execute(
+            "UPDATE skillops_n8n_source_census SET disposition_status=?, "
+            "disposition_detail=?, terminal=1, terminal_at=? "
+            "WHERE vector_store_id=?"
+            + exclusion,
+            tuple(parameters),
+        )
+    return cursor.rowcount
+
+
 def _get_sync_state(vector_store_id: str, source_file_id: str) -> dict:
     with _db() as conn:
         row = conn.execute(
             "SELECT success_version_hash, sync_policy_hash, content_sha256, content_chars, "
-            "synchronized_at, last_attempt_status, last_attempt_error "
+            "synchronized_at, last_attempt_status, last_attempt_error, "
+            "terminal_status, terminal_detail, terminal_at "
             "FROM skillops_vector_sync_files "
             "WHERE vector_store_id=? AND source_file_id=?",
             (vector_store_id, source_file_id),
@@ -1774,6 +3551,9 @@ def _get_sync_state(vector_store_id: str, source_file_id: str) -> dict:
         "synchronized_at": row[4],
         "last_attempt_status": row[5],
         "last_attempt_error": row[6],
+        "terminal_status": row[7],
+        "terminal_detail": row[8],
+        "terminal_at": row[9],
     }
 
 
@@ -1805,6 +3585,20 @@ def _record_sync_attempt(vector_store_id: str, source_file_id: str,
                 now,
             ),
         )
+
+        if status != "skipped_unchanged":
+            conn.execute(
+                "UPDATE skillops_vector_sync_files SET terminal_status=?, "
+                "terminal_detail=?, terminal_at=? "
+                "WHERE vector_store_id=? AND source_file_id=?",
+                (
+                    status,
+                    (error or "")[:1000] or None,
+                    now,
+                    vector_store_id,
+                    source_file_id,
+                ),
+            )
 
 
 def _record_sync_success(vector_store_id: str, source_file_id: str,
@@ -1847,6 +3641,12 @@ def _record_sync_success(vector_store_id: str, source_file_id: str,
                 now,
             ),
         )
+        conn.execute(
+            "UPDATE skillops_vector_sync_files SET terminal_status=?, "
+            "terminal_detail=NULL, terminal_at=? "
+            "WHERE vector_store_id=? AND source_file_id=?",
+            (status, now, vector_store_id, source_file_id),
+        )
 
 
 def _record_sync_handled(vector_store_id: str, source_file_id: str,
@@ -1884,6 +3684,18 @@ def _record_sync_handled(vector_store_id: str, source_file_id: str,
                 status,
                 (detail or "")[:1000] or None,
                 now,
+            ),
+        )
+        conn.execute(
+            "UPDATE skillops_vector_sync_files SET terminal_status=?, "
+            "terminal_detail=?, terminal_at=? "
+            "WHERE vector_store_id=? AND source_file_id=?",
+            (
+                status,
+                (detail or "")[:1000] or None,
+                now,
+                vector_store_id,
+                source_file_id,
             ),
         )
 
@@ -2028,6 +3840,7 @@ def sync_vector_store(
     }
     reports = []
     errors = []
+    n8n_seen_source_ids = set()
 
     with _vector_sync_lock() as acquired:
         if not acquired:
@@ -2096,6 +3909,11 @@ def sync_vector_store(
                 source_file_id = str(entry.get("file_id") or entry.get("id") or "")
                 vector_store_file_id = str(entry.get("id") or "")
                 filename = str(entry.get("filename") or source_file_id)
+                metadata = {}
+                text = ""
+                content_sha256 = ""
+                n8n_source = False
+                census_failure_status = "failed"
                 report = {
                     "file_id": source_file_id or None,
                     "vector_store_file_id": vector_store_file_id or None,
@@ -2110,6 +3928,9 @@ def sync_vector_store(
                     filename = str(metadata.get("filename") or filename)
                     report["filename"] = filename
                     report["purpose"] = metadata.get("purpose")
+                    n8n_source = _is_n8n_vector_source(entry, metadata)
+                    if n8n_source:
+                        n8n_seen_source_ids.add(source_file_id)
                     cache_fingerprint = _cached_vector_source_fingerprint(
                         source_file_id
                     )
@@ -2135,9 +3956,34 @@ def sync_vector_store(
                                 run_id,
                                 "skipped_unchanged",
                             )
+                            if n8n_source:
+                                _record_n8n_source_census(
+                                    vector_store_id,
+                                    source_file_id,
+                                    vector_store_file_id,
+                                    filename,
+                                    run_id,
+                                    "skipped_unchanged",
+                                    terminal=False,
+                                    entry=entry,
+                                    metadata=metadata,
+                                    preserve_disposition=True,
+                                )
                         reports.append(report)
                         continue
 
+                    if n8n_source and not dry_run:
+                        _record_n8n_source_census(
+                            vector_store_id,
+                            source_file_id,
+                            vector_store_file_id,
+                            filename,
+                            run_id,
+                            "pending",
+                            terminal=False,
+                            entry=entry,
+                            metadata=metadata,
+                        )
                     cached_text = _read_cached_vector_source(
                         source_file_id,
                         metadata,
@@ -2169,6 +4015,19 @@ def sync_vector_store(
                                 "skipped_content_unavailable",
                                 report["reason"],
                             )
+                            if n8n_source:
+                                _record_n8n_source_census(
+                                    vector_store_id,
+                                    source_file_id,
+                                    vector_store_file_id,
+                                    filename,
+                                    run_id,
+                                    "unavailable",
+                                    terminal=True,
+                                    detail=report["reason"],
+                                    entry=entry,
+                                    metadata=metadata,
+                                )
                         reports.append(report)
                         continue
 
@@ -2190,6 +4049,23 @@ def sync_vector_store(
                     content_sha256 = hashlib.sha256(
                         text.encode("utf-8")
                     ).hexdigest()
+                    n8n_source = _is_n8n_vector_source(entry, metadata, text)
+                    if n8n_source:
+                        n8n_seen_source_ids.add(source_file_id)
+                    if n8n_source and not dry_run:
+                        _record_n8n_source_census(
+                            vector_store_id,
+                            source_file_id,
+                            vector_store_file_id,
+                            filename,
+                            run_id,
+                            "pending",
+                            terminal=False,
+                            content_sha256=content_sha256,
+                            content_chars=len(text),
+                            entry=entry,
+                            metadata=metadata,
+                        )
                     if (
                         not force
                         and _content_was_synchronized(
@@ -2214,6 +4090,24 @@ def sync_vector_store(
                                 run_id,
                                 "skipped_duplicate_content",
                             )
+                            if n8n_source:
+                                _record_n8n_source_census(
+                                    vector_store_id,
+                                    source_file_id,
+                                    vector_store_file_id,
+                                    filename,
+                                    run_id,
+                                    "duplicate",
+                                    terminal=True,
+                                    detail=(
+                                        "Identical verified content was already "
+                                        "synchronized."
+                                    ),
+                                    content_sha256=content_sha256,
+                                    content_chars=len(text),
+                                    entry=entry,
+                                    metadata=metadata,
+                                )
                         reports.append(report)
                         continue
 
@@ -2240,7 +4134,7 @@ def sync_vector_store(
                             "content_sha256": content_sha256,
                             "content_chars": len(text),
                             "reason": (
-                                "no supported DocOps, CodeOps, or coding "
+                                "no supported DocOps, CodeOps, coding, or n8n "
                                 "capability ITEM blocks"
                             ),
                         })
@@ -2256,6 +4150,21 @@ def sync_vector_store(
                                 "skipped_unsupported_content",
                                 report["reason"],
                             )
+                            if n8n_source:
+                                _record_n8n_source_census(
+                                    vector_store_id,
+                                    source_file_id,
+                                    vector_store_file_id,
+                                    filename,
+                                    run_id,
+                                    "unsupported",
+                                    terminal=True,
+                                    detail=report["reason"],
+                                    content_sha256=content_sha256,
+                                    content_chars=len(text),
+                                    entry=entry,
+                                    metadata=metadata,
+                                )
                         reports.append(report)
                         continue
                     imported = preflight
@@ -2265,6 +4174,7 @@ def sync_vector_store(
                     )
                     import_errors = imported.get("errors", [])
                     if invalid_count or import_errors:
+                        census_failure_status = "invalid"
                         totals["items_skipped_invalid"] += max(
                             invalid_count,
                             1 if import_errors else 0,
@@ -2360,6 +4270,30 @@ def sync_vector_store(
                             run_id,
                             "synchronized",
                         )
+                        if n8n_source:
+                            _record_n8n_source_census(
+                                vector_store_id,
+                                source_file_id,
+                                vector_store_file_id,
+                                filename,
+                                run_id,
+                                (
+                                    "synchronized"
+                                    if content_type == N8N_CORPUS_TYPE
+                                    else "classified_non_n8n"
+                                ),
+                                terminal=True,
+                                detail=(
+                                    "Governed n8n capability corpus synchronized."
+                                    if content_type == N8N_CORPUS_TYPE
+                                    else "Source was classified and routed to a "
+                                    "different governed corpus."
+                                ),
+                                content_sha256=content_sha256,
+                                content_chars=len(text),
+                                entry=entry,
+                                metadata=metadata,
+                            )
                 except Exception as exc:
                     error = str(exc)
                     totals["files_failed"] += 1
@@ -2375,8 +4309,29 @@ def sync_vector_store(
                             "failed",
                             error,
                         )
+                        if n8n_source:
+                            _record_n8n_source_census(
+                                vector_store_id,
+                                source_file_id,
+                                vector_store_file_id,
+                                filename,
+                                run_id,
+                                census_failure_status,
+                                terminal=True,
+                                detail=error,
+                                content_sha256=content_sha256,
+                                content_chars=len(text),
+                                entry=entry,
+                                metadata=metadata,
+                            )
                 reports.append(report)
 
+            if not dry_run and max_files == 0:
+                _mark_unseen_n8n_sources(
+                    vector_store_id,
+                    n8n_seen_source_ids,
+                    run_id,
+                )
             if totals["files_failed"]:
                 final_status = "partial_failed"
             elif dry_run:
@@ -2446,7 +4401,8 @@ def get_vector_sync_status(limit: int = 10) -> dict:
         file_rows = conn.execute(
             "SELECT vector_store_id, source_file_id, vector_store_file_id, "
             "filename, content_sha256, content_chars, synchronized_at, "
-            "last_attempt_status, last_attempt_error, last_attempt_at "
+            "last_attempt_status, last_attempt_error, last_attempt_at, "
+            "terminal_status, terminal_detail, terminal_at "
             "FROM skillops_vector_sync_files "
             "ORDER BY COALESCE(last_attempt_at, synchronized_at) DESC LIMIT 100"
         ).fetchall()
@@ -2490,6 +4446,9 @@ def get_vector_sync_status(limit: int = 10) -> dict:
                 "last_attempt_status": row[7],
                 "last_attempt_error": row[8],
                 "last_attempt_at": row[9],
+                "terminal_status": row[10],
+                "terminal_detail": row[11],
+                "terminal_at": row[12],
             }
             for row in file_rows
         ],
@@ -2872,7 +4831,8 @@ SKILLOPS_SCHEMAS = [
     {"type": "function", "name": "learn_from_vector_store",
      "description": ("Process every file in PJ's configured vector store and "
                      "import supported ITEM corpora into DocOps templates or "
-                     "the coding-capability registry with persistent audit."),
+                     "the shared coding/n8n capability registry with persistent "
+                     "audit."),
      "parameters": {"type": "object", "properties": {
          "dry_run": {"type": "boolean",
                      "description": "Parse and report without mutating templates/aliases"},
@@ -2887,11 +4847,12 @@ SKILLOPS_SCHEMAS = [
      }, "required": []}},
     {"type": "function", "name": "sync_vector_store",
      "description": ("Idempotently synchronize hash-cached vector-store "
-                    "sources into DocOps templates, CodeOps guidance, or coding "
-                    "capabilities using durable deduplication, a cross-process "
-                    "lock, and run audit. Provider-hosted inputs without an "
-                    "approved local cache are classified as unavailable rather "
-                    "than partially imported."),
+                    "sources into DocOps templates, CodeOps guidance, coding "
+                    "capabilities, or governed n8n capabilities using durable "
+                    "deduplication, source census, a cross-process lock, and "
+                    "run audit. Provider-hosted inputs without an approved local "
+                    "cache are classified as unavailable rather than partially "
+                    "imported."),
      "parameters": {"type": "object", "properties": {
         "dry_run": {"type": "boolean",
                     "description": "Report changes without mutating DocOps, CodeOps, or file sync state"},
@@ -2926,6 +4887,33 @@ SKILLOPS_SCHEMAS = [
         "limit": {"type": "integer",
                   "description": "Maximum capabilities to return (1-100)"},
      }, "required": []}},
+    {"type": "function", "name": "list_n8n_capabilities",
+     "description": (
+        "List governed n8n capabilities from the shared domain registry, "
+        "including workflows, output contracts, safety controls, deployment "
+        "differences, freshness requirements, and release-gate state."
+     ),
+     "parameters": {"type": "object", "properties": {
+        "query": {"type": "string",
+                  "description": "Optional title, ID, output, or guidance search"},
+        "taxonomy": {"type": "string",
+                     "description": "Optional taxonomy filter"},
+        "task_type": {"type": "string",
+                      "description": "Optional task-type filter"},
+        "limit": {"type": "integer",
+                  "description": "Maximum capabilities to return (1-100)"},
+     }, "required": []}},
+    {"type": "function", "name": "get_n8n_corpus_status",
+     "description": (
+        "Inspect the governed n8n corpus inventory, source census, evaluation "
+        "thresholds, synchronization health, and fail-closed production gate."
+     ),
+     "parameters": {"type": "object", "properties": {
+        "include_census": {
+            "type": "boolean",
+            "description": "Include bounded per-source census details",
+        },
+     }, "required": []}},
     {"type": "function", "name": "deprecate_skill",
      "description": "Deprecate a generated skill so it no longer loads (reversible via activate_skill).",
      "parameters": {"type": "object", "properties": {
@@ -2943,5 +4931,7 @@ SKILLOPS_DISPATCH = {
     "sync_vector_store": sync_vector_store,
     "get_vector_sync_status": get_vector_sync_status,
     "list_coding_capabilities": list_coding_capabilities,
+    "list_n8n_capabilities": list_n8n_capabilities,
+    "get_n8n_corpus_status": get_n8n_corpus_status,
     "deprecate_skill": deprecate_skill,
 }
