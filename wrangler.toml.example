@@ -19,4 +19,6 @@ CF_ACCESS_AUD = "replace-with-access-application-aud"
 # PJ_TOOL_BRIDGE_TOKEN
 #
 # PJ_TOOL_BRIDGE_URL and PJ_TOOL_SCHEMAS_URL must target the private runtime.
+# PJ_RESPONSES_BRIDGE_URL may optionally override the runtime base URL used for
+# Full Power routes; it is derived from PJ_TOOL_BRIDGE_URL when omitted.
 # CF_ACCESS_CERT_CACHE_TTL_MS may optionally override the 300000 ms default.

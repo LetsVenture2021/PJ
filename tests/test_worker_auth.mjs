@@ -11,7 +11,10 @@ const {
   bridgeHeaders,
   buildAccessConfig,
   default: worker,
+  deriveResponsesBridgeBaseUrl,
+  handleResponsesProxy,
   isPublicRoute,
+  isResponsesRoute,
   responseHeaders,
   validateAccessIdentity,
 } = workerModule;
@@ -90,10 +93,62 @@ test("only health and preflight are public", () => {
     ["POST", "/token"],
     ["GET", "/tool-schemas"],
     ["POST", "/execute-tool"],
+    ["GET", "/responses/capabilities"],
+    ["POST", "/responses/sessions/example_123/turns"],
     ["POST", "/future-full-power"],
   ]) {
     assert.equal(isPublicRoute(method, path), false, `${method} ${path} must be privileged`);
   }
+});
+
+test("Full Power routes and bridge URL derivation are narrowly scoped", () => {
+  assert.equal(isResponsesRoute("GET", "/responses/capabilities"), true);
+  assert.equal(isResponsesRoute("GET", "/responses/sessions/search"), true);
+  assert.equal(isResponsesRoute("POST", "/responses/sessions/example_123/resume"), true);
+  assert.equal(isResponsesRoute("POST", "/responses/sessions/example_123/turns"), true);
+  assert.equal(isResponsesRoute("DELETE", "/responses/sessions/example_123"), false);
+  assert.equal(isResponsesRoute("POST", "/responses/arbitrary"), false);
+  assert.equal(
+    deriveResponsesBridgeBaseUrl({
+      PJ_TOOL_BRIDGE_URL: "https://tools.pj-assistant.ai/execute-tool",
+    }),
+    "https://tools.pj-assistant.ai",
+  );
+});
+
+test("Full Power proxy streams SSE with only allowlisted bridge headers", async () => {
+  let captured = null;
+  const response = await handleResponsesProxy(
+    new Request("https://pj-assistant.ai/responses/sessions/example_123/turns", {
+      method: "POST",
+      headers: {
+        Authorization: "Bearer browser-credential",
+        "Cf-Access-Jwt-Assertion": "access-assertion",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ message: "Research this" }),
+    }),
+    {
+      PJ_TOOL_BRIDGE_URL: "https://tools.pj-assistant.ai/execute-tool",
+      PJ_TOOL_BRIDGE_TOKEN: "bridge-secret",
+    },
+    "https://pj-assistant.ai",
+    "request-stream",
+    async (url, options) => {
+      captured = { url, options };
+      return new Response(
+        'event: completion\ndata: {"type":"completion","text":"Done"}\n\n',
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    },
+  );
+
+  assert.equal(captured.url, "https://tools.pj-assistant.ai/responses/sessions/example_123/turns");
+  assert.equal(captured.options.headers.authorization, "Bearer bridge-secret");
+  assert.equal(captured.options.headers["cf-access-jwt-assertion"], undefined);
+  assert.equal(captured.options.headers.accept, "text/event-stream");
+  assert.equal(response.headers.get("content-type"), "text/event-stream");
+  assert.match(await response.text(), /"type":"completion"/);
 });
 
 test("Access configuration requires team domain, audience, and owner allowlist", () => {

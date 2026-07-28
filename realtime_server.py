@@ -25,6 +25,7 @@ import chatlog
 import skills
 from realtime_config import realtime_session_config
 from responses_runtime import (
+    ADVANCED_DELEGATION_TOOL,
     capability_manifest,
     dispatch_realtime_function,
     load_config,
@@ -117,6 +118,7 @@ def _function_tool_schemas():
         if not isinstance(schema.get("name"), str) or not schema["name"].strip():
             continue
         tools.append(schema)
+    tools.append(ADVANCED_DELEGATION_TOOL)
     return tools
 
 
