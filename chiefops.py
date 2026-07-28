@@ -24,6 +24,7 @@ import sqlite3
 import subprocess
 import urllib.request
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -31,43 +32,48 @@ _ROOT = Path(__file__).resolve().parent
 _DB_PATH = _ROOT / "pj_data.sqlite3"
 
 
+@contextmanager
 def _db():
     conn = sqlite3.connect(_DB_PATH)
-    for ddl in (
-        """CREATE TABLE IF NOT EXISTS co_projects (
-            id TEXT PRIMARY KEY, name TEXT NOT NULL, org TEXT DEFAULT '',
-            status TEXT DEFAULT 'active', next_milestone TEXT DEFAULT '',
-            milestone_due TEXT DEFAULT '', notes TEXT DEFAULT '',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""",
-        """CREATE TABLE IF NOT EXISTS co_commitments (
-            id TEXT PRIMARY KEY, who TEXT NOT NULL, what TEXT NOT NULL,
-            due TEXT DEFAULT '', direction TEXT DEFAULT 'owed_by_me',
-            status TEXT DEFAULT 'open', project_id TEXT DEFAULT '',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP)""",
-        """CREATE TABLE IF NOT EXISTS co_opportunities (
-            id TEXT PRIMARY KEY, name TEXT NOT NULL, org TEXT DEFAULT '',
-            stage TEXT DEFAULT 'lead', value_usd REAL DEFAULT 0,
-            probability REAL DEFAULT 0.3, next_step TEXT DEFAULT '',
-            notes TEXT DEFAULT '', status TEXT DEFAULT 'open',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""",
-        """CREATE TABLE IF NOT EXISTS co_decisions (
-            id TEXT PRIMARY KEY, decision TEXT NOT NULL,
-            rationale TEXT DEFAULT '', alternatives TEXT DEFAULT '',
-            context TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP)""",
-        """CREATE TABLE IF NOT EXISTS co_interactions (
-            id TEXT PRIMARY KEY, person TEXT NOT NULL, org TEXT DEFAULT '',
-            channel TEXT DEFAULT '', summary TEXT NOT NULL,
-            follow_up TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP)""",
-        """CREATE TABLE IF NOT EXISTS co_risks (
-            id TEXT PRIMARY KEY, risk TEXT NOT NULL,
-            severity TEXT DEFAULT 'medium', mitigation TEXT DEFAULT '',
-            status TEXT DEFAULT 'open', project_id TEXT DEFAULT '',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP)""",
-    ):
-        conn.execute(ddl)
-    return conn
+    try:
+        for ddl in (
+            """CREATE TABLE IF NOT EXISTS co_projects (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, org TEXT DEFAULT '',
+                status TEXT DEFAULT 'active', next_milestone TEXT DEFAULT '',
+                milestone_due TEXT DEFAULT '', notes TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""",
+            """CREATE TABLE IF NOT EXISTS co_commitments (
+                id TEXT PRIMARY KEY, who TEXT NOT NULL, what TEXT NOT NULL,
+                due TEXT DEFAULT '', direction TEXT DEFAULT 'owed_by_me',
+                status TEXT DEFAULT 'open', project_id TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP)""",
+            """CREATE TABLE IF NOT EXISTS co_opportunities (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, org TEXT DEFAULT '',
+                stage TEXT DEFAULT 'lead', value_usd REAL DEFAULT 0,
+                probability REAL DEFAULT 0.3, next_step TEXT DEFAULT '',
+                notes TEXT DEFAULT '', status TEXT DEFAULT 'open',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""",
+            """CREATE TABLE IF NOT EXISTS co_decisions (
+                id TEXT PRIMARY KEY, decision TEXT NOT NULL,
+                rationale TEXT DEFAULT '', alternatives TEXT DEFAULT '',
+                context TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP)""",
+            """CREATE TABLE IF NOT EXISTS co_interactions (
+                id TEXT PRIMARY KEY, person TEXT NOT NULL, org TEXT DEFAULT '',
+                channel TEXT DEFAULT '', summary TEXT NOT NULL,
+                follow_up TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP)""",
+            """CREATE TABLE IF NOT EXISTS co_risks (
+                id TEXT PRIMARY KEY, risk TEXT NOT NULL,
+                severity TEXT DEFAULT 'medium', mitigation TEXT DEFAULT '',
+                status TEXT DEFAULT 'open', project_id TEXT DEFAULT '',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP)""",
+        ):
+            conn.execute(ddl)
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _id():

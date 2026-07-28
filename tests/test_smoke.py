@@ -99,6 +99,62 @@ class TestGeneratedSkills(unittest.TestCase):
                                   f"{name} returned non-dict")
 
 
+class TestDocOpsTemplateImport(unittest.TestCase):
+    def test_import_knowledge_pack_registers_aliases(self):
+        knowledge_pack = """\
+---ITEM_START
+item_id: ITEM-ALPHA-001
+canonical_title: Customer Success Weekly Brief
+template_name: customer_success_weekly
+description: Weekly operating brief for customer success.
+required_sections:
+- Purpose
+- Highlights
+- Next Actions
+optional_sections:
+- Risks
+---ITEM_END
+"""
+        imported = docops.import_doc_templates_from_knowledge_pack_text(
+            knowledge_pack,
+            overwrite_existing=True,
+            include_provisional=True,
+            dry_run=False,
+        )
+        self.assertIn(imported["status"], ("imported", "dry_run_complete"))
+        self.assertGreaterEqual(
+            imported["templates_created"] + imported["templates_updated"], 1
+        )
+
+        sections = {
+            "Purpose": "Summarize the operating week.",
+            "Highlights": "Retention improved by 4%.",
+            "Next Actions": "Expand QBR prep automation.",
+            "Risks": "None",
+        }
+        created_paths = []
+        try:
+            drafted_by_title = docops.draft_document(
+                "Customer Success Weekly Brief",
+                "CS Weekly",
+                json.dumps(sections),
+            )
+            self.assertIn("doc_id", drafted_by_title)
+            created_paths.append(drafted_by_title.get("path"))
+
+            drafted_by_item_id = docops.draft_document(
+                "ITEM-ALPHA-001",
+                "CS Weekly by Item ID",
+                json.dumps(sections),
+            )
+            self.assertIn("doc_id", drafted_by_item_id)
+            created_paths.append(drafted_by_item_id.get("path"))
+        finally:
+            for path in created_paths:
+                if path:
+                    Path(path).unlink(missing_ok=True)
+
+
 class TestConfig(unittest.TestCase):
     def test_config_and_mcp_json_valid(self):
         with open(BASE_DIR / "config.json") as f:

@@ -22,25 +22,30 @@ Active skills are loaded dynamically by skills.py at startup.
 import ast
 import importlib.util
 import json
+import os
 import sqlite3
 import subprocess
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+import requests
 
 _ROOT = Path(__file__).resolve().parent
 _DB_PATH = _ROOT / "pj_data.sqlite3"
 GENERATED_DIR = _ROOT / "generated_skills"
 GENERATED_DIR.mkdir(exist_ok=True)
+_CONFIG_PATH = _ROOT / "config.json"
 
 # Names that can never be overridden by generated skills.
 RESERVED_NAMES = {
     "get_current_time", "add_task", "list_tasks", "complete_task",
     "save_note", "search_notes", "get_active_browser_tab", "run_shortcut",
     "observe_pattern", "list_observations", "create_skill", "activate_skill",
-    "review_skills", "deprecate_skill",
+    "review_skills", "deprecate_skill", "learn_from_vector_store",
     "list_doc_templates", "create_doc_template", "draft_document",
     "revise_document", "finalize_document", "export_document",
     "list_documents", "get_document",
@@ -51,7 +56,9 @@ RESERVED_NAMES = {
     "list_commitments", "complete_commitment", "log_opportunity",
     "update_opportunity", "pipeline_review", "log_decision",
     "search_decisions", "log_risk", "fetch_url", "check_website",
-    "daily_brief",
+    "daily_brief", "create_goal_contract", "update_goal_contract",
+    "list_goal_contracts", "build_evidence_bundle", "timeline_replay",
+    "weekly_operating_review",
 }
 
 # Lifecycle policy (governed thresholds, tunable in one place).
@@ -65,37 +72,86 @@ POLICY = {
     "slow_p90_ms": 10_000,
 }
 
+MAX_SKILL_SOURCE_CHARS = 20_000
+FORBIDDEN_IMPORT_PREFIXES = (
+    "os",
+    "subprocess",
+    "socket",
+    "ctypes",
+    "multiprocessing",
+    "resource",
+    "signal",
+    "pty",
+    "telnetlib",
+)
+FORBIDDEN_CALL_NAMES = {"eval", "exec", "compile", "open", "__import__", "input"}
+FORBIDDEN_ATTR_CALLS = {
+    ("os", "system"),
+    ("os", "popen"),
+    ("subprocess", "Popen"),
+    ("subprocess", "run"),
+    ("subprocess", "call"),
+    ("subprocess", "check_call"),
+    ("subprocess", "check_output"),
+}
 
+
+@contextmanager
 def _db():
     conn = sqlite3.connect(_DB_PATH)
-    conn.execute("""CREATE TABLE IF NOT EXISTS skillops_observations (
-        id TEXT PRIMARY KEY,
-        pattern TEXT NOT NULL,
-        context TEXT DEFAULT '',
-        frequency_hint TEXT DEFAULT '',
-        status TEXT DEFAULT 'open',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS skillops_registry (
-        name TEXT PRIMARY KEY,
-        version INTEGER DEFAULT 1,
-        status TEXT DEFAULT 'candidate',
-        description TEXT DEFAULT '',
-        origin TEXT DEFAULT 'pj_generated',
-        path TEXT DEFAULT '',
-        review_note TEXT DEFAULT '',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS skillops_telemetry (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        skill TEXT NOT NULL,
-        ok INTEGER NOT NULL,
-        latency_ms INTEGER NOT NULL,
-        error TEXT,
-        ts TEXT DEFAULT CURRENT_TIMESTAMP
-    )""")
-    return conn
+    try:
+        conn.execute("""CREATE TABLE IF NOT EXISTS skillops_observations (
+            id TEXT PRIMARY KEY,
+            pattern TEXT NOT NULL,
+            context TEXT DEFAULT '',
+            frequency_hint TEXT DEFAULT '',
+            status TEXT DEFAULT 'open',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS skillops_registry (
+            name TEXT PRIMARY KEY,
+            version INTEGER DEFAULT 1,
+            status TEXT DEFAULT 'candidate',
+            description TEXT DEFAULT '',
+            origin TEXT DEFAULT 'pj_generated',
+            path TEXT DEFAULT '',
+            review_note TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS skillops_telemetry (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            skill TEXT NOT NULL,
+            ok INTEGER NOT NULL,
+            latency_ms INTEGER NOT NULL,
+            error TEXT,
+            ts TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS skillops_learning_runs (
+            run_id TEXT PRIMARY KEY,
+            vector_store_id TEXT NOT NULL,
+            dry_run INTEGER DEFAULT 0,
+            overwrite_existing INTEGER DEFAULT 0,
+            include_provisional INTEGER DEFAULT 0,
+            max_files INTEGER DEFAULT 0,
+            max_chars_per_file INTEGER DEFAULT 0,
+            files_seen INTEGER DEFAULT 0,
+            files_processed INTEGER DEFAULT 0,
+            templates_created INTEGER DEFAULT 0,
+            templates_updated INTEGER DEFAULT 0,
+            aliases_registered INTEGER DEFAULT 0,
+            items_skipped_provisional INTEGER DEFAULT 0,
+            items_skipped_invalid INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'running',
+            error TEXT,
+            details_json TEXT DEFAULT '',
+            started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            finished_at TEXT
+        )""")
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------- telemetry
@@ -138,10 +194,283 @@ def list_observations(status: str = "open") -> dict:
         for r in rows]}
 
 
+def _load_runtime_config() -> dict:
+    try:
+        return json.loads(_CONFIG_PATH.read_text())
+    except Exception:
+        return {}
+
+
+def _require_vector_store_id() -> str:
+    cfg = _load_runtime_config()
+    vector_store_id = str(
+        cfg.get("vector_store_id") or os.getenv("PJ_VECTOR_STORE_ID") or ""
+    ).strip()
+    if not vector_store_id:
+        raise ValueError(
+            "vector_store_id is missing in config.json and PJ_VECTOR_STORE_ID is not set"
+        )
+    return vector_store_id
+
+
+def _require_openai_api_key() -> str:
+    api_key = str(os.getenv("OPENAI_API_KEY") or "").strip()
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY is not set")
+    return api_key
+
+
+def _openai_headers(api_key: str) -> dict:
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+
+def _list_vector_store_files(vector_store_id: str, api_key: str,
+                             max_files: int = 0) -> list:
+    files = []
+    after = None
+    while True:
+        params = {"limit": 100}
+        if after:
+            params["after"] = after
+        resp = requests.get(
+            f"https://api.openai.com/v1/vector_stores/{vector_store_id}/files",
+            headers=_openai_headers(api_key),
+            params=params,
+            timeout=30,
+        )
+        if resp.status_code >= 400:
+            raise RuntimeError(
+                f"vector store file list failed ({resp.status_code}): "
+                f"{resp.text[:300]}"
+            )
+        payload = resp.json()
+        data = payload.get("data", [])
+        files.extend(data)
+        if max_files > 0 and len(files) >= max_files:
+            return files[:max_files]
+        if not payload.get("has_more"):
+            break
+        after = payload.get("last_id") or (
+            data[-1].get("id") if data else None
+        )
+        if not after:
+            break
+    return files
+
+
+def _read_openai_file_content(file_id: str, api_key: str,
+                              max_chars_per_file: int) -> tuple[str, bool]:
+    resp = requests.get(
+        f"https://api.openai.com/v1/files/{file_id}/content",
+        headers={"Authorization": f"Bearer {api_key}"},
+        timeout=40,
+    )
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"file content read failed for {file_id} ({resp.status_code}): "
+            f"{resp.text[:300]}"
+        )
+    text = resp.content.decode("utf-8", errors="replace")
+    if max_chars_per_file > 0 and len(text) > max_chars_per_file:
+        return text[:max_chars_per_file], True
+    return text, False
+
+
+def learn_from_vector_store(
+        dry_run: bool = False,
+        max_files: int = 0,
+        overwrite_existing: bool = False,
+        include_provisional: bool = False,
+        max_chars_per_file: int = 250_000) -> dict:
+    """Import template specs from every file in the configured vector store."""
+    run_id = "lrn-" + str(uuid.uuid4())[:8]
+    now = datetime.now(timezone.utc).isoformat()
+    max_files = max(0, int(max_files or 0))
+    max_chars_per_file = max(10_000, min(int(max_chars_per_file or 250_000),
+                                          2_000_000))
+    vector_store_id = ""
+    api_key = ""
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO skillops_learning_runs "
+            "(run_id, vector_store_id, dry_run, overwrite_existing, "
+            "include_provisional, max_files, max_chars_per_file, status, "
+            "details_json, started_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                run_id,
+                "unknown",
+                1 if dry_run else 0,
+                1 if overwrite_existing else 0,
+                1 if include_provisional else 0,
+                max_files,
+                max_chars_per_file,
+                "running",
+                "{}",
+                now,
+            ),
+        )
+
+    totals = {
+        "files_seen": 0,
+        "files_processed": 0,
+        "templates_created": 0,
+        "templates_updated": 0,
+        "aliases_registered": 0,
+        "items_skipped_provisional": 0,
+        "items_skipped_invalid": 0,
+    }
+    file_reports = []
+    errors = []
+    try:
+        vector_store_id = _require_vector_store_id()
+        api_key = _require_openai_api_key()
+        with _db() as conn:
+            conn.execute(
+                "UPDATE skillops_learning_runs SET vector_store_id=? WHERE run_id=?",
+                (vector_store_id, run_id),
+            )
+
+        files = _list_vector_store_files(vector_store_id, api_key, max_files)
+        totals["files_seen"] = len(files)
+
+        import docops
+
+        for entry in files:
+            content_file_id = entry.get("file_id") or entry.get("id")
+            if not content_file_id:
+                continue
+            text, truncated = _read_openai_file_content(
+                content_file_id, api_key, max_chars_per_file
+            )
+            totals["files_processed"] += 1
+            imported = docops.import_doc_templates_from_knowledge_pack_text(
+                text,
+                overwrite_existing=overwrite_existing,
+                include_provisional=include_provisional,
+                dry_run=dry_run,
+            )
+            totals["templates_created"] += int(imported.get("templates_created", 0))
+            totals["templates_updated"] += int(imported.get("templates_updated", 0))
+            totals["aliases_registered"] += int(imported.get("aliases_registered", 0))
+            totals["items_skipped_provisional"] += int(
+                imported.get("items_skipped_provisional", 0)
+            )
+            totals["items_skipped_invalid"] += int(
+                imported.get("items_skipped_invalid", 0)
+            )
+            for err in imported.get("errors", [])[:10]:
+                errors.append(f"{content_file_id}: {err}")
+            file_reports.append({
+                "file_id": content_file_id,
+                "vector_store_file_id": entry.get("id"),
+                "filename": entry.get("filename"),
+                "truncated": truncated,
+                "items_total": imported.get("items_total", 0),
+                "templates_created": imported.get("templates_created", 0),
+                "templates_updated": imported.get("templates_updated", 0),
+                "status": imported.get("status"),
+            })
+
+        context = (
+            f"vector_store_id={vector_store_id}; dry_run={bool(dry_run)}; "
+            f"files_processed={totals['files_processed']}; "
+            f"templates_created={totals['templates_created']}; "
+            f"templates_updated={totals['templates_updated']}; "
+            f"aliases_registered={totals['aliases_registered']}"
+        )
+        obs = observe_pattern(
+            pattern="Vector store learning sync executed",
+            context=context,
+            frequency_hint="on-demand",
+        )
+
+        details = {
+            "totals": totals,
+            "files": file_reports,
+            "errors": errors[:100],
+            "observation_id": obs.get("observation_id"),
+        }
+        with _db() as conn:
+            conn.execute(
+                "UPDATE skillops_learning_runs SET "
+                "files_seen=?, files_processed=?, templates_created=?, "
+                "templates_updated=?, aliases_registered=?, "
+                "items_skipped_provisional=?, items_skipped_invalid=?, "
+                "status='completed', error=NULL, details_json=?, finished_at=? "
+                "WHERE run_id=?",
+                (
+                    totals["files_seen"],
+                    totals["files_processed"],
+                    totals["templates_created"],
+                    totals["templates_updated"],
+                    totals["aliases_registered"],
+                    totals["items_skipped_provisional"],
+                    totals["items_skipped_invalid"],
+                    json.dumps(details),
+                    datetime.now(timezone.utc).isoformat(),
+                    run_id,
+                ),
+            )
+        return {
+            "status": "dry_run_complete" if dry_run else "completed",
+            "run_id": run_id,
+            "vector_store_id": vector_store_id,
+            "dry_run": bool(dry_run),
+            "files_seen": totals["files_seen"],
+            "files_processed": totals["files_processed"],
+            "templates_created": totals["templates_created"],
+            "templates_updated": totals["templates_updated"],
+            "aliases_registered": totals["aliases_registered"],
+            "items_skipped_provisional": totals["items_skipped_provisional"],
+            "items_skipped_invalid": totals["items_skipped_invalid"],
+            "observation_id": obs.get("observation_id"),
+            "file_reports": file_reports,
+            "errors": errors[:50],
+        }
+    except Exception as exc:
+        err = str(exc)
+        observe_pattern(
+            pattern="Vector store learning sync failed",
+            context=f"run_id={run_id}; error={err[:300]}",
+            frequency_hint="on-demand",
+        )
+        with _db() as conn:
+            conn.execute(
+                "UPDATE skillops_learning_runs SET status='failed', error=?, "
+                "details_json=?, finished_at=? WHERE run_id=?",
+                (
+                    err[:500],
+                    json.dumps({
+                        "totals": totals,
+                        "files": file_reports,
+                        "errors": errors[:100],
+                        "vector_store_id": vector_store_id,
+                    }),
+                    datetime.now(timezone.utc).isoformat(),
+                    run_id,
+                ),
+            )
+        return {"status": "failed", "run_id": run_id, "error": err}
+
+
 # ---------------------------------------------------------- skill creation
+def _is_forbidden_import(module_name: str) -> bool:
+    if not module_name:
+        return False
+    return any(
+        module_name == prefix or module_name.startswith(prefix + ".")
+        for prefix in FORBIDDEN_IMPORT_PREFIXES
+    )
+
+
 def _validate_code(name: str, code: str) -> list:
     """Static checks. Returns a list of error strings (empty = ok)."""
     errors = []
+    if len(code or "") > MAX_SKILL_SOURCE_CHARS:
+        errors.append(f"code exceeds max size ({MAX_SKILL_SOURCE_CHARS} chars)")
     try:
         tree = ast.parse(code)
     except SyntaxError as exc:
@@ -154,6 +483,23 @@ def _validate_code(name: str, code: str) -> list:
         errors.append("name must be a lowercase python identifier")
     if name in RESERVED_NAMES:
         errors.append(f"'{name}' is a reserved built-in skill name")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if _is_forbidden_import(alias.name):
+                    errors.append(f"forbidden import: {alias.name}")
+        elif isinstance(node, ast.ImportFrom):
+            module_name = node.module or ""
+            if _is_forbidden_import(module_name):
+                errors.append(f"forbidden import: {module_name}")
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_CALL_NAMES:
+                errors.append(f"forbidden call: {node.func.id}()")
+            elif isinstance(node.func, ast.Attribute) and \
+                    isinstance(node.func.value, ast.Name):
+                pair = (node.func.value.id, node.func.attr)
+                if pair in FORBIDDEN_ATTR_CALLS:
+                    errors.append(f"forbidden call: {pair[0]}.{pair[1]}()")
     return errors
 
 
@@ -246,12 +592,35 @@ def create_skill(name: str, description: str, code: str,
 def activate_skill(name: str) -> dict:
     """Promote a candidate skill to active so PJ loads it as a tool."""
     with _db() as conn:
-        cur = conn.execute(
-            "UPDATE skillops_registry SET status='active', "
-            "updated_at=? WHERE name=? AND status IN ('candidate','deprecated')",
-            (datetime.now(timezone.utc).isoformat(), name))
-    if not cur.rowcount:
+        row = conn.execute(
+            "SELECT path, status FROM skillops_registry WHERE name=?",
+            (name,),
+        ).fetchone()
+    if not row or row[1] not in ("candidate", "deprecated"):
         return {"status": "not_found_or_already_active", "name": name}
+
+    skill_path = Path(row[0] or "")
+    if not skill_path.exists():
+        return {"status": "rejected", "name": name,
+                "errors": [f"skill file missing at {skill_path}"]}
+
+    errors = _validate_code(name, skill_path.read_text())
+    if errors:
+        with _db() as conn:
+            conn.execute(
+                "UPDATE skillops_registry SET review_note=?, updated_at=? "
+                "WHERE name=?",
+                ("activation blocked by safety policy",
+                 datetime.now(timezone.utc).isoformat(), name),
+            )
+        return {"status": "rejected", "name": name, "errors": errors}
+
+    with _db() as conn:
+        conn.execute(
+            "UPDATE skillops_registry SET status='active', review_note='', "
+            "updated_at=? WHERE name=? AND status IN ('candidate','deprecated')",
+            (datetime.now(timezone.utc).isoformat(), name),
+        )
     return {"status": "active", "name": name,
             "note": "loads on next PJ start"}
 
@@ -460,6 +829,22 @@ SKILLOPS_SCHEMAS = [
                      "deprecate / tech-refresh actions. Use periodically and "
                      "before creating new skills."),
      "parameters": {"type": "object", "properties": {}, "required": []}},
+    {"type": "function", "name": "learn_from_vector_store",
+     "description": ("Process every file in PJ's configured vector store and "
+                     "import ITEM specs into DocOps templates, including alias "
+                     "registration and persistent SkillOps learning-run audit."),
+     "parameters": {"type": "object", "properties": {
+         "dry_run": {"type": "boolean",
+                     "description": "Parse and report without mutating templates/aliases"},
+         "max_files": {"type": "integer",
+                       "description": "Optional cap on number of vector-store files to process (0=all)"},
+         "overwrite_existing": {"type": "boolean",
+                                "description": "Allow updating existing templates and alias remaps"},
+         "include_provisional": {"type": "boolean",
+                                 "description": "Import items marked provisional/draft/experimental"},
+         "max_chars_per_file": {"type": "integer",
+                                "description": "Max characters to read from each file before parsing"},
+     }, "required": []}},
     {"type": "function", "name": "deprecate_skill",
      "description": "Deprecate a generated skill so it no longer loads (reversible via activate_skill).",
      "parameters": {"type": "object", "properties": {
@@ -473,5 +858,6 @@ SKILLOPS_DISPATCH = {
     "create_skill": create_skill,
     "activate_skill": activate_skill,
     "review_skills": review_skills,
+    "learn_from_vector_store": learn_from_vector_store,
     "deprecate_skill": deprecate_skill,
 }

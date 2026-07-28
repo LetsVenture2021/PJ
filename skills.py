@@ -11,37 +11,48 @@ Python function and returns the result, which is fed back into the
 conversation.
 """
 import json
+import os
 import sqlite3
 import subprocess
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 _DB_PATH = Path(__file__).resolve().parent / "pj_data.sqlite3"
+_TOOL_POLICY_PATH = Path(
+    os.getenv("PJ_TOOL_POLICY_PATH",
+              str(Path(__file__).resolve().parent / "tool_policy.json"))
+)
 
 
+@contextmanager
 def _db():
     conn = sqlite3.connect(_DB_PATH)
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS tasks (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            notes TEXT DEFAULT '',
-            priority TEXT DEFAULT 'P2',
-            status TEXT DEFAULT 'open',
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )"""
-    )
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS notes (
-            id TEXT PRIMARY KEY,
-            topic TEXT NOT NULL,
-            content TEXT NOT NULL,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )"""
-    )
-    return conn
+    try:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS tasks (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                notes TEXT DEFAULT '',
+                priority TEXT DEFAULT 'P2',
+                status TEXT DEFAULT 'open',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS notes (
+                id TEXT PRIMARY KEY,
+                topic TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )"""
+        )
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_current_time(timezone: str = "America/Chicago") -> dict:
@@ -276,20 +287,82 @@ import chiefops as _chiefops
 TOOL_SCHEMAS.extend(_chiefops.CHIEFOPS_SCHEMAS)
 DISPATCH_TABLE.update(_chiefops.CHIEFOPS_DISPATCH)
 
+# --- StrategyOps: goal contracts + evidence + memory replay ------------------
+import strategyops as _strategyops
+
+TOOL_SCHEMAS.extend(_strategyops.STRATEGYOPS_SCHEMAS)
+DISPATCH_TABLE.update(_strategyops.STRATEGYOPS_DISPATCH)
+
 _gen_schemas, _gen_dispatch = _skillops.load_generated_skills()
 TOOL_SCHEMAS.extend(_gen_schemas)
 DISPATCH_TABLE.update(_gen_dispatch)
+
+_POLICY_MODES = {"allow", "deny", "approval"}
+
+
+def _parse_tool_csv(env_name: str) -> set:
+    raw = os.getenv(env_name, "")
+    return {part.strip() for part in raw.split(",") if part.strip()}
+
+
+def _load_tool_policy() -> dict:
+    policy = {"default": "allow", "tools": {}}
+    if _TOOL_POLICY_PATH.exists():
+        try:
+            loaded = json.loads(_TOOL_POLICY_PATH.read_text())
+            if isinstance(loaded, dict):
+                default_mode = loaded.get("default", "allow")
+                if default_mode in _POLICY_MODES:
+                    policy["default"] = default_mode
+                tools = loaded.get("tools", {})
+                if isinstance(tools, dict):
+                    for name, mode in tools.items():
+                        if isinstance(name, str) and mode in _POLICY_MODES:
+                            policy["tools"][name] = mode
+        except Exception:
+            # Invalid policy files should not break core dispatch.
+            pass
+
+    for tool_name in _parse_tool_csv("PJ_DENY_TOOLS"):
+        policy["tools"][tool_name] = "deny"
+    for tool_name in _parse_tool_csv("PJ_APPROVAL_TOOLS"):
+        if policy["tools"].get(tool_name) != "deny":
+            policy["tools"][tool_name] = "approval"
+    return policy
+
+
+def _tool_policy_mode(tool_name: str) -> str:
+    policy = _load_tool_policy()
+    mode = policy["tools"].get(tool_name, policy["default"])
+    return mode if mode in _POLICY_MODES else "allow"
 
 
 def dispatch(name: str, arguments: dict):
     fn = DISPATCH_TABLE.get(name)
     if fn is None:
         return {"error": f"Unknown skill: {name}"}
+    if not isinstance(arguments, dict):
+        return {"error": f"Invalid arguments for skill '{name}': expected object"}
+    args = dict(arguments)
+    approval_granted = bool(args.pop("_approved", False))
+    policy_mode = _tool_policy_mode(name)
+    if policy_mode == "deny":
+        _skillops.record_invocation(name, False, 0, "blocked_by_policy_deny")
+        return {"error": f"Tool '{name}' is blocked by policy (deny)."}
+    if policy_mode == "approval" and not approval_granted:
+        _skillops.record_invocation(name, False, 0, "blocked_by_policy_approval")
+        return {"error": f"Tool '{name}' requires explicit approval (_approved=true)."}
     start = _time.monotonic()
     try:
-        result = fn(**arguments)
+        result = fn(**args)
+    except TypeError as exc:
+        result = {"error": f"tool_argument_error: {exc}"}
+    except ValueError as exc:
+        result = {"error": f"tool_value_error: {exc}"}
+    except RuntimeError as exc:
+        result = {"error": f"tool_runtime_error: {exc}"}
     except Exception as exc:  # keep PJ running even if a skill errors
-        result = {"error": str(exc)}
+        result = {"error": f"tool_unhandled_error: {exc}"}
     latency_ms = int((_time.monotonic() - start) * 1000)
     err = result.get("error") if isinstance(result, dict) else None
     _skillops.record_invocation(name, err is None, latency_ms, err)

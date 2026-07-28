@@ -11,6 +11,7 @@ server-side VAD, live input transcription, and the same function-calling
 "skills" used by pj.py.
 """
 import json
+import os
 from pathlib import Path
 
 import skills
@@ -18,8 +19,8 @@ import skills
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
 
-REALTIME_MODEL = "gpt-realtime-2.1"  # dedicated low-latency realtime voice model
-VOICE = "marin"
+REALTIME_MODEL = os.getenv("PJ_REALTIME_MODEL", "gpt-realtime-2.1")
+VOICE = os.getenv("PJ_REALTIME_VOICE", "marin")
 
 
 def load_pj_instructions():

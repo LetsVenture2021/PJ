@@ -1,159 +1,943 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<title>Talk to PJ</title>
-<style>
-  body { font-family: -apple-system, sans-serif; max-width: 480px; margin: 60px auto; text-align: center; }
-  button { font-size: 18px; padding: 14px 28px; border-radius: 8px; border: none; cursor: pointer; }
-  #start { background: #16a34a; color: white; }
-  #stop { background: #dc2626; color: white; }
-  #status { margin-top: 20px; color: #555; }
-  #transcript { text-align: left; margin-top: 30px; white-space: pre-wrap; font-size: 14px; color: #333; }
-</style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PJ Web App</title>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --panel: #111a2b;
+      --panel-2: #172338;
+      --text: #e6edf7;
+      --muted: #9fb1c9;
+      --line: #243149;
+      --ok: #22c55e;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+      --brand: #3b82f6;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      background: radial-gradient(circle at top, #15233a 0%, var(--bg) 42%);
+      color: var(--text);
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+
+    .app {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 24px 16px;
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      gap: 16px;
+      min-height: 100%;
+    }
+
+    .card {
+      background: linear-gradient(180deg, var(--panel) 0%, #0f1828 100%);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+    }
+
+    .sidebar {
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      height: fit-content;
+      position: sticky;
+      top: 16px;
+    }
+
+    .title {
+      margin: 0;
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+    }
+
+    .sub {
+      margin: 4px 0 0;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+      font-size: 13px;
+      color: var(--muted);
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      background: var(--danger);
+      box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.12);
+    }
+
+    .dot.live {
+      background: var(--ok);
+      box-shadow: 0 0 0 6px rgba(34, 197, 94, 0.13);
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 4px;
+    }
+
+    label {
+      font-size: 12px;
+      color: var(--muted);
+      font-weight: 600;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+    }
+
+    input, button, textarea {
+      font: inherit;
+      color: inherit;
+    }
+
+    input[type="text"] {
+      width: 100%;
+      background: #0d1524;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      color: var(--text);
+      outline: none;
+    }
+    input[type="text"]:focus {
+      border-color: #3b82f680;
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+    }
+
+    .button-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    button {
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 10px 12px;
+      cursor: pointer;
+      background: #1a2941;
+      transition: 120ms ease;
+    }
+    button:hover { transform: translateY(-1px); }
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .primary { background: var(--brand); color: #fff; border-color: #4f93ff; }
+    .danger { background: #3a1a20; color: #fecaca; border-color: #7f1d1d; }
+    .muted-btn { background: #102036; border-color: var(--line); color: #d8e5f8; }
+
+    .note {
+      font-size: 12px;
+      line-height: 1.35;
+      color: var(--muted);
+      background: #0d1524;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+    }
+
+    .full-width-btn {
+      width: 100%;
+    }
+
+    .chat {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      min-height: 72vh;
+      overflow: hidden;
+    }
+
+    .chat-head {
+      padding: 16px 18px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: linear-gradient(180deg, #172338, #152136);
+    }
+
+    .chat-head h2 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .head-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .messages {
+      padding: 18px;
+      overflow: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0)),
+        #0c1526;
+    }
+
+    .bubble {
+      max-width: 85%;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px 12px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 14px;
+    }
+
+    .bubble.user {
+      align-self: flex-end;
+      background: #12355f;
+      border-color: #2b5d95;
+    }
+
+    .bubble.assistant {
+      align-self: flex-start;
+      background: #15243b;
+    }
+
+    .bubble.system {
+      align-self: center;
+      max-width: 92%;
+      background: #251f10;
+      border-color: #6a4f1e;
+      color: #fde68a;
+      font-size: 13px;
+    }
+
+    .composer {
+      padding: 14px 16px;
+      border-top: 1px solid var(--line);
+      background: #101b2e;
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+
+    .composer textarea {
+      flex: 1;
+      min-height: 52px;
+      max-height: 160px;
+      resize: vertical;
+      background: #0d1524;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px 12px;
+      color: var(--text);
+      outline: none;
+    }
+    .composer textarea:focus {
+      border-color: #3b82f680;
+      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+    }
+
+    .composer button {
+      min-width: 120px;
+      align-self: stretch;
+    }
+
+    @media (max-width: 940px) {
+      .app {
+        grid-template-columns: 1fr;
+      }
+      .sidebar {
+        position: static;
+      }
+      .chat {
+        min-height: 65vh;
+      }
+      .bubble { max-width: 94%; }
+    }
+  </style>
 </head>
 <body>
-  <h2>🎙️ Talk to PJ</h2>
-  <button id="start">Start Voice Chat</button>
-  <button id="stop" style="display:none">End Call</button>
-  <div id="status">Idle</div>
-  <div id="transcript"></div>
+  <div class="app">
+    <aside class="card sidebar">
+      <div>
+        <h1 class="title">PJ Web App</h1>
+        <p class="sub">Realtime voice + text assistant interface</p>
+      </div>
+
+      <div class="status">
+        <span id="statusDot" class="dot"></span>
+        <span id="statusText">Idle</span>
+      </div>
+
+      <div class="field">
+        <label for="apiBase">Server URL</label>
+        <input id="apiBase" type="text" placeholder="http://localhost:3001">
+      </div>
+
+      <div class="button-row">
+        <button id="startBtn" class="primary">Start Session</button>
+        <button id="stopBtn" class="danger" disabled>End Session</button>
+      </div>
+
+      <div class="note">
+        Voice mode requires microphone permission. You can still send text
+        messages once the realtime session is connected.
+      </div>
+
+      <button id="refreshCapabilitiesBtn" class="muted-btn full-width-btn">Refresh Capabilities</button>
+      <div id="capabilityStatus" class="note">Capability mode: checking...</div>
+      <div id="toolSummary" class="note">Tool catalog not loaded yet.</div>
+    </aside>
+
+    <main class="card chat">
+      <div class="chat-head">
+        <h2>Conversation</h2>
+        <div class="head-actions">
+          <button id="copyBtn" class="muted-btn">Copy Transcript</button>
+          <button id="clearBtn" class="muted-btn">Clear</button>
+        </div>
+      </div>
+      <div id="messages" class="messages"></div>
+      <div class="composer">
+        <textarea id="textInput" placeholder="Type a message to PJ..." disabled></textarea>
+        <button id="sendBtn" class="primary" disabled>Send</button>
+      </div>
+    </main>
+  </div>
 
   <audio id="pjAudio" autoplay></audio>
 
-<script>
-const SIGNALING_URL = "http://localhost:3001/session"; // your realtime_server.py
-const EXECUTE_TOOL_URL = "http://localhost:3001/execute-tool";
+  <script type="module">
+    import {
+      CONTRACT_VERSION,
+      createRequestId,
+      shorten,
+      parseErrorBody,
+      fetchWithTimeout,
+    } from "/assets/pj_web_utils.js";
 
-let pc, dataChannel, micStream;
-// Accumulates streamed function-call argument deltas, keyed by call_id, so we
-// can show live progress and dispatch the finished call once arguments are complete.
-const pendingCalls = {};
+    const localHostnames = new Set(["localhost", "127.0.0.1"]);
+    const DEFAULT_API_BASE = localHostnames.has(window.location.hostname)
+      ? `${window.location.protocol}//${window.location.hostname}:3001`
+      : window.location.origin;
+    const STORAGE_KEY = "pj-web-app-api-base";
+    const PHASE = {
+      IDLE: "idle",
+      CONNECTING: "connecting",
+      LIVE: "live",
+      STOPPING: "stopping",
+    };
 
-async function start() {
-  document.getElementById("status").textContent = "Requesting microphone...";
-  micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const el = {
+      apiBase: document.getElementById("apiBase"),
+      startBtn: document.getElementById("startBtn"),
+      stopBtn: document.getElementById("stopBtn"),
+      statusDot: document.getElementById("statusDot"),
+      statusText: document.getElementById("statusText"),
+      messages: document.getElementById("messages"),
+      textInput: document.getElementById("textInput"),
+      sendBtn: document.getElementById("sendBtn"),
+      copyBtn: document.getElementById("copyBtn"),
+      clearBtn: document.getElementById("clearBtn"),
+      pjAudio: document.getElementById("pjAudio"),
+      refreshCapabilitiesBtn: document.getElementById("refreshCapabilitiesBtn"),
+      capabilityStatus: document.getElementById("capabilityStatus"),
+      toolSummary: document.getElementById("toolSummary"),
+    };
 
-  pc = new RTCPeerConnection();
-  pc.ontrack = (e) => { document.getElementById("pjAudio").srcObject = e.streams[0]; };
-  micStream.getTracks().forEach((track) => pc.addTrack(track, micStream));
+    const state = {
+      pc: null,
+      dataChannel: null,
+      micStream: null,
+      pendingCalls: {},
+      activeAssistantBubble: null,
+      phase: PHASE.IDLE,
+      activeStartRequestId: null,
+      liveAnnounced: false,
+      toolCatalog: null,
+    };
 
-  // Data channel carries streaming events: transcription deltas,
-  // function-call requests/outputs, and text deltas alongside audio.
-  dataChannel = pc.createDataChannel("oai-events");
-  dataChannel.onmessage = (e) => handleRealtimeEvent(JSON.parse(e.data));
+    const savedBase = localStorage.getItem(STORAGE_KEY);
+    el.apiBase.value = savedBase || DEFAULT_API_BASE;
 
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-
-  document.getElementById("status").textContent = "Connecting to PJ...";
-  const response = await fetch(SIGNALING_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/sdp" },
-    body: offer.sdp,
-  });
-  const answerSdp = await response.text();
-  await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
-
-  document.getElementById("status").textContent = "🟢 Live — talk to PJ";
-  document.getElementById("start").style.display = "none";
-  document.getElementById("stop").style.display = "inline-block";
-}
-
-function handleRealtimeEvent(event) {
-  if (event.type === "conversation.item.input_audio_transcription.completed") {
-    appendTranscript("You: " + event.transcript);
-    return;
-  }
-  if (event.type === "response.output_text.delta") {
-    appendTranscript("PJ: " + event.delta);
-    return;
-  }
-
-  // --- Streaming function calls ---
-  // Arguments arrive incrementally as the model generates them; accumulate
-  // per call_id and show live progress in the transcript.
-  if (event.type === "response.function_call_arguments.delta") {
-    const call = pendingCalls[event.call_id] || (pendingCalls[event.call_id] = {
-      name: event.name, args: "", started: false,
-    });
-    call.args += event.delta;
-    if (!call.started) {
-      call.started = true;
-      appendTranscript(`🔧 PJ is calling ${event.name || call.name}(...)`);
+    function setStatus(text, kind = "idle") {
+      el.statusText.textContent = text;
+      el.statusDot.classList.toggle("live", kind === "live");
     }
-    return;
-  }
 
-  if (event.type === "response.function_call_arguments.done") {
-    const call = pendingCalls[event.call_id] || { name: event.name, args: event.arguments };
-    call.name = event.name || call.name;
-    call.args = event.arguments ?? call.args;
-    runFunctionCall(event.call_id, call.name, call.args);
-    return;
-  }
+    function setPhase(phase, statusText = null) {
+      state.phase = phase;
+      if (phase === PHASE.IDLE) {
+        el.startBtn.disabled = false;
+        el.stopBtn.disabled = true;
+        el.sendBtn.disabled = true;
+        el.textInput.disabled = true;
+      } else if (phase === PHASE.CONNECTING) {
+        el.startBtn.disabled = true;
+        el.stopBtn.disabled = false;
+        el.sendBtn.disabled = true;
+        el.textInput.disabled = true;
+      } else if (phase === PHASE.LIVE) {
+        el.startBtn.disabled = true;
+        el.stopBtn.disabled = false;
+        el.sendBtn.disabled = false;
+        el.textInput.disabled = false;
+      } else {
+        el.startBtn.disabled = true;
+        el.stopBtn.disabled = true;
+        el.sendBtn.disabled = true;
+        el.textInput.disabled = true;
+      }
 
-  // Fallback: some server events deliver the finished call as a single
-  // output_item rather than via delta/done above.
-  if (event.type === "response.output_item.done" && event.item && event.item.type === "function_call") {
-    const item = event.item;
-    if (!(item.call_id in pendingCalls) || !pendingCalls[item.call_id].dispatched) {
-      runFunctionCall(item.call_id, item.name, item.arguments);
+      if (statusText) {
+        setStatus(statusText, phase === PHASE.LIVE ? "live" : "idle");
+      }
     }
-  }
-}
 
-async function runFunctionCall(callId, name, argsJson) {
-  if (pendingCalls[callId]) pendingCalls[callId].dispatched = true;
-  else pendingCalls[callId] = { dispatched: true };
+    function appendBubble(role, text, append = false) {
+      if (append && role === "assistant" && state.activeAssistantBubble) {
+        state.activeAssistantBubble.textContent += text;
+        scrollMessagesToBottom();
+        return state.activeAssistantBubble;
+      }
 
-  let args = {};
-  try {
-    args = argsJson ? JSON.parse(argsJson) : {};
-  } catch (err) {
-    appendTranscript(`⚠️ Failed to parse arguments for ${name}: ${err}`);
-  }
+      const bubble = document.createElement("div");
+      bubble.className = `bubble ${role}`;
+      bubble.textContent = text;
+      el.messages.appendChild(bubble);
+      scrollMessagesToBottom();
 
-  let output;
-  try {
-    const resp = await fetch(EXECUTE_TOOL_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, arguments: args }),
+      if (role === "assistant") {
+        state.activeAssistantBubble = bubble;
+      }
+      return bubble;
+    }
+
+    function finalizeAssistantBubble() {
+      state.activeAssistantBubble = null;
+    }
+
+    function scrollMessagesToBottom() {
+      el.messages.scrollTop = el.messages.scrollHeight;
+    }
+
+    async function checkBackendHealth(apiBase, requestId) {
+      const response = await fetchWithTimeout(`${apiBase}/health`, {
+        headers: {
+          Accept: "application/json",
+          "x-pj-client-request-id": requestId,
+          "x-pj-contract-version": CONTRACT_VERSION,
+        },
+      }, 8000);
+
+      const body = await response.text();
+      if (!response.ok) {
+        const detail = parseErrorBody(body);
+        throw new Error(`Backend health check failed (${response.status})${detail ? `: ${detail}` : ""}`);
+      }
+      let parsed = {};
+      try {
+        parsed = body ? JSON.parse(body) : {};
+      } catch (_) {
+        parsed = {};
+      }
+      if (!parsed.ok) {
+        throw new Error("Backend health endpoint did not return ok=true.");
+      }
+      return parsed;
+    }
+
+    function summarizeToolNames(tools, limit = 8) {
+      if (!Array.isArray(tools) || !tools.length) {
+        return "";
+      }
+      const names = tools
+        .map((tool) => (tool && typeof tool.name === "string" ? tool.name : ""))
+        .filter(Boolean);
+      if (!names.length) {
+        return "";
+      }
+      const shown = names.slice(0, limit);
+      const remainder = names.length - shown.length;
+      return remainder > 0
+        ? `${shown.join(", ")} +${remainder} more`
+        : shown.join(", ");
+    }
+
+    async function fetchToolSchemas(apiBase, requestId, forceRefresh = false) {
+      const url = new URL(`${apiBase}/tool-schemas`);
+      if (forceRefresh) {
+        url.searchParams.set("refresh", "1");
+      }
+      const response = await fetchWithTimeout(url.toString(), {
+        headers: {
+          Accept: "application/json",
+          "x-pj-client-request-id": requestId,
+          "x-pj-contract-version": CONTRACT_VERSION,
+        },
+      }, 12000);
+
+      const body = await response.text();
+      if (!response.ok) {
+        const detail = parseErrorBody(body);
+        throw new Error(`Tool schema fetch failed (${response.status})${detail ? `: ${detail}` : ""}`);
+      }
+
+      let parsed = {};
+      try {
+        parsed = body ? JSON.parse(body) : {};
+      } catch (_) {
+        parsed = {};
+      }
+      const tools = Array.isArray(parsed.tools) ? parsed.tools : [];
+      return {
+        count: typeof parsed.count === "number" ? parsed.count : tools.length,
+        source: typeof parsed.source === "string" ? parsed.source : "unknown",
+        detail: typeof parsed.detail === "string" ? parsed.detail : "",
+        tools,
+      };
+    }
+
+    async function refreshCapabilities(apiBase, requestId, { health = null, forceRefresh = false } = {}) {
+      try {
+        const capabilityHealth = health || await checkBackendHealth(apiBase, requestId);
+        const fallbackStatus = capabilityHealth.tool_bridge_configured
+          ? "Capability mode: bridge configured, loading tool catalog..."
+          : "Capability mode: direct realtime only (bridge not configured)";
+        el.capabilityStatus.textContent = fallbackStatus;
+
+        const schemaInfo = await fetchToolSchemas(apiBase, requestId, forceRefresh);
+        state.toolCatalog = schemaInfo;
+
+        const modePrefix = schemaInfo.count > 0
+          ? "Capability mode: full tool catalog loaded"
+          : "Capability mode: tool catalog empty";
+        const detailSuffix = schemaInfo.detail ? ` (${schemaInfo.detail})` : "";
+        el.capabilityStatus.textContent = `${modePrefix} [${schemaInfo.count}] via ${schemaInfo.source}${detailSuffix}`;
+
+        const preview = summarizeToolNames(schemaInfo.tools);
+        el.toolSummary.textContent = preview
+          ? `Available tools: ${preview}`
+          : "Available tools: none exposed by backend yet.";
+        return schemaInfo;
+      } catch (error) {
+        state.toolCatalog = null;
+        el.capabilityStatus.textContent = "Capability mode: tool catalog unavailable";
+        el.toolSummary.textContent = `Tool catalog error: ${shorten(String(error), 240)}`;
+        return null;
+      }
+    }
+
+    function shouldUseEphemeralSignalingFallback(status, detail) {
+      if (status !== 400 && status !== 502) {
+        return false;
+      }
+      const lowered = (detail || "").toLowerCase();
+      return (
+        lowered.includes("invalid_offer") ||
+        lowered.includes("failed to parse offer") ||
+        lowered.includes("unmarshal sdp") ||
+        lowered.includes("eof")
+      );
+    }
+
+    async function requestEphemeralClientSecret(apiBase, requestId) {
+      const response = await fetchWithTimeout(`${apiBase}/token`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-pj-client-request-id": requestId,
+          "x-pj-contract-version": CONTRACT_VERSION,
+        },
+        body: "{}",
+      }, 15000);
+
+      const body = await response.text();
+      if (!response.ok) {
+        const detail = parseErrorBody(body);
+        throw new Error(`Token minting failed (${response.status})${detail ? `: ${detail}` : ""}`);
+      }
+
+      let parsed = {};
+      try {
+        parsed = body ? JSON.parse(body) : {};
+      } catch (_) {
+        throw new Error("Token minting response was not valid JSON.");
+      }
+
+      const tokenValue =
+        (parsed.client_secret && parsed.client_secret.value) ||
+        parsed.value ||
+        null;
+      if (!tokenValue) {
+        throw new Error("Token minting response did not include a client secret.");
+      }
+      return tokenValue;
+    }
+
+    async function negotiateWithEphemeralToken(apiBase, localSdp, requestId) {
+      const ephemeralToken = await requestEphemeralClientSecret(apiBase, requestId);
+      const response = await fetchWithTimeout("https://api.openai.com/v1/realtime/calls", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${ephemeralToken}`,
+          "Content-Type": "application/sdp",
+        },
+        body: localSdp,
+      }, 35000);
+
+      const answerSdp = await response.text();
+      if (!response.ok) {
+        const detail = parseErrorBody(answerSdp);
+        throw new Error(`Fallback signaling failed (${response.status})${detail ? `: ${detail}` : ""}`);
+      }
+      return answerSdp;
+    }
+
+    function markSessionLive() {
+      setPhase(PHASE.LIVE, "Live");
+      if (!state.liveAnnounced) {
+        appendBubble("system", "Session connected. You can speak or type.");
+        state.liveAnnounced = true;
+      }
+      el.textInput.focus();
+    }
+
+    async function startSession() {
+      if (state.phase !== PHASE.IDLE) return;
+
+      const apiBase = el.apiBase.value.trim().replace(/\/+$/, "");
+      if (!apiBase) {
+        setStatus("Set a valid server URL");
+        return;
+      }
+      localStorage.setItem(STORAGE_KEY, apiBase);
+
+      const requestId = createRequestId();
+      state.activeStartRequestId = requestId;
+      state.liveAnnounced = false;
+
+      try {
+        setPhase(PHASE.CONNECTING, "Checking backend...");
+        appendBubble("system", "Starting realtime session...");
+        const health = await checkBackendHealth(apiBase, requestId);
+        await refreshCapabilities(apiBase, requestId, { health, forceRefresh: false });
+        if (state.activeStartRequestId !== requestId) return;
+
+        setStatus("Requesting microphone...");
+        state.micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        if (state.activeStartRequestId !== requestId) {
+          stopSession({ announce: false });
+          return;
+        }
+
+        state.pc = new RTCPeerConnection();
+        state.pc.ontrack = (event) => {
+          el.pjAudio.srcObject = event.streams[0];
+        };
+        state.pc.oniceconnectionstatechange = () => {
+          const ice = state.pc ? state.pc.iceConnectionState : "closed";
+          if (ice === "failed" || ice === "disconnected") {
+            setStatus(`Connection ${ice}`);
+          }
+        };
+
+        state.micStream.getTracks().forEach((track) => {
+          state.pc.addTrack(track, state.micStream);
+        });
+
+        state.dataChannel = state.pc.createDataChannel("oai-events");
+        state.dataChannel.onopen = () => {
+          if (state.phase === PHASE.CONNECTING) {
+            markSessionLive();
+          }
+        };
+        state.dataChannel.onclose = () => {
+          if (state.phase !== PHASE.IDLE && state.phase !== PHASE.STOPPING) {
+            appendBubble("system", "Realtime channel closed.");
+            stopSession({ announce: false });
+          }
+        };
+        state.dataChannel.onmessage = (event) => {
+          let parsed;
+          try {
+            parsed = JSON.parse(event.data);
+          } catch (_) {
+            return;
+          }
+          handleRealtimeEvent(parsed, apiBase);
+        };
+
+        const offer = await state.pc.createOffer();
+        await state.pc.setLocalDescription(offer);
+        const localSdp = (
+          state.pc.localDescription && state.pc.localDescription.sdp
+        ) || offer.sdp || "";
+        if (!localSdp.trim()) {
+          throw new Error("Local SDP offer was empty before signaling.");
+        }
+
+        setStatus("Negotiating realtime session...");
+        const response = await fetchWithTimeout(`${apiBase}/session`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/sdp",
+            "x-pj-client-request-id": requestId,
+            "x-pj-contract-version": CONTRACT_VERSION,
+          },
+          body: localSdp,
+        }, 35000);
+
+        let answerSdp = await response.text();
+        if (!response.ok) {
+          const detail = parseErrorBody(answerSdp);
+          if (shouldUseEphemeralSignalingFallback(response.status, detail)) {
+            appendBubble("system", "Primary signaling rejected SDP. Retrying with ephemeral token fallback...");
+            setStatus("Retrying signaling with fallback...");
+            answerSdp = await negotiateWithEphemeralToken(apiBase, localSdp, requestId);
+          } else {
+            throw new Error(`Signaling failed (${response.status})${detail ? `: ${detail}` : ""}`);
+          }
+        }
+
+        if (state.activeStartRequestId !== requestId) {
+          stopSession({ announce: false });
+          return;
+        }
+
+        await state.pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+        if (state.dataChannel && state.dataChannel.readyState === "open") {
+          markSessionLive();
+        } else {
+          setStatus("Awaiting realtime channel...");
+        }
+      } catch (error) {
+        appendBubble("system", `Failed to start session: ${String(error)}`);
+        stopSession({ announce: false });
+        setPhase(PHASE.IDLE, "Idle");
+      } finally {
+        state.activeStartRequestId = null;
+      }
+    }
+
+    function stopSession({ announce = true } = {}) {
+      const hadSession =
+        state.phase !== PHASE.IDLE || state.pc || state.dataChannel || state.micStream;
+
+      state.activeStartRequestId = null;
+      setPhase(PHASE.STOPPING, "Closing session...");
+
+      if (state.dataChannel) {
+        try { state.dataChannel.close(); } catch (_) {}
+      }
+      if (state.pc) {
+        try { state.pc.close(); } catch (_) {}
+      }
+      if (state.micStream) {
+        state.micStream.getTracks().forEach((track) => track.stop());
+      }
+
+      state.pc = null;
+      state.dataChannel = null;
+      state.micStream = null;
+      state.pendingCalls = {};
+      state.liveAnnounced = false;
+      finalizeAssistantBubble();
+
+      setPhase(PHASE.IDLE, "Idle");
+      if (announce && hadSession) {
+        appendBubble("system", "Session ended.");
+      }
+    }
+
+    function sendTextMessage() {
+      const message = el.textInput.value.trim();
+      if (!message || state.phase !== PHASE.LIVE || !state.dataChannel || state.dataChannel.readyState !== "open") {
+        return;
+      }
+
+      appendBubble("user", message);
+      el.textInput.value = "";
+
+      state.dataChannel.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: message }],
+        },
+      }));
+      state.dataChannel.send(JSON.stringify({ type: "response.create" }));
+    }
+
+    function handleRealtimeEvent(event, apiBase) {
+      if (event.type === "error") {
+        appendBubble("system", `Realtime error: ${event.error?.message || "Unknown error"}`);
+        return;
+      }
+
+      if (event.type === "conversation.item.input_audio_transcription.completed") {
+        appendBubble("user", event.transcript || "(audio transcription unavailable)");
+        return;
+      }
+
+      if (event.type === "response.output_text.delta") {
+        appendBubble("assistant", event.delta || "", true);
+        return;
+      }
+
+      if (event.type === "response.output_text.done" || event.type === "response.done") {
+        finalizeAssistantBubble();
+        return;
+      }
+
+      if (event.type === "response.function_call_arguments.delta") {
+        const call = state.pendingCalls[event.call_id] || (state.pendingCalls[event.call_id] = {
+          name: event.name,
+          args: "",
+          started: false,
+        });
+        call.args += event.delta || "";
+        if (!call.started) {
+          call.started = true;
+          appendBubble("system", `Running tool: ${event.name || call.name}(...)`);
+        }
+        return;
+      }
+
+      if (event.type === "response.function_call_arguments.done") {
+        const call = state.pendingCalls[event.call_id] || {
+          name: event.name,
+          args: event.arguments || "",
+        };
+        call.name = event.name || call.name;
+        call.args = event.arguments ?? call.args;
+        runFunctionCall(event.call_id, call.name, call.args, apiBase);
+        return;
+      }
+
+      if (event.type === "response.output_item.done" && event.item && event.item.type === "function_call") {
+        const item = event.item;
+        if (!(item.call_id in state.pendingCalls) || !state.pendingCalls[item.call_id].dispatched) {
+          runFunctionCall(item.call_id, item.name, item.arguments, apiBase);
+        }
+      }
+    }
+
+    async function runFunctionCall(callId, name, argsJson, apiBase) {
+      if (state.pendingCalls[callId]) state.pendingCalls[callId].dispatched = true;
+      else state.pendingCalls[callId] = { dispatched: true };
+
+      let args = {};
+      try {
+        args = argsJson ? JSON.parse(argsJson) : {};
+      } catch (error) {
+        appendBubble("system", `Tool argument parse failed (${name}): ${String(error)}`);
+      }
+
+      let output;
+      const requestId = createRequestId();
+      try {
+        const resp = await fetchWithTimeout(`${apiBase}/execute-tool`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-pj-client-request-id": requestId,
+            "x-pj-contract-version": CONTRACT_VERSION,
+          },
+          body: JSON.stringify({ name, arguments: args }),
+        }, 20000);
+        const raw = await resp.text();
+        if (!resp.ok) {
+          output = JSON.stringify({
+            error: `Tool call failed (${resp.status})`,
+            detail: parseErrorBody(raw),
+          });
+        } else {
+          output = raw;
+        }
+      } catch (error) {
+        output = JSON.stringify({ error: String(error) });
+      }
+
+      appendBubble("system", `${name} -> ${shorten(output, 700)}`);
+
+      if (state.dataChannel && state.dataChannel.readyState === "open") {
+        state.dataChannel.send(JSON.stringify({
+          type: "conversation.item.create",
+          item: { type: "function_call_output", call_id: callId, output },
+        }));
+        state.dataChannel.send(JSON.stringify({ type: "response.create" }));
+      }
+
+      delete state.pendingCalls[callId];
+    }
+
+    async function copyTranscript() {
+      const lines = Array.from(el.messages.querySelectorAll(".bubble")).map((node) => node.textContent);
+      try {
+        await navigator.clipboard.writeText(lines.join("\n\n"));
+        appendBubble("system", "Transcript copied.");
+      } catch (_) {
+        appendBubble("system", "Clipboard copy failed.");
+      }
+    }
+
+    function clearTranscript() {
+      el.messages.innerHTML = "";
+      finalizeAssistantBubble();
+    }
+
+    el.startBtn.addEventListener("click", startSession);
+    el.stopBtn.addEventListener("click", () => stopSession({ announce: true }));
+    el.sendBtn.addEventListener("click", sendTextMessage);
+    el.copyBtn.addEventListener("click", copyTranscript);
+    el.clearBtn.addEventListener("click", clearTranscript);
+    el.refreshCapabilitiesBtn.addEventListener("click", async () => {
+      const apiBase = el.apiBase.value.trim().replace(/\/+$/, "");
+      if (!apiBase) {
+        setStatus("Set a valid server URL");
+        return;
+      }
+      el.capabilityStatus.textContent = "Capability mode: refreshing...";
+      const requestId = createRequestId();
+      const info = await refreshCapabilities(apiBase, requestId, { forceRefresh: true });
+      if (info) {
+        appendBubble("system", `Capability catalog refreshed: ${info.count} tools loaded.`);
+      }
     });
-    output = await resp.text();
-  } catch (err) {
-    output = JSON.stringify({ error: String(err) });
-  }
+    el.textInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        sendTextMessage();
+      }
+    });
 
-  appendTranscript(`✅ ${name} → ${output}`);
-
-  // Feed the result back into the realtime conversation, then ask the
-  // model to continue (it will incorporate the function's output).
-  dataChannel.send(JSON.stringify({
-    type: "conversation.item.create",
-    item: { type: "function_call_output", call_id: callId, output },
-  }));
-  dataChannel.send(JSON.stringify({ type: "response.create" }));
-
-  delete pendingCalls[callId];
-}
-
-function stop() {
-  if (pc) pc.close();
-  if (micStream) micStream.getTracks().forEach((t) => t.stop());
-  document.getElementById("status").textContent = "Call ended";
-  document.getElementById("start").style.display = "inline-block";
-  document.getElementById("stop").style.display = "none";
-}
-
-function appendTranscript(line) {
-  const el = document.getElementById("transcript");
-  el.textContent += line + "\n";
-}
-
-document.getElementById("start").onclick = start;
-document.getElementById("stop").onclick = stop;
-</script>
+    setPhase(PHASE.IDLE, "Idle");
+    appendBubble("system", "Ready. Click Start Session to connect to PJ.");
+    refreshCapabilities(el.apiBase.value.trim().replace(/\/+$/, ""), createRequestId(), { forceRefresh: false });
+  </script>
 </body>
 </html>

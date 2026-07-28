@@ -20,27 +20,33 @@ Slash commands (type "/" then Tab for completion):
 import json
 import sqlite3
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 _DB_PATH = Path(__file__).resolve().parent / "pj_data.sqlite3"
 
 
+@contextmanager
 def _db():
     conn = sqlite3.connect(_DB_PATH)
-    conn.execute("""CREATE TABLE IF NOT EXISTS chat_sessions (
-        id TEXT PRIMARY KEY,
-        title TEXT DEFAULT '',
-        last_response_id TEXT,
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS chat_messages (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL,
-        role TEXT NOT NULL,
-        content TEXT NOT NULL,
-        ts TEXT DEFAULT CURRENT_TIMESTAMP)""")
-    return conn
+    try:
+        conn.execute("""CREATE TABLE IF NOT EXISTS chat_sessions (
+            id TEXT PRIMARY KEY,
+            title TEXT DEFAULT '',
+            last_response_id TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            ts TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _now():

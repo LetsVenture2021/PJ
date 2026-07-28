@@ -36,6 +36,7 @@ import re
 import sqlite3
 import subprocess
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -90,44 +91,74 @@ _SEED_TEMPLATES = {
 }
 
 
+def _normalize_alias_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", (value or "").lower()).strip("-")
+
+
+@contextmanager
 def _db():
     conn = sqlite3.connect(_DB_PATH)
-    conn.execute("""CREATE TABLE IF NOT EXISTS docops_templates (
-        name TEXT PRIMARY KEY,
-        version INTEGER DEFAULT 1,
-        description TEXT DEFAULT '',
-        sections TEXT NOT NULL,           -- JSON array (required)
-        optional_sections TEXT DEFAULT '[]',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        updated_at TEXT DEFAULT CURRENT_TIMESTAMP
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS docops_documents (
-        doc_id TEXT NOT NULL,
-        version INTEGER NOT NULL,
-        title TEXT NOT NULL,
-        template TEXT NOT NULL,
-        template_version INTEGER NOT NULL,
-        status TEXT DEFAULT 'draft',      -- draft | final | superseded
-        path TEXT NOT NULL,
-        sha256 TEXT NOT NULL,
-        tags TEXT DEFAULT '',
-        change_note TEXT DEFAULT '',
-        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-        finalized_at TEXT,
-        PRIMARY KEY (doc_id, version)
-    )""")
-    # Seed starter templates once.
-    have = {r[0] for r in conn.execute(
-        "SELECT name FROM docops_templates").fetchall()}
-    for name, t in _SEED_TEMPLATES.items():
-        if name not in have:
+    try:
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_templates (
+            name TEXT PRIMARY KEY,
+            version INTEGER DEFAULT 1,
+            description TEXT DEFAULT '',
+            sections TEXT NOT NULL,           -- JSON array (required)
+            optional_sections TEXT DEFAULT '[]',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_documents (
+            doc_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            template TEXT NOT NULL,
+            template_version INTEGER NOT NULL,
+            status TEXT DEFAULT 'draft',      -- draft | final | superseded
+            path TEXT NOT NULL,
+            sha256 TEXT NOT NULL,
+            tags TEXT DEFAULT '',
+            change_note TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            finalized_at TEXT,
+            PRIMARY KEY (doc_id, version)
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_template_aliases (
+            alias_key TEXT PRIMARY KEY,
+            alias_raw TEXT NOT NULL,
+            template_name TEXT NOT NULL,
+            source_item_id TEXT DEFAULT '',
+            canonical_title TEXT DEFAULT '',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
+        # Seed starter templates once.
+        have = {r[0] for r in conn.execute(
+            "SELECT name FROM docops_templates").fetchall()}
+        for name, t in _SEED_TEMPLATES.items():
+            if name not in have:
+                conn.execute(
+                    "INSERT INTO docops_templates "
+                    "(name, description, sections, optional_sections) "
+                    "VALUES (?,?,?,?)",
+                    (name, t["description"], json.dumps(t["sections"]),
+                     json.dumps(t["optional_sections"])))
+        # Ensure every canonical template name resolves as an alias.
+        for (name,) in conn.execute("SELECT name FROM docops_templates").fetchall():
+            key = _normalize_alias_key(name)
             conn.execute(
-                "INSERT INTO docops_templates "
-                "(name, description, sections, optional_sections) "
-                "VALUES (?,?,?,?)",
-                (name, t["description"], json.dumps(t["sections"]),
-                 json.dumps(t["optional_sections"])))
-    return conn
+                "INSERT INTO docops_template_aliases "
+                "(alias_key, alias_raw, template_name, canonical_title) "
+                "VALUES (?,?,?,?) "
+                "ON CONFLICT(alias_key) DO UPDATE SET "
+                "alias_raw=excluded.alias_raw, template_name=excluded.template_name, "
+                "canonical_title=excluded.canonical_title, updated_at=CURRENT_TIMESTAMP",
+                (key, name, name, name),
+            )
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _now():
@@ -142,40 +173,264 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:60] or "doc"
 
 
+def _dedupe_nonempty(values) -> list:
+    seen = set()
+    out = []
+    for value in values:
+        txt = str(value).strip()
+        if not txt:
+            continue
+        key = txt.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(txt)
+    return out
+
+
+def _normalize_template_name(raw: str, fallback: str = "template") -> str:
+    val = str(raw or "").lower()
+    val = re.sub(r"[^a-z0-9]+", "_", val).strip("_")
+    if not val:
+        val = fallback
+    if not re.match(r"[a-z]", val):
+        val = f"t_{val}"
+    return val[:80]
+
+
+def _as_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return _dedupe_nonempty(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    return _dedupe_nonempty(parsed)
+            except Exception:
+                pass
+        for sep in ("|", ";", ","):
+            if sep in text:
+                return _dedupe_nonempty([p.strip() for p in text.split(sep)])
+        return [text]
+    return [str(value).strip()]
+
+
+def _is_truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    txt = str(value or "").strip().lower()
+    return txt in {"1", "true", "yes", "y", "on", "provisional", "draft"}
+
+
+def _item_value(item: dict, *keys):
+    for key in keys:
+        if key in item:
+            val = item[key]
+            if val is None:
+                continue
+            if isinstance(val, str) and not val.strip():
+                continue
+            return val
+    return ""
+
+
+def _parse_knowledge_pack_block(block: str) -> dict:
+    text = (block or "").strip()
+    if not text:
+        return {}
+
+    # 1) direct JSON object
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    # 2) fenced JSON block
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S | re.I)
+    if fenced:
+        try:
+            parsed = json.loads(fenced.group(1))
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+    # 3) simple key-value parser with list support
+    item = {}
+    current_key = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("```"):
+            continue
+        if ":" in line and not line.startswith("- "):
+            k, v = line.split(":", 1)
+            key = re.sub(r"[^a-z0-9]+", "_", k.lower()).strip("_")
+            value = v.strip()
+            if value:
+                item[key] = value
+                current_key = key
+            else:
+                item[key] = []
+                current_key = key
+            continue
+        if line.startswith("- ") and current_key:
+            current_val = item.get(current_key)
+            if not isinstance(current_val, list):
+                current_val = _as_list(current_val)
+            current_val.append(line[2:].strip())
+            item[current_key] = current_val
+    return item
+
+
+def _extract_item_blocks(knowledge_pack_text: str) -> list:
+    matches = re.findall(
+        r"---ITEM_START\b(.*?)---ITEM_END",
+        knowledge_pack_text or "",
+        flags=re.S | re.I,
+    )
+    return [m.strip() for m in matches if m.strip()]
+
+
+def _register_template_alias(conn, alias_raw: str, template_name: str,
+                             source_item_id: str = "",
+                             canonical_title: str = "",
+                             overwrite_existing: bool = True) -> str:
+    alias_raw = str(alias_raw or "").strip()
+    if not alias_raw:
+        return "skipped"
+    alias_key = _normalize_alias_key(alias_raw)
+    if not alias_key:
+        return "skipped"
+    existing = conn.execute(
+        "SELECT template_name FROM docops_template_aliases WHERE alias_key=?",
+        (alias_key,),
+    ).fetchone()
+    if existing and existing[0] != template_name and not overwrite_existing:
+        return "conflict_skipped"
+    conn.execute(
+        "INSERT INTO docops_template_aliases "
+        "(alias_key, alias_raw, template_name, source_item_id, canonical_title, "
+        "created_at, updated_at) VALUES (?,?,?,?,?,?,?) "
+        "ON CONFLICT(alias_key) DO UPDATE SET "
+        "alias_raw=excluded.alias_raw, template_name=excluded.template_name, "
+        "source_item_id=excluded.source_item_id, "
+        "canonical_title=excluded.canonical_title, updated_at=excluded.updated_at",
+        (
+            alias_key,
+            alias_raw,
+            template_name,
+            str(source_item_id or ""),
+            str(canonical_title or ""),
+            _now(),
+            _now(),
+        ),
+    )
+    if not existing:
+        return "created"
+    if existing[0] == template_name:
+        return "unchanged"
+    return "updated"
+
+
+def _resolve_template_name(conn, template_ref: str) -> tuple[str | None, str]:
+    ref = str(template_ref or "").strip()
+    if not ref:
+        return None, "empty"
+    direct = conn.execute(
+        "SELECT name FROM docops_templates WHERE name=?",
+        (ref,),
+    ).fetchone()
+    if direct:
+        return direct[0], "name"
+    alias_key = _normalize_alias_key(ref)
+    if alias_key:
+        alias = conn.execute(
+            "SELECT template_name FROM docops_template_aliases WHERE alias_key=?",
+            (alias_key,),
+        ).fetchone()
+        if alias:
+            return alias[0], "alias"
+    fallback_name = _normalize_template_name(ref)
+    fallback = conn.execute(
+        "SELECT name FROM docops_templates WHERE name=?",
+        (fallback_name,),
+    ).fetchone()
+    if fallback:
+        return fallback[0], "normalized"
+    return None, "missing"
+
+
+def _upsert_template(conn, name: str, description: str,
+                     required_sections: list, optional_sections: list) -> dict:
+    row = conn.execute(
+        "SELECT version FROM docops_templates WHERE name=?",
+        (name,),
+    ).fetchone()
+    if row:
+        conn.execute(
+            "UPDATE docops_templates SET version=version+1, description=?, "
+            "sections=?, optional_sections=?, updated_at=? WHERE name=?",
+            (
+                description,
+                json.dumps(required_sections),
+                json.dumps(optional_sections),
+                _now(),
+                name,
+            ),
+        )
+        version = row[0] + 1
+        action = "updated"
+    else:
+        conn.execute(
+            "INSERT INTO docops_templates "
+            "(name, description, sections, optional_sections, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (
+                name,
+                description,
+                json.dumps(required_sections),
+                json.dumps(optional_sections),
+                _now(),
+                _now(),
+            ),
+        )
+        version = 1
+        action = "created"
+    return {"template": name, "version": version, "action": action}
+
+
 # --------------------------------------------------------------- templates
 def create_doc_template(name: str, description: str, sections_json: str,
                         optional_sections_json: str = "[]") -> dict:
     """Create or upgrade a versioned document template."""
+    name = str(name or "").strip()
     if not re.fullmatch(r"[a-z][a-z0-9_]*", name):
         return {"error": "template name must be a lowercase identifier"}
     try:
-        sections = json.loads(sections_json)
-        optional = json.loads(optional_sections_json or "[]")
+        sections = _dedupe_nonempty(json.loads(sections_json))
+        optional = _dedupe_nonempty(json.loads(optional_sections_json or "[]"))
         assert isinstance(sections, list) and sections and \
             all(isinstance(s, str) and s.strip() for s in sections)
         assert isinstance(optional, list)
     except Exception:
         return {"error": "sections_json must be a non-empty JSON array of "
                          "section names; optional_sections_json a JSON array"}
+    optional = [s for s in optional if s not in set(sections)]
     with _db() as conn:
-        row = conn.execute("SELECT version FROM docops_templates WHERE name=?",
-                           (name,)).fetchone()
-        if row:
-            conn.execute(
-                "UPDATE docops_templates SET version=version+1, description=?,"
-                " sections=?, optional_sections=?, updated_at=? WHERE name=?",
-                (description, json.dumps(sections), json.dumps(optional),
-                 _now(), name))
-            version = row[0] + 1
-        else:
-            conn.execute(
-                "INSERT INTO docops_templates "
-                "(name, description, sections, optional_sections) "
-                "VALUES (?,?,?,?)",
-                (name, description, json.dumps(sections),
-                 json.dumps(optional)))
-            version = 1
-    return {"status": "saved", "template": name, "version": version,
+        saved = _upsert_template(conn, name, description, sections, optional)
+        _register_template_alias(conn, name, name, canonical_title=name,
+                                 overwrite_existing=True)
+    return {"status": "saved", "template": name, "version": saved["version"],
             "required_sections": sections, "optional_sections": optional}
 
 
@@ -185,10 +440,168 @@ def list_doc_templates() -> dict:
         rows = conn.execute(
             "SELECT name, version, description, sections, optional_sections "
             "FROM docops_templates ORDER BY name").fetchall()
+        alias_rows = conn.execute(
+            "SELECT template_name, alias_raw FROM docops_template_aliases "
+            "ORDER BY template_name, alias_raw"
+        ).fetchall()
+    alias_map = {}
+    for template_name, alias_raw in alias_rows:
+        alias_map.setdefault(template_name, []).append(alias_raw)
     return {"count": len(rows), "templates": [
         {"name": r[0], "version": r[1], "description": r[2],
          "required_sections": json.loads(r[3]),
-         "optional_sections": json.loads(r[4])} for r in rows]}
+         "optional_sections": json.loads(r[4]),
+         "aliases": alias_map.get(r[0], [])}
+        for r in rows]}
+
+
+def import_doc_templates_from_knowledge_pack_text(
+        knowledge_pack_text: str,
+        overwrite_existing: bool = False,
+        include_provisional: bool = False,
+        dry_run: bool = False) -> dict:
+    """Import DocOps templates from ---ITEM_START/---ITEM_END specs.
+
+    The importer accepts flexible item formats (JSON or key/value blocks).
+    Each item may define template_name/name/title/item_id plus required and
+    optional sections. Imported aliases let draft_document resolve a template
+    by canonical template name, item_id, or canonical title.
+    """
+    blocks = _extract_item_blocks(knowledge_pack_text or "")
+    if not blocks:
+        return {
+            "status": "no_items_found",
+            "items_total": 0,
+            "templates_created": 0,
+            "templates_updated": 0,
+            "aliases_registered": 0,
+            "errors": [],
+        }
+
+    created = updated = alias_count = 0
+    skipped_existing = skipped_provisional = skipped_invalid = 0
+    imported = []
+    errors = []
+    with _db() as conn:
+        for idx, block in enumerate(blocks, start=1):
+            item = _parse_knowledge_pack_block(block)
+            item_id = str(_item_value(
+                item, "item_id", "id", "spec_id", "template_id", "item")).strip()
+            title = str(_item_value(
+                item, "canonical_title", "title", "template_title", "name")).strip()
+            explicit_template = str(_item_value(
+                item, "template_name", "template", "slug")).strip()
+            description = str(_item_value(
+                item, "description", "summary", "purpose")).strip()
+
+            required = _as_list(_item_value(
+                item, "required_sections", "sections", "required", "required_section_names"))
+            optional = _as_list(_item_value(
+                item, "optional_sections", "optional", "optional_section_names"))
+            if not required:
+                required = _dedupe_nonempty(
+                    [m.group(1).strip()
+                     for m in re.finditer(r"^##\s+(.+?)\s*$", block, re.M)]
+                )
+            optional = [s for s in _dedupe_nonempty(optional)
+                        if s not in set(required)]
+            provisional = _is_truthy(_item_value(item, "provisional", "is_provisional")) \
+                or str(_item_value(item, "status", "stage")).strip().lower() in {
+                    "provisional", "draft", "experimental", "wip"
+                }
+            if provisional and not include_provisional:
+                skipped_provisional += 1
+                continue
+            if not required:
+                skipped_invalid += 1
+                errors.append(
+                    f"item {idx}: missing required sections "
+                    f"(title={title!r}, item_id={item_id!r})")
+                continue
+
+            template_seed = explicit_template or title or item_id or f"template_{idx}"
+            template_name = _normalize_template_name(template_seed, f"template_{idx}")
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", template_name):
+                skipped_invalid += 1
+                errors.append(
+                    f"item {idx}: could not derive valid template name "
+                    f"from {template_seed!r}")
+                continue
+
+            existing = conn.execute(
+                "SELECT version FROM docops_templates WHERE name=?",
+                (template_name,),
+            ).fetchone()
+            if existing and not overwrite_existing:
+                skipped_existing += 1
+                action = "skipped_existing"
+                version = existing[0]
+            elif dry_run:
+                action = "would_update" if existing else "would_create"
+                version = (existing[0] + 1) if existing else 1
+                if existing:
+                    updated += 1
+                else:
+                    created += 1
+            else:
+                saved = _upsert_template(
+                    conn,
+                    template_name,
+                    description or f"Imported from knowledge item {item_id or idx}",
+                    required,
+                    optional,
+                )
+                action = saved["action"]
+                version = saved["version"]
+                if action == "created":
+                    created += 1
+                else:
+                    updated += 1
+
+            aliases = _dedupe_nonempty(
+                [template_name, item_id, title] +
+                _as_list(_item_value(item, "aliases", "alias", "template_aliases"))
+            )
+            for alias in aliases:
+                if dry_run:
+                    alias_count += 1
+                    continue
+                status = _register_template_alias(
+                    conn,
+                    alias,
+                    template_name,
+                    source_item_id=item_id,
+                    canonical_title=title,
+                    overwrite_existing=overwrite_existing,
+                )
+                if status in {"created", "updated", "unchanged"}:
+                    alias_count += 1
+
+            imported.append({
+                "item_index": idx,
+                "item_id": item_id or None,
+                "title": title or None,
+                "template": template_name,
+                "version": version,
+                "action": action,
+                "required_sections": required,
+                "optional_sections": optional,
+                "aliases": aliases,
+            })
+
+    status = "dry_run_complete" if dry_run else "imported"
+    return {
+        "status": status,
+        "items_total": len(blocks),
+        "templates_created": created,
+        "templates_updated": updated,
+        "templates_skipped_existing": skipped_existing,
+        "items_skipped_provisional": skipped_provisional,
+        "items_skipped_invalid": skipped_invalid,
+        "aliases_registered": alias_count,
+        "imports": imported,
+        "errors": errors,
+    }
 
 
 # --------------------------------------------------------------- documents
@@ -262,21 +675,36 @@ def draft_document(template: str, title: str, sections_json: str,
     except Exception:
         return {"error": "sections_json must be a JSON object "
                          "{section_name: markdown_body}"}
+    template_ref = str(template or "").strip()
     with _db() as conn:
-        tpl = conn.execute(
-            "SELECT name, version, description, sections, optional_sections "
-            "FROM docops_templates WHERE name=?", (template,)).fetchone()
-        if not tpl:
+        resolved_template, resolution_source = _resolve_template_name(
+            conn, template_ref)
+        if not resolved_template:
             names = [r[0] for r in conn.execute(
                 "SELECT name FROM docops_templates").fetchall()]
-            return {"error": f"unknown template '{template}'",
-                    "available": names}
+            alias_hits = conn.execute(
+                "SELECT alias_raw, template_name FROM docops_template_aliases "
+                "ORDER BY updated_at DESC LIMIT 12"
+            ).fetchall()
+            return {
+                "error": f"unknown template '{template_ref}'",
+                "available": names,
+                "recent_aliases": [
+                    {"alias": r[0], "template": r[1]} for r in alias_hits
+                ],
+            }
+        tpl = conn.execute(
+            "SELECT name, version, description, sections, optional_sections "
+            "FROM docops_templates WHERE name=?", (resolved_template,)).fetchone()
         errors = _validate_sections(tpl, sections)
         if errors:
             return {"status": "rejected", "errors": errors}
         doc_id = "DOC-" + str(uuid.uuid4())[:8]
-        result = _write_version(conn, doc_id, 1, title, template, tpl[1],
+        result = _write_version(conn, doc_id, 1, title, resolved_template, tpl[1],
                                 sections, tags, "initial draft")
+    if resolution_source != "name":
+        result["resolved_template"] = resolved_template
+        result["template_resolution"] = resolution_source
     if finalize and not result.get("unresolved_markers"):
         sealed = finalize_document(doc_id)
         if sealed.get("status") == "final":

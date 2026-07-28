@@ -35,5 +35,15 @@
       "Authorization": "Bearer ${STRIPE_MCP_KEY}"
     },
     "_comment": "Set STRIPE_MCP_KEY (restricted key) in ~/.env, then flip enabled to true."
+  },
+  {
+    "label": "cloudflare",
+    "url": "https://mcp.cloudflare.com/mcp",
+    "require_approval": "always",
+    "enabled": true,
+    "headers": {
+      "Authorization": "Bearer ${PJ_CLOUDFLARE_READ_ALL_RESOURCES}"
+    },
+    "_comment": "Create a Cloudflare API token and set PJ_CLOUDFLARE_READ_ALL_RESOURCES in ~/.env (token only, no quotes)."
   }
 ]
