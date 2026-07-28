@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const workerSource = await readFile(new URL("../pj_realtime_backend_worker.js", import.meta.url), "utf8");
+const webClientSource = await readFile(new URL("../webrtc_client.html", import.meta.url), "utf8");
+const wranglerSource = await readFile(new URL("../wrangler.toml.example", import.meta.url), "utf8");
 const workerModule = await import(
   `data:text/javascript;base64,${Buffer.from(workerSource).toString("base64")}`
 );
@@ -86,6 +88,23 @@ function assertionRequest(assertion) {
     headers: assertion ? { "Cf-Access-Jwt-Assertion": assertion } : {},
   });
 }
+
+test("deployment routes cover APIs without claiming frontend assets", () => {
+  for (const route of [
+    "pj-assistant.ai/health",
+    "pj-assistant.ai/session",
+    "pj-assistant.ai/token",
+    "pj-assistant.ai/tool-schemas",
+    "pj-assistant.ai/execute-tool",
+    "pj-assistant.ai/responses/*",
+  ]) {
+    assert.ok(wranglerSource.includes(`pattern = "${route}"`));
+  }
+  assert.doesNotMatch(wranglerSource, /pattern = "pj-assistant\.ai\/\*"/);
+  assert.match(wranglerSource, /PJ_TOOL_BRIDGE_URL = "https:\/\/replace-with-private-runtime\/execute-tool"/);
+  assert.match(webClientSource, /window\.location\.hostname === "www\.pj-assistant\.ai"/);
+  assert.match(webClientSource, /\? "https:\/\/pj-assistant\.ai"/);
+});
 
 test("only health and preflight are public", () => {
   assert.equal(isPublicRoute("GET", "/health"), true);

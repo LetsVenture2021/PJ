@@ -36,7 +36,7 @@ from aiortc.mediastreams import AudioStreamTrack, MediaStreamError
 
 import skills
 from realtime_config import realtime_session_config
-from responses_runtime import dispatch_realtime_function
+from responses_runtime import dispatch_realtime_function, terminal_approval_handler
 
 REALTIME_CALLS_URL = "https://api.openai.com/v1/realtime/calls"
 SAMPLE_RATE = 48_000  # WebRTC/Opus native rate
@@ -295,7 +295,15 @@ def _open_audio(gate: EchoGate):
     return mic, spk
 
 
-def _run_tool_call(name: str, arguments: str):
+def _voice_approval_handler(event):
+    return terminal_approval_handler(event)
+
+
+def _run_tool_call(
+        name: str,
+        arguments: str,
+        *,
+        approval_handler=_voice_approval_handler):
     """Executes a local skill; returns a JSON string result."""
     try:
         args = json.loads(arguments or "{}")
@@ -303,7 +311,27 @@ def _run_tool_call(name: str, arguments: str):
         args = {}
     print(f"\n🔧 {name}({json.dumps(args)})", flush=True)
     try:
-        result = dispatch_realtime_function(name, args)
+        approval_granted = False
+        if skills.tool_policy_mode(name) == "approval":
+            try:
+                approval_granted = bool(approval_handler({
+                    "type": "approval.required",
+                    "approval_kind": "local_function",
+                    "name": name,
+                    "arguments": args,
+                }))
+            except (EOFError, KeyboardInterrupt):
+                approval_granted = False
+            if not approval_granted:
+                result = {"error": f"Tool '{name}' was rejected by the owner."}
+            else:
+                result = dispatch_realtime_function(
+                    name,
+                    args,
+                    approval_granted=True,
+                )
+        else:
+            result = dispatch_realtime_function(name, args)
     except Exception as e:
         result = {"error": str(e)}
     print(f"   ✅ {json.dumps(result)}", flush=True)
