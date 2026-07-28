@@ -293,11 +293,21 @@ import strategyops as _strategyops
 TOOL_SCHEMAS.extend(_strategyops.STRATEGYOPS_SCHEMAS)
 DISPATCH_TABLE.update(_strategyops.STRATEGYOPS_DISPATCH)
 
+# --- CodeOps: governed coding task and repository toolkit --------------------
+import codeops as _codeops
+
+TOOL_SCHEMAS.extend(_codeops.CODEOPS_SCHEMAS)
+DISPATCH_TABLE.update(_codeops.CODEOPS_DISPATCH)
+
 _gen_schemas, _gen_dispatch = _skillops.load_generated_skills()
 TOOL_SCHEMAS.extend(_gen_schemas)
 DISPATCH_TABLE.update(_gen_dispatch)
 
 _POLICY_MODES = {"allow", "deny", "approval"}
+_BUILTIN_APPROVAL_TOOLS = {
+    "approve_codeops_task",
+    "run_codeops_validation",
+}
 
 
 def _parse_tool_csv(env_name: str) -> set:
@@ -306,7 +316,10 @@ def _parse_tool_csv(env_name: str) -> set:
 
 
 def _load_tool_policy() -> dict:
-    policy = {"default": "allow", "tools": {}}
+    policy = {
+        "default": "allow",
+        "tools": {name: "approval" for name in _BUILTIN_APPROVAL_TOOLS},
+    }
     if _TOOL_POLICY_PATH.exists():
         try:
             loaded = json.loads(_TOOL_POLICY_PATH.read_text())

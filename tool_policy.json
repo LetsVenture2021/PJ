@@ -1,0 +1,7 @@
+{
+  "default": "allow",
+  "tools": {
+    "approve_codeops_task": "approval",
+    "run_codeops_validation": "approval"
+  }
+}
