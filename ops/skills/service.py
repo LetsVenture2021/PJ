@@ -42,6 +42,7 @@ import requests
 
 from ops.shared.providers import RequestsHttpProvider
 from ops.shared.retry import RetryPolicy, get_with_retry
+from runtime_config import load_runtime_config
 
 _ROOT = Path(__file__).resolve().parents[2]
 _DB_PATH = _ROOT / "pj_data.sqlite3"
@@ -450,10 +451,7 @@ def list_observations(status: str = "open") -> dict:
 
 
 def _load_runtime_config() -> dict:
-    try:
-        return json.loads(_CONFIG_PATH.read_text())
-    except Exception:
-        return {}
+    return load_runtime_config(_CONFIG_PATH.parent).assistant
 
 
 def _require_vector_store_id() -> str:

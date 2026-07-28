@@ -103,6 +103,30 @@ EOF
 chmod 600 ~/.env
 ```
 
+All runtime settings are loaded through `runtime_config.py`. Select a deployment
+profile with `PJ_PROFILE=dev|staging|prod` (`dev` is the default). Staging
+requires `OPENAI_API_KEY`; production also requires `PJ_OWNER_EMAILS` and
+`PJ_TOOL_BRIDGE_TOKEN`. Startup fails with a configuration error when any
+required value is missing.
+
+Environment values override checked-in settings. Common overrides are
+`PJ_MODEL`, `PJ_VECTOR_STORE_IDS`, `PJ_REALTIME_MODEL`, and
+`PJ_REALTIME_VOICE`. Any setting can be overridden with a typed
+`PJ_CONFIG__SECTION__FIELD` value, for example:
+
+```bash
+export PJ_PROFILE=staging
+export PJ_CONFIG__ASSISTANT__REASONING_EFFORT='"high"'
+export PJ_CONFIG__REALTIME__VOICE='"marin"'
+```
+
+`PJ_CONFIG_OVERRIDES` accepts a JSON object for multiple nested overrides.
+`PJ_MCP_SERVERS_JSON` and `PJ_TOOL_POLICY_JSON` replace or extend those
+respective sections. Wrangler `[vars]` and `[env.<profile>.vars]` are exposed as
+the loader's `worker` section and overridden by same-named environment values.
+An optional `profiles` object in `config.json` can provide per-profile assistant
+overlays; selected profile values are applied before environment overrides.
+
 Do not commit secrets. Both `.env` and runtime files (`*.sqlite3`, `state.json`,
 `documents/exports/`) are ignored. Review these tracked settings before use:
 

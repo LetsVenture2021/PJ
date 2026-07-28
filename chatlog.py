@@ -1129,8 +1129,8 @@ def render_tools(tool_schemas: list) -> str:
 
 def _feature_defs(cfg):
     """Feature registry: (key, label, kind, is_on, detail)."""
-    import pathlib
-    mcp_path = pathlib.Path(__file__).resolve().parent / "mcp_servers.json"
+    from runtime_config import load_mcp_config
+
     vector_store_ids = cfg.get("vector_store_ids")
     if not isinstance(vector_store_ids, list):
         vector_store_ids = (
@@ -1163,12 +1163,10 @@ def _feature_defs(cfg):
          f"{cfg.get('reasoning_effort', 'medium')}", "cycle", True,
          "select to cycle low → medium → high"),
     ]
-    if mcp_path.exists():
-        servers = json.loads(mcp_path.read_text())
-        for s in servers:
-            feats.append((f"mcp:{s['label']}", f"MCP connector: {s['label']}",
-                          "mcp", bool(s.get("enabled")),
-                          s.get("url", "")[:44]))
+    for s in load_mcp_config():
+        feats.append((f"mcp:{s['label']}", f"MCP connector: {s['label']}",
+                      "mcp", bool(s.get("enabled")),
+                      s.get("url", "")[:44]))
     return feats
 
 

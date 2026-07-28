@@ -10,13 +10,13 @@ Both configure the same realtime session: PJ's model, instructions, voice,
 server-side VAD, live input transcription, and the same function-calling
 "skills" used by pj.py.
 """
-import os
-
 import skills
+from runtime_config import load_runtime_config
 from responses_runtime import ADVANCED_DELEGATION_TOOL, load_instructions
 
-REALTIME_MODEL = os.getenv("PJ_REALTIME_MODEL", "gpt-realtime-2.1")
-VOICE = os.getenv("PJ_REALTIME_VOICE", "marin")
+_RUNTIME_CONFIG = load_runtime_config()
+REALTIME_MODEL = _RUNTIME_CONFIG.realtime["model"]
+VOICE = _RUNTIME_CONFIG.realtime["voice"]
 REALTIME_EXCLUDED_TOOL_NAMES = {
     "approve_codeops_task",
     "create_skill",

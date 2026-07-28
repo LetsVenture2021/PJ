@@ -106,8 +106,8 @@ def main():
         _run_image_cli(args[1:])
         return
 
-    client = OpenAI()
     cfg = load_config()
+    client = OpenAI()
     state = load_state()
 
     json_schema_path = None

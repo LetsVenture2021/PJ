@@ -10,6 +10,7 @@ from pathlib import Path
 from openai import OpenAI
 
 import skills
+from runtime_config import load_mcp_config, load_runtime_config
 from ops.shared.interfaces import ResponsesProvider, ToolDispatcher
 from ops.shared.providers import OpenAIResponsesProvider
 from ops.shared.validation import (
@@ -58,47 +59,7 @@ def _get(value, key, default=None):
 
 
 def load_config(base_dir=BASE_DIR):
-    base_dir = Path(base_dir)
-    with (base_dir / "config.json").open() as f:
-        cfg = json.load(f)
-    instruction_files = cfg.get("instruction_files")
-    if instruction_files is None:
-        instruction_files = [cfg.get("instructions_file")]
-    if (
-        not isinstance(instruction_files, list)
-        or not instruction_files
-        or any(not isinstance(item, str) or not item.strip() for item in instruction_files)
-    ):
-        raise ValueError(
-            "config.json must define instruction_files or legacy instructions_file"
-        )
-    instruction_files = list(dict.fromkeys(item.strip() for item in instruction_files))
-    instruction_parts = []
-    for filename in instruction_files:
-        path = (base_dir / filename).resolve()
-        try:
-            path.relative_to(base_dir.resolve())
-        except ValueError as exc:
-            raise ValueError("instruction files must remain within the project") from exc
-        instruction_parts.append(path.read_text())
-    cfg["instructions"] = "\n\n".join(instruction_parts)
-    cfg["instructions_source"] = instruction_files[0]
-    cfg["instruction_files"] = instruction_files
-    cfg.setdefault("instructions_file", instruction_files[0])
-
-    vector_store_ids = cfg.get("vector_store_ids")
-    if vector_store_ids is None:
-        vector_store_ids = [cfg["vector_store_id"]] if cfg.get("vector_store_id") else []
-    if (
-        not isinstance(vector_store_ids, list)
-        or any(not isinstance(item, str) or not item.strip() for item in vector_store_ids)
-    ):
-        raise ValueError("vector_store_ids must be a list of non-empty strings")
-    vector_store_ids = list(dict.fromkeys(item.strip() for item in vector_store_ids))
-    cfg["vector_store_ids"] = vector_store_ids
-    if vector_store_ids:
-        cfg.setdefault("vector_store_id", vector_store_ids[0])
-    return cfg
+    return load_runtime_config(base_dir).assistant
 
 
 def load_instructions(base_dir=BASE_DIR):
@@ -107,14 +68,7 @@ def load_instructions(base_dir=BASE_DIR):
 
 
 def load_mcp_servers(base_dir=BASE_DIR):
-    path = Path(base_dir) / "mcp_servers.json"
-    if not path.exists():
-        return []
-    with path.open() as f:
-        servers = json.load(f)
-    if not isinstance(servers, list):
-        raise ValueError("mcp_servers.json must contain a list")
-    return servers
+    return load_mcp_config(Path(base_dir) / "mcp_servers.json")
 
 
 def _expand_secret_value(value, environ):
