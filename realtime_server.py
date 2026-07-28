@@ -7,8 +7,8 @@ Provides:
   POST /execute-tool - executes local PJ tools for browser function calls
   POST /webhook    - SIP webhook for inbound phone calls
 """
-import json
 import hmac
+import json
 import os
 import re
 from pathlib import Path
@@ -87,16 +87,17 @@ def _error_response(code, message, status, req_id, detail=None):
 def _check_bridge_auth(req_id, *, required=False):
     expected = (os.getenv("PJ_TOOL_BRIDGE_TOKEN") or "").strip()
     if not expected:
-        if required:
-            return _error_response(
-                "bridge_auth_not_configured",
-                "Bridge authorization is not configured.",
-                503,
-                req_id,
-            )
-        return None
+        return _error_response(
+            "bridge_auth_not_configured",
+            "Bridge authorization is not configured.",
+            503,
+            req_id,
+        )
     provided = request.headers.get("Authorization") or ""
-    if hmac.compare_digest(provided, f"Bearer {expected}"):
+    if hmac.compare_digest(
+        provided.encode("utf-8"),
+        f"Bearer {expected}".encode("utf-8"),
+    ):
         return None
     return _error_response(
         "bridge_auth_required",

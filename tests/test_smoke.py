@@ -8,10 +8,12 @@ All module-level _DB_PATH globals are redirected to a temp database so
 tests never touch the real pj_data.sqlite3.
 """
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
@@ -20,6 +22,7 @@ sys.path.insert(0, str(BASE_DIR))
 _TMP_DB = Path(tempfile.mkstemp(suffix=".sqlite3")[1])
 
 import skills, skillops, docops, chiefops, chatlog  # noqa: E402
+import realtime_server  # noqa: E402
 
 for _mod in (skills, skillops, docops, chiefops, chatlog):
     _mod._DB_PATH = _TMP_DB
@@ -97,6 +100,47 @@ class TestGeneratedSkills(unittest.TestCase):
             result = skills.dispatch(name, {})
             self.assertIsInstance(result, dict,
                                   f"{name} returned non-dict")
+
+
+class TestToolBridgeAuth(unittest.TestCase):
+    def setUp(self):
+        self.client = realtime_server.app.test_client()
+
+    def test_tool_bridge_fails_closed_when_token_is_missing(self):
+        with patch.dict(os.environ, {}, clear=True):
+            response = self.client.get("/tool-schemas")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["error"]["code"],
+                         "bridge_auth_not_configured")
+
+    def test_tool_bridge_rejects_invalid_token(self):
+        with patch.dict(os.environ, {"PJ_TOOL_BRIDGE_TOKEN": "expected"}, clear=True):
+            response = self.client.get(
+                "/tool-schemas",
+                headers={"Authorization": "Bearer wrong"},
+            )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.get_json()["error"]["code"],
+                         "bridge_auth_required")
+
+    def test_tool_bridge_rejects_non_ascii_token_with_typed_error(self):
+        with patch.dict(os.environ, {"PJ_TOOL_BRIDGE_TOKEN": "expected"}, clear=True):
+            response = self.client.get(
+                "/tool-schemas",
+                headers={"Authorization": "Bearer inválido"},
+            )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.get_json()["error"]["code"],
+                         "bridge_auth_required")
+
+    def test_tool_bridge_accepts_valid_token(self):
+        with patch.dict(os.environ, {"PJ_TOOL_BRIDGE_TOKEN": "expected"}, clear=True):
+            response = self.client.get(
+                "/tool-schemas",
+                headers={"Authorization": "Bearer expected"},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["ok"])
 
 
 class TestDocOpsTemplateImport(unittest.TestCase):
