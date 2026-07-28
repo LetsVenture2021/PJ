@@ -1219,6 +1219,19 @@ export default {
     if (request.method === "GET" && url.pathname === "/health") {
       const bridgeConfigured = Boolean((env.PJ_TOOL_BRIDGE_URL || "").trim());
       const bridgeAuthConfigured = Boolean((env.PJ_TOOL_BRIDGE_TOKEN || "").trim());
+      const resolvedTools = await resolveRealtimeTools(
+        env,
+        requestId,
+        request.url,
+      );
+      const resolvedToolNames = new Set(
+        resolvedTools.tools.map((tool) => tool.name),
+      );
+      const n8nToolsReady = [
+        "list_n8n_capabilities",
+        "get_n8n_corpus_status",
+        "get_pj_capability_snapshot",
+      ].every((name) => resolvedToolNames.has(name));
       return jsonResponse(
         {
           ok: true,
@@ -1227,10 +1240,11 @@ export default {
           realtime_model: env.REALTIME_MODEL || DEFAULT_REALTIME_MODEL,
           tool_bridge_configured: bridgeConfigured,
           tool_bridge_auth_configured: bridgeAuthConfigured,
-          tool_schema_cache_count: toolSchemaCache.tools.length,
-          tool_schema_cache_source: toolSchemaCache.source,
+          tool_schema_cache_count: resolvedTools.tools.length,
+          tool_schema_cache_source: resolvedTools.source,
           full_tooling_ready:
-            bridgeConfigured && bridgeAuthConfigured && toolSchemaCache.tools.length > 0,
+            bridgeConfigured && bridgeAuthConfigured && resolvedTools.tools.length > 0,
+          n8n_corpus_tools_ready: n8nToolsReady,
           full_power_bridge_configured:
             Boolean(deriveResponsesBridgeBaseUrl(env)) && bridgeAuthConfigured,
           public_endpoints: ["GET /health", "OPTIONS *"],
