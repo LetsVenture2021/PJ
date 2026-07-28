@@ -582,12 +582,46 @@ test("realtime upstream transport failures return typed results", async () => {
   assert.match(token.text, /upstream socket closed/);
 });
 
+test("realtime upstream response-body read failures return typed 502 results", async () => {
+  const unreadableResponseFetch = async () => ({
+    ok: true,
+    status: 200,
+    async text() {
+      throw new Error("response stream interrupted");
+    },
+  });
+  const call = await requestRealtimeCall(
+    "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+    "gpt-realtime",
+    { OPENAI_API_KEY: "test-key" },
+    [],
+    "fast",
+    null,
+    unreadableResponseFetch,
+  );
+  assert.equal(call.status, 502);
+  assert.equal(call.transportError, true);
+  assert.match(call.text, /response stream interrupted/);
+
+  const token = await requestRealtimeClientSecret(
+    "gpt-realtime",
+    { OPENAI_API_KEY: "test-key" },
+    [],
+    "fast",
+    null,
+    unreadableResponseFetch,
+  );
+  assert.equal(token.status, 502);
+  assert.equal(token.transportError, true);
+  assert.match(token.text, /response stream interrupted/);
+});
+
 test("HTML infrastructure errors are summarized without leaking markup", () => {
   const detail = parseErrorBody(
     "<!DOCTYPE html><html><head><title>Internal Server Error</title></head><body>failure</body></html>",
   );
   assert.equal(detail, "Server returned an HTML error page (Internal Server Error)");
-  assert.doesNotMatch(detail, /<!DOCTYPE|<html/);
+  assert.doesNotMatch(detail, /<!DOCTYPE|<html|<body/i);
 });
 
 test("browser module initializes with Full Power helpers in shared scope", async () => {
@@ -697,6 +731,7 @@ test("browser module initializes with Full Power helpers in shared scope", async
   assert.ok(hooks);
   assert.equal(hooks.shouldUseEphemeralSignalingFallback(500, ""), true);
   assert.equal(hooks.shouldUseEphemeralSignalingFallback(503, "gateway unavailable"), true);
+  assert.equal(hooks.shouldUseEphemeralSignalingFallback(599, "<html>failure</html>"), true);
   assert.equal(hooks.shouldUseEphemeralSignalingFallback(400, "invalid_offer"), true);
   assert.equal(hooks.shouldUseEphemeralSignalingFallback(400, "invalid model"), false);
   assert.equal(typeof listeners.get("startBtn:click"), "function");

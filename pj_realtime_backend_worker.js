@@ -421,6 +421,20 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 20000, fetchImpl 
   }
 }
 
+async function fetchTextWithTimeout(url, options, timeoutMs, fetchImpl) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error("timeout")), timeoutMs);
+  try {
+    const response = await fetchImpl(url, { ...options, signal: controller.signal });
+    return {
+      response,
+      text: await response.text(),
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 function createSessionConfig(
   model,
   env,
@@ -991,7 +1005,7 @@ async function requestRealtimeCall(
   );
 
   try {
-    const openaiResp = await fetchWithTimeout(
+    const { response: openaiResp, text } = await fetchTextWithTimeout(
       "https://api.openai.com/v1/realtime/calls",
       {
         method: "POST",
@@ -1003,8 +1017,6 @@ async function requestRealtimeCall(
       REALTIME_CALL_TIMEOUT_MS,
       fetchImpl,
     );
-
-    const text = await openaiResp.text();
     return {
       ok: openaiResp.ok,
       status: openaiResp.status,
@@ -1030,7 +1042,7 @@ async function requestRealtimeClientSecret(
   fetchImpl = fetch,
 ) {
   try {
-    const openaiResp = await fetchWithTimeout(
+    const { response: openaiResp, text } = await fetchTextWithTimeout(
       "https://api.openai.com/v1/realtime/client_secrets",
       {
         method: "POST",
@@ -1051,7 +1063,6 @@ async function requestRealtimeClientSecret(
       REALTIME_TOKEN_TIMEOUT_MS,
       fetchImpl,
     );
-    const text = await openaiResp.text();
     return {
       ok: openaiResp.ok,
       status: openaiResp.status,

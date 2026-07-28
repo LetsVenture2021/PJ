@@ -21,7 +21,7 @@ export function parseErrorBody(rawText) {
       ?.replace(/\s+/g, " ")
       .trim();
     return title
-      ? `Server returned an HTML error page (${title})`
+      ? `Server returned an HTML error page (${shorten(title, 160)})`
       : "Server returned an HTML error page";
   }
   try {
