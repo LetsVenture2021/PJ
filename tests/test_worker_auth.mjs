@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
@@ -10,13 +11,18 @@ const workerModule = await import(
 const {
   bridgeHeaders,
   buildAccessConfig,
+  CONTRACT_VERSION,
+  createSessionConfig,
   default: worker,
   deriveResponsesBridgeBaseUrl,
   handleResponsesProxy,
   isPublicRoute,
   isResponsesRoute,
   normalizeFunctionTools,
+  resolveRealtimeTools,
   responseHeaders,
+  safeAttachmentDisposition,
+  stableJson,
   toolBridgeTimeoutMs,
   validateAccessIdentity,
 } = workerModule;
@@ -109,6 +115,17 @@ test("Full Power routes and bridge URL derivation are narrowly scoped", () => {
   assert.equal(isResponsesRoute("POST", "/responses/sessions/example_123/resume"), true);
   assert.equal(isResponsesRoute("POST", "/responses/sessions/example_123/turns"), true);
   assert.equal(
+    isResponsesRoute("GET", "/responses/sessions/example_123/artifacts"),
+    true,
+  );
+  assert.equal(
+    isResponsesRoute(
+      "GET",
+      "/responses/artifacts/ART-0123456789abcdef0123456789abcdef",
+    ),
+    true,
+  );
+  assert.equal(
     isResponsesRoute(
       "POST",
       "/responses/sessions/example_123/approvals/approval_123",
@@ -118,11 +135,124 @@ test("Full Power routes and bridge URL derivation are narrowly scoped", () => {
   assert.equal(isResponsesRoute("DELETE", "/responses/sessions/example_123"), false);
   assert.equal(isResponsesRoute("POST", "/responses/arbitrary"), false);
   assert.equal(
+    isResponsesRoute("GET", "/responses/artifacts/../../secret"),
+    false,
+  );
+  assert.equal(
     deriveResponsesBridgeBaseUrl({
       PJ_TOOL_BRIDGE_URL: "https://tools.pj-assistant.ai/execute-tool",
     }),
     "https://tools.pj-assistant.ai",
   );
+});
+
+test("prompt perfecting is an authenticated Full Power bridge route", () => {
+  assert.equal(isResponsesRoute("POST", "/responses/prompt-perfect"), true);
+  assert.equal(isPublicRoute("POST", "/responses/prompt-perfect"), false);
+});
+
+test("voice policies keep Fast Voice automatic and Full Power Voice explicit", () => {
+  const fast = createSessionConfig("gpt-realtime", env, [], "fast");
+  const fullPower = createSessionConfig(
+    "gpt-realtime", env, [], "full_power", "Authoritative PJ instructions"
+  );
+  assert.equal(fast.audio.input.turn_detection.create_response, true);
+  assert.equal(fullPower.audio.input.turn_detection.create_response, false);
+  assert.equal(fullPower.instructions, "Authoritative PJ instructions");
+  assert.equal(fast.audio.input.turn_detection.interrupt_response, true);
+  assert.equal(fullPower.audio.input.turn_detection.interrupt_response, true);
+  assert.equal(
+    isResponsesRoute(
+      "POST",
+      "/responses/sessions/example_123/realtime-messages",
+    ),
+    true,
+  );
+});
+
+test("Realtime bridge validates contract, tool manifest, and instructions", async () => {
+  const tools = [{
+    type: "function",
+    name: "example_tool",
+    description: "Example — tool",
+    parameters: {
+      type: "object",
+      properties: {},
+      required: [],
+      additionalProperties: false,
+    },
+  }];
+  const instructions = "Authoritative PJ instructions";
+  const digest = (value) => createHash("sha256").update(value).digest("hex");
+  const payload = {
+    contract_version: CONTRACT_VERSION,
+    tools,
+    tool_manifest_sha256: digest(stableJson(tools)),
+    instructions,
+    instructions_sha256: digest(instructions),
+    prompt_perfecting_version: "1.0",
+    tool_policy_sha256: "a".repeat(64),
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+  try {
+    const bridgeEnv = {
+      PJ_TOOL_BRIDGE_URL: "https://bridge.example/execute-tool",
+      PJ_TOOL_SCHEMAS_URL: "https://bridge.example/tool-schemas",
+      PJ_TOOL_BRIDGE_TOKEN: "bridge-token",
+    };
+    const bundle = await resolveRealtimeTools(
+      bridgeEnv,
+      "request-bridge",
+      "https://pj-assistant.ai/token",
+      true,
+    );
+    assert.equal(bundle.source, "bridge");
+    assert.equal(bundle.tools.length, 1);
+    assert.equal(bundle.instructions, instructions);
+    assert.equal(bundle.tool_manifest_sha256, payload.tool_manifest_sha256);
+    assert.equal(bundle.prompt_perfecting_version, "1.0");
+    assert.equal(bundle.tool_policy_sha256, "a".repeat(64));
+    const healthResponse = await worker.fetch(
+      new Request("https://pj-assistant.ai/health"),
+      bridgeEnv,
+    );
+    const health = await healthResponse.json();
+    assert.equal(health.full_tooling_ready, true);
+    assert.equal(health.prompt_perfecting_version, "1.0");
+    assert.equal(health.tool_policy_sha256, "a".repeat(64));
+
+    payload.tool_manifest_sha256 = "b".repeat(64);
+    const rejected = await resolveRealtimeTools(
+      bridgeEnv,
+      "request-bridge-invalid",
+      "https://pj-assistant.ai/token",
+      true,
+    );
+    assert.equal(rejected.source, "bridge_error");
+    assert.equal(rejected.tools.length, 0);
+    const staleRejected = await resolveRealtimeTools(
+      bridgeEnv,
+      "request-bridge-stale",
+      "https://pj-assistant.ai/token",
+    );
+    assert.equal(staleRejected.source, "bridge_error");
+    assert.equal(staleRejected.tools.length, 0);
+    const degradedHealth = await worker.fetch(
+      new Request("https://pj-assistant.ai/health"),
+      bridgeEnv,
+    ).then((response) => response.json());
+    assert.equal(degradedHealth.full_tooling_ready, false);
+    assert.equal(
+      degradedHealth.tool_schema_reconciliation_status,
+      "failed",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("Full Power proxy streams SSE with only allowlisted bridge headers", async () => {
@@ -158,6 +288,68 @@ test("Full Power proxy streams SSE with only allowlisted bridge headers", async 
   assert.equal(captured.options.headers.accept, "text/event-stream");
   assert.equal(response.headers.get("content-type"), "text/event-stream");
   assert.match(await response.text(), /"type":"completion"/);
+});
+
+test("Full Power proxy preserves binary artifacts and only safe download headers", async () => {
+  let captured = null;
+  const bytes = new Uint8Array([80, 75, 3, 4, 9, 8, 7]);
+  const response = await handleResponsesProxy(
+    new Request(
+      "https://pj-assistant.ai/responses/artifacts/ART-0123456789abcdef0123456789abcdef",
+    ),
+    {
+      PJ_TOOL_BRIDGE_URL: "https://tools.pj-assistant.ai/execute-tool",
+      PJ_TOOL_BRIDGE_TOKEN: "bridge-secret",
+    },
+    "https://pj-assistant.ai",
+    "request-artifact",
+    async (url, options) => {
+      captured = { url, options };
+      return new Response(bytes, {
+        status: 200,
+        headers: {
+          "content-type":
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+          "content-disposition": 'attachment; filename="deck.pptx"',
+          "content-length": String(bytes.byteLength),
+          etag: '"sha256-abc123"',
+          "x-upstream-secret": "must-not-forward",
+        },
+      });
+    },
+  );
+
+  assert.equal(
+    captured.url,
+    "https://tools.pj-assistant.ai/responses/artifacts/ART-0123456789abcdef0123456789abcdef",
+  );
+  assert.equal(captured.options.headers.accept, "application/octet-stream");
+  assert.equal(
+    response.headers.get("content-type"),
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  );
+  assert.equal(
+    response.headers.get("content-disposition"),
+    'attachment; filename="deck.pptx"',
+  );
+  assert.equal(response.headers.get("etag"), '"sha256-abc123"');
+  assert.equal(response.headers.get("content-length"), null);
+  assert.equal(response.headers.get("x-upstream-secret"), null);
+  assert.deepEqual(new Uint8Array(await response.arrayBuffer()), bytes);
+});
+
+test("artifact disposition is reconstructed from a validated basename", () => {
+  assert.equal(
+    safeAttachmentDisposition(
+      'attachment; filename="../../private/deck.pptx"; filename*=UTF-8\'\'..%2F..%2Fprivate%2Fdeck.pptx',
+    ),
+    'attachment; filename="deck.pptx"',
+  );
+  assert.equal(
+    safeAttachmentDisposition('attachment; filename="bad\nname.pptx"'),
+    null,
+  );
+  assert.equal(safeAttachmentDisposition("inline; filename=deck.pptx"), null);
 });
 
 test("Access configuration requires team domain, audience, and owner allowlist", () => {
@@ -261,6 +453,7 @@ test("all Worker responses use the hardened response header policy", () => {
   assert.equal(headers["cache-control"], "no-store");
   assert.equal(headers["content-security-policy"], "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
   assert.equal(headers["referrer-policy"], "no-referrer");
+  assert.match(headers["access-control-expose-headers"], /content-disposition/);
 });
 
 test("realtime excludes long-running tools and aligns bridge timeouts", () => {
@@ -302,31 +495,52 @@ test("browser module initializes with Full Power helpers in shared scope", async
      const createRequestId = () => "request-test";
      const shorten = (value) => String(value);
      const parseErrorBody = () => "";
-     const fetchWithTimeout = async (url) => new Response(
-       JSON.stringify(url.endsWith("/health") ? { ok: true } : { tools: [] }),
-       { status: 200, headers: { "content-type": "application/json" } },
-     );`,
+     const fetchWithTimeout = async (url, options = {}) => {
+       window.__testFetches.push({ url, options });
+       return new Response(
+         JSON.stringify(url.endsWith("/health") ? { ok: true } : { tools: [] }),
+         { status: 200, headers: { "content-type": "application/json" } },
+       );
+     };`,
   );
 
   const listeners = new Map();
   const elements = new Map();
-  const makeElement = (id = "") => ({
-    id,
-    value: "",
-    textContent: "",
-    innerHTML: "",
-    disabled: false,
-    scrollTop: 0,
-    scrollHeight: 0,
-    classList: { toggle() {} },
-    appendChild() {},
-    replaceChildren() {},
-    focus() {},
-    querySelectorAll() { return []; },
-    addEventListener(type, handler) {
-      listeners.set(`${id}:${type}`, handler);
-    },
-  });
+  const makeElement = (id = "") => {
+    const element = {
+      id,
+      value: "",
+      textContent: "",
+      innerHTML: "",
+      disabled: false,
+      scrollTop: 0,
+      scrollHeight: 0,
+      currentTime: 0,
+      dataset: {},
+      className: "",
+      children: [],
+      classList: { toggle() {} },
+      append(...children) { this.children.push(...children); },
+      appendChild(child) { this.children.push(child); return child; },
+      prepend(child) { this.children.unshift(child); },
+      replaceChildren(...children) { this.children = children; },
+      focus() {},
+      pause() {},
+      play() { return Promise.resolve(); },
+      remove() { this.removed = true; },
+      querySelector(selector) {
+        const className = selector.startsWith(".") ? selector.slice(1) : "";
+        return this.children.find((child) =>
+          String(child.className || "").split(/\s+/).includes(className)
+        ) || null;
+      },
+      querySelectorAll() { return []; },
+      addEventListener(type, handler) {
+        listeners.set(`${id}:${type}`, handler);
+      },
+    };
+    return element;
+  };
   const document = {
     getElementById(id) {
       if (!elements.has(id)) elements.set(id, makeElement(id));
@@ -337,6 +551,7 @@ test("browser module initializes with Full Power helpers in shared scope", async
     },
   };
   const window = {
+    __testFetches: [],
     location: {
       hostname: "localhost",
       protocol: "http:",
@@ -350,17 +565,218 @@ test("browser module initializes with Full Power helpers in shared scope", async
     "document",
     "localStorage",
     "navigator",
-    moduleSource,
+    `${moduleSource}
+     return {
+       state,
+       handleRealtimeEvent,
+       renderArtifactCard,
+       seedRealtimeConversation,
+     };`,
   );
 
-  assert.doesNotThrow(() => initialize(
+  const hooks = initialize(
     window,
     document,
     localStorage,
     navigator,
-  ));
+  );
+  assert.ok(hooks);
   assert.equal(typeof listeners.get("startBtn:click"), "function");
   assert.equal(typeof listeners.get("fullPowerModeBtn:click"), "function");
+  assert.equal(typeof listeners.get("fullPowerVoiceModeBtn:click"), "function");
   assert.equal(typeof listeners.get("refreshSessionsBtn:click"), "function");
+  assert.match(html, /className = "artifact-card"/);
+  assert.match(html, /fullPowerToolRows: new Map\(\)/);
+  assert.match(html, /realtimeItems: new Map\(\)/);
+  assert.match(html, /processedRealtimeEventIds: new Set\(\)/);
+  assert.match(html, /conversation\.item\.truncate/);
+  assert.match(html, /conversation\.item\.delete/);
+  assert.match(html, /persistedRealtimeStates: new Map\(\)/);
+  assert.match(html, /seededSessionIds\.delete\(sessionId\)/);
+  assert.match(html, /awaiting_response_status/);
+  assert.match(html, /activePlaybackStartSeconds/);
+  assert.doesNotMatch(
+    html,
+    /: `\$\{prefix\}_\$\{crypto\.randomUUID\(\)/,
+  );
+  assert.doesNotMatch(
+    html,
+    /persistAssistantRealtimeItem\(item, "completed"\)/,
+  );
+  assert.match(html, /artifact-image-preview/);
+  assert.match(html, /startsWith\("image\/"\)/);
+  assert.doesNotMatch(html, /innerHTML\s*=\s*event\./);
+
+  hooks.state.activeSessionId = "session_behavior";
+  hooks.handleRealtimeEvent({
+    event_id: "input-delta-1",
+    type: "conversation.item.input_audio_transcription.delta",
+    item_id: "user-item-1",
+    delta: "Hel",
+  });
+  hooks.handleRealtimeEvent({
+    event_id: "input-delta-1",
+    type: "conversation.item.input_audio_transcription.delta",
+    item_id: "user-item-1",
+    delta: "Hel",
+  });
+  assert.equal(hooks.state.realtimeItems.get("user-item-1").text, "Hel");
+  hooks.handleRealtimeEvent({
+    event_id: "input-done-1",
+    type: "conversation.item.input_audio_transcription.completed",
+    item_id: "user-item-1",
+    transcript: "Hello PJ",
+  });
+
+  hooks.handleRealtimeEvent({
+    event_id: "response-created-1",
+    type: "response.created",
+    response: { id: "response-1" },
+  });
+  hooks.handleRealtimeEvent({
+    event_id: "output-delta-1",
+    type: "response.output_audio_transcript.delta",
+    item_id: "assistant-item-1",
+    response_id: "response-1",
+    delta: "Hi",
+  });
+  hooks.handleRealtimeEvent({
+    event_id: "output-delta-1",
+    type: "response.output_audio_transcript.delta",
+    item_id: "assistant-item-1",
+    response_id: "response-1",
+    delta: "Hi",
+  });
+  assert.equal(hooks.state.realtimeItems.get("assistant-item-1").text, "Hi");
+  hooks.handleRealtimeEvent({
+    event_id: "output-done-1",
+    type: "response.output_audio_transcript.done",
+    item_id: "assistant-item-1",
+    response_id: "response-1",
+    transcript: "Hi there",
+  });
+  assert.equal(
+    hooks.state.realtimeItems.get("assistant-item-1").status,
+    "awaiting_response_status",
+  );
+  const responseDone = {
+    type: "response.done",
+    response: {
+      id: "response-1",
+      status: "completed",
+      output: [{ id: "assistant-item-1" }],
+    },
+  };
+  hooks.handleRealtimeEvent({ event_id: "response-done-1", ...responseDone });
+  hooks.handleRealtimeEvent({ event_id: "response-done-2", ...responseDone });
+
+  const audio = elements.get("pjAudio");
+  const sent = [];
+  hooks.state.dataChannel = {
+    readyState: "open",
+    send(payload) { sent.push(JSON.parse(payload)); },
+  };
+  hooks.handleRealtimeEvent({
+    event_id: "response-created-2",
+    type: "response.created",
+    response: { id: "response-2" },
+  });
+  hooks.handleRealtimeEvent({
+    event_id: "output-delta-2",
+    type: "response.output_audio_transcript.delta",
+    item_id: "assistant-item-2",
+    response_id: "response-2",
+    delta: "This will be interrupted",
+  });
+  audio.currentTime = 3.25;
+  hooks.state.activePlaybackStartSeconds = 2;
+  hooks.handleRealtimeEvent({
+    event_id: "speech-started-1",
+    type: "input_audio_buffer.speech_started",
+  });
+  assert.deepEqual(
+    sent.map((event) => event.type),
+    ["conversation.item.truncate", "response.cancel"],
+  );
+  assert.equal(sent[0].audio_end_ms, 1250);
+  assert.equal(
+    hooks.state.realtimeItems.get("assistant-item-2").status,
+    "interrupted",
+  );
+  const interruptedDone = {
+    type: "response.done",
+    response: {
+      id: "response-2",
+      status: "cancelled",
+      output: [{ id: "assistant-item-2" }],
+    },
+  };
+  hooks.handleRealtimeEvent({
+    event_id: "response-done-interrupted-1",
+    ...interruptedDone,
+  });
+  hooks.handleRealtimeEvent({
+    event_id: "response-done-interrupted-2",
+    ...interruptedDone,
+  });
+
+  hooks.renderArtifactCard({
+    artifact_id: "ART-0123456789abcdef0123456789abcdef",
+    filename: "generated.png",
+    download_url:
+      "/responses/artifacts/ART-0123456789abcdef0123456789abcdef",
+    format: "png",
+    mime_type: "image/png",
+    byte_size: 100,
+    sha256: "a".repeat(64),
+  });
+  const artifactCard = hooks.state.artifactCards.get(
+    "ART-0123456789abcdef0123456789abcdef",
+  );
+  assert.ok(artifactCard.querySelector(".artifact-image-preview"));
+
+  const seedSent = [];
+  hooks.state.pendingSeedHistory = [
+    { role: "user", content: "Persisted request", status: "completed" },
+    { role: "assistant", content: "Unheard output", status: "interrupted" },
+    { role: "assistant", content: "Persisted answer", status: "completed" },
+  ];
+  hooks.state.seededSessionIds.delete("session_behavior");
+  hooks.state.dataChannel = {
+    readyState: "open",
+    send(payload) { seedSent.push(JSON.parse(payload)); },
+  };
+  hooks.seedRealtimeConversation();
+  hooks.seedRealtimeConversation();
+  assert.equal(seedSent.length, 2);
+  assert.deepEqual(
+    seedSent.map((event) => event.item.role),
+    ["user", "assistant"],
+  );
+
   await new Promise((resolve) => setImmediate(resolve));
+  const persisted = window.__testFetches.filter(({ url, options }) =>
+    url.includes("/realtime-messages") && options.method === "POST"
+  );
+  const persistedBodies = persisted.map(({ options }) =>
+    JSON.parse(options.body)
+  );
+  assert.equal(
+    persistedBodies.filter((body) =>
+      body.external_id === "assistant-item-1"
+      && body.status === "completed"
+    ).length,
+    1,
+  );
+  assert.equal(
+    persistedBodies.filter((body) =>
+      body.external_id === "assistant-item-2"
+      && body.status === "interrupted"
+    ).length,
+    1,
+  );
+  assert.ok(persistedBodies.some((body) =>
+    body.external_id === "user-item-1"
+    && body.content === "Hello PJ"
+  ));
 });

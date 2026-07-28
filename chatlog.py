@@ -17,6 +17,7 @@ Slash commands (type "/" then Tab for completion):
   /search <keyword>        search across all chat history
   /exit                    quit
 """
+import hashlib
 import json
 import secrets
 import sqlite3
@@ -61,7 +62,36 @@ def _db():
             session_id TEXT NOT NULL,
             role TEXT NOT NULL,
             content TEXT NOT NULL,
+            external_id TEXT,
+            source TEXT DEFAULT 'chat',
+            response_id TEXT,
+            status TEXT DEFAULT 'completed',
+            interrupted_at TEXT,
+            playback_ms INTEGER,
+            metadata_json TEXT DEFAULT '{}',
             ts TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        message_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(chat_messages)")
+        }
+        for name, definition in (
+            ("external_id", "TEXT"),
+            ("source", "TEXT DEFAULT 'chat'"),
+            ("response_id", "TEXT"),
+            ("status", "TEXT DEFAULT 'completed'"),
+            ("interrupted_at", "TEXT"),
+            ("playback_ms", "INTEGER"),
+            ("metadata_json", "TEXT DEFAULT '{}'"),
+        ):
+            if name not in message_columns:
+                conn.execute(
+                    f"ALTER TABLE chat_messages ADD COLUMN {name} {definition}"
+                )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "idx_chat_messages_external_id "
+            "ON chat_messages(session_id, external_id) "
+            "WHERE external_id IS NOT NULL"
+        )
         conn.execute("""CREATE TABLE IF NOT EXISTS chat_pending_approvals (
             id TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
@@ -72,14 +102,79 @@ def _db():
             server_label TEXT,
             arguments_json TEXT NOT NULL,
             text_format_json TEXT,
+            deliverable_format TEXT,
+            artifact_ids_json TEXT,
+            artifact_hashes_json TEXT,
             status TEXT NOT NULL DEFAULT 'pending',
             created_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
-            decided_at TEXT)""")
+            decided_at TEXT,
+            execution_result_json TEXT)""")
+        approval_columns = {
+            row[1] for row in conn.execute(
+                "PRAGMA table_info(chat_pending_approvals)"
+            )
+        }
+        if "deliverable_format" not in approval_columns:
+            conn.execute(
+                "ALTER TABLE chat_pending_approvals "
+                "ADD COLUMN deliverable_format TEXT"
+            )
+        if "artifact_ids_json" not in approval_columns:
+            conn.execute(
+                "ALTER TABLE chat_pending_approvals "
+                "ADD COLUMN artifact_ids_json TEXT"
+            )
+        if "artifact_hashes_json" not in approval_columns:
+            conn.execute(
+                "ALTER TABLE chat_pending_approvals "
+                "ADD COLUMN artifact_hashes_json TEXT"
+            )
+        if "execution_result_json" not in approval_columns:
+            conn.execute(
+                "ALTER TABLE chat_pending_approvals "
+                "ADD COLUMN execution_result_json TEXT"
+            )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chat_pending_approvals_session "
             "ON chat_pending_approvals(session_id, status, expires_at)"
         )
+        conn.execute("""CREATE TABLE IF NOT EXISTS chat_session_artifacts (
+            session_id TEXT NOT NULL,
+            artifact_id TEXT NOT NULL,
+            linked_at TEXT NOT NULL,
+            PRIMARY KEY (session_id, artifact_id)
+        )""")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_session_artifacts_session "
+            "ON chat_session_artifacts(session_id, linked_at)"
+        )
+        conn.execute("""CREATE TABLE IF NOT EXISTS chat_tool_executions (
+            session_id TEXT NOT NULL,
+            execution_key TEXT NOT NULL,
+            approval_id TEXT,
+            tool_name TEXT NOT NULL,
+            arguments_sha256 TEXT NOT NULL,
+            status TEXT NOT NULL,
+            execution_token TEXT NOT NULL,
+            result_json TEXT,
+            artifact_ids_json TEXT NOT NULL DEFAULT '[]',
+            artifact_hashes_json TEXT NOT NULL DEFAULT '{}',
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            PRIMARY KEY (session_id, execution_key)
+        )""")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_tool_executions_approval "
+            "ON chat_tool_executions(session_id, approval_id)"
+        )
+        conn.execute("""CREATE TABLE IF NOT EXISTS chat_provider_checkpoints (
+            session_id TEXT NOT NULL,
+            operation_key TEXT NOT NULL,
+            response_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (session_id, operation_key)
+        )""")
         yield conn
         conn.commit()
     finally:
@@ -92,8 +187,8 @@ def _now():
 
 # ------------------------------------------------------------- sessions
 def new_session(title: str = "", channel: str = "terminal") -> dict:
-    if channel not in ("terminal", "web"):
-        raise ValueError("channel must be terminal or web")
+    if channel not in ("terminal", "web", "realtime"):
+        raise ValueError("channel must be terminal, web, or realtime")
     sid = secrets.token_urlsafe(24)
     with _db() as conn:
         conn.execute(
@@ -176,13 +271,162 @@ def record_turn(session: dict, role: str, content: str,
                      vals)
 
 
+def record_external_turn(
+        session: dict,
+        role: str,
+        content: str,
+        *,
+        external_id: str,
+        source: str,
+        response_id: str = None,
+        status: str = "completed",
+        playback_ms: int = None,
+        metadata: dict = None) -> dict:
+    if role not in {"user", "assistant"}:
+        raise ValueError("external turn role must be user or assistant")
+    if source not in {"typed", "input_audio", "output_audio", "output_text"}:
+        raise ValueError("external turn source is invalid")
+    if (
+        role == "user" and source not in {"typed", "input_audio"}
+    ) or (
+        role == "assistant" and source not in {"output_audio", "output_text"}
+    ):
+        raise ValueError("external turn role and source are incompatible")
+    if status not in {"completed", "interrupted", "failed"}:
+        raise ValueError("external turn status is invalid")
+    if role == "user" and status != "completed":
+        raise ValueError("user external turns must be completed")
+    if (
+        not isinstance(external_id, str)
+        or not external_id
+        or len(external_id) > 200
+    ):
+        raise ValueError("external_id is invalid")
+    if (
+        not isinstance(content, str)
+        or not content.strip()
+        or len(content) > 20000
+    ):
+        raise ValueError("external turn content is invalid")
+    if response_id is not None and (
+        not isinstance(response_id, str) or len(response_id) > 200
+    ):
+        raise ValueError("response_id is invalid")
+    if playback_ms is not None and (
+        isinstance(playback_ms, bool)
+        or not isinstance(playback_ms, int)
+        or not 0 <= playback_ms <= 86_400_000
+    ):
+        raise ValueError("playback_ms is invalid")
+    if playback_ms is not None and not (
+        role == "assistant" and status == "interrupted"
+    ):
+        raise ValueError("playback_ms is only valid for interrupted assistant turns")
+    metadata = metadata or {}
+    if not isinstance(metadata, dict):
+        raise ValueError("external turn metadata must be an object")
+    metadata_json = json.dumps(
+        metadata, sort_keys=True, separators=(",", ":"), default=str
+    )
+    if len(metadata_json) > 10000:
+        raise ValueError("external turn metadata exceeds the persistence limit")
+    now = _now()
+    with _db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        existing = conn.execute(
+            "SELECT role, content, source, response_id, status, playback_ms, "
+            "metadata_json FROM chat_messages "
+            "WHERE session_id=? AND external_id=?",
+            (session["id"], external_id),
+        ).fetchone()
+        expected = (
+            role,
+            content,
+            source,
+            response_id,
+            status,
+            playback_ms,
+            metadata_json,
+        )
+        if existing:
+            if tuple(existing) != expected:
+                raise ValueError(
+                    "external_id is already bound to a different terminal message"
+                )
+            return {
+                "external_id": external_id,
+                "role": role,
+                "content": content,
+                "source": source,
+                "response_id": response_id,
+                "status": status,
+                "playback_ms": playback_ms,
+                "metadata": metadata,
+            }
+        conn.execute(
+            "INSERT INTO chat_messages "
+            "(session_id, role, content, external_id, source, response_id, "
+            "status, interrupted_at, playback_ms, metadata_json, ts) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                session["id"],
+                role,
+                content,
+                external_id,
+                source,
+                response_id,
+                status,
+                now if status == "interrupted" else None,
+                playback_ms,
+                metadata_json,
+                now,
+            ),
+        )
+        sets = ["updated_at=?"]
+        values = [now]
+        if role == "user" and not session.get("title") and content.strip():
+            session["title"] = content.strip().replace("\n", " ")[:60]
+            sets.append("title=?")
+            values.append(session["title"])
+        values.append(session["id"])
+        conn.execute(
+            f"UPDATE chat_sessions SET {', '.join(sets)} WHERE id=?",
+            values,
+        )
+    return {
+        "external_id": external_id,
+        "role": role,
+        "content": content,
+        "source": source,
+        "response_id": response_id,
+        "status": status,
+        "playback_ms": playback_ms,
+        "metadata": metadata,
+    }
+
+
 def history(sid: str, limit: int = 10) -> list:
     with _db() as conn:
         rows = conn.execute(
-            "SELECT role, content, ts FROM chat_messages WHERE session_id=? "
+            "SELECT role, content, ts, external_id, source, response_id, "
+            "status, interrupted_at, playback_ms, metadata_json "
+            "FROM chat_messages WHERE session_id=? "
             "ORDER BY id DESC LIMIT ?", (sid, limit)).fetchall()
-    return [{"role": r[0], "content": r[1], "ts": r[2]}
-            for r in reversed(rows)]
+    return [
+        {
+            "role": row[0],
+            "content": row[1],
+            "ts": row[2],
+            "external_id": row[3],
+            "source": row[4] or "chat",
+            "response_id": row[5],
+            "status": row[6] or "completed",
+            "interrupted_at": row[7],
+            "playback_ms": row[8],
+            "metadata": json.loads(row[9] or "{}"),
+        }
+        for row in reversed(rows)
+    ]
 
 
 def session_detail(sid: str, message_limit: int = 50) -> dict:
@@ -193,7 +437,35 @@ def session_detail(sid: str, message_limit: int = 50) -> dict:
     public.pop("last_response_id", None)
     public["history"] = history(sid, message_limit)
     public["pending_approvals"] = list_pending_approvals(sid)
+    public["artifact_ids"] = list_session_artifact_ids(sid)
     return public
+
+
+def link_session_artifact(sid: str, artifact_id: str) -> bool:
+    """Persist an artifact relationship only for an existing chat session."""
+    with _db() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM chat_sessions WHERE id=?", (sid,)
+        ).fetchone()
+        if not exists:
+            return False
+        conn.execute(
+            "INSERT INTO chat_session_artifacts "
+            "(session_id, artifact_id, linked_at) VALUES (?,?,?) "
+            "ON CONFLICT(session_id, artifact_id) DO NOTHING",
+            (sid, artifact_id, _now()),
+        )
+    return True
+
+
+def list_session_artifact_ids(sid: str) -> list[str]:
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT artifact_id FROM chat_session_artifacts "
+            "WHERE session_id=? ORDER BY linked_at",
+            (sid,),
+        ).fetchall()
+    return [row[0] for row in rows]
 
 
 def _expire_pending_approvals(conn, sid: str = None):
@@ -221,12 +493,21 @@ def _approval_from_row(row: tuple, *, include_provider: bool = False) -> dict:
         "created_at": row[10],
         "expires_at": row[11],
     }
+    if row[9] in ("executing_approved", "executing_rejected"):
+        approval["execution_decision"] = row[9] == "executing_approved"
     if include_provider:
         approval.update({
             "provider_response_id": row[3],
             "provider_item_id": row[4],
             "text_format": (
                 json.loads(row[8]) if row[8] else None
+            ),
+            "deliverable_format": row[12],
+            "artifact_ids": json.loads(row[13] or "[]"),
+            "artifact_hashes": json.loads(row[14] or "{}"),
+            "execution_result_recorded": row[15] is not None,
+            "execution_result": (
+                json.loads(row[15]) if row[15] is not None else None
             ),
         })
     return approval
@@ -238,9 +519,12 @@ def list_pending_approvals(sid: str) -> list:
         rows = conn.execute(
             "SELECT id, session_id, approval_kind, provider_response_id, "
             "provider_item_id, tool_name, server_label, arguments_json, "
-            "text_format_json, status, created_at, expires_at "
+            "text_format_json, status, created_at, expires_at, "
+            "deliverable_format, artifact_ids_json, artifact_hashes_json, "
+            "execution_result_json "
             "FROM chat_pending_approvals "
-            "WHERE session_id=? AND status='pending' "
+            "WHERE session_id=? AND status IN "
+            "('pending','executing_approved','executing_rejected') "
             "ORDER BY created_at",
             (sid,),
         ).fetchall()
@@ -253,9 +537,12 @@ def get_pending_approval(sid: str, approval_id: str) -> dict:
         row = conn.execute(
             "SELECT id, session_id, approval_kind, provider_response_id, "
             "provider_item_id, tool_name, server_label, arguments_json, "
-            "text_format_json, status, created_at, expires_at "
+            "text_format_json, status, created_at, expires_at, "
+            "deliverable_format, artifact_ids_json, artifact_hashes_json, "
+            "execution_result_json "
             "FROM chat_pending_approvals "
-            "WHERE id=? AND session_id=? AND status='pending'",
+            "WHERE id=? AND session_id=? AND status IN "
+            "('pending','executing_approved','executing_rejected')",
             (approval_id, sid),
         ).fetchone()
     return _approval_from_row(row, include_provider=True) if row else None
@@ -272,15 +559,50 @@ def pause_session_turn_for_approval(
         arguments: dict,
         server_label: str = "",
         text_format: dict = None,
+        deliverable_format: str = None,
+        artifact_ids: list[str] = None,
+        artifact_hashes: dict[str, str] = None,
+        completed_approval_id: str = None,
+        completed_approval_decision: bool = None,
         ttl_seconds: int = 900) -> dict:
     if approval_kind not in ("local_function", "mcp"):
         raise ValueError("unsupported approval kind")
+    if (completed_approval_id is None) != (
+        completed_approval_decision is None
+    ) or (
+        completed_approval_decision is not None
+        and not isinstance(completed_approval_decision, bool)
+    ):
+        raise ValueError("completed approval state is invalid")
     approval_id = secrets.token_urlsafe(24)
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=max(60, min(ttl_seconds, 3600)))
     arguments_json = json.dumps(arguments or {}, default=str)
     text_format_json = (
         json.dumps(text_format, default=str) if text_format else None
+    )
+    artifact_ids = list(dict.fromkeys(artifact_ids or []))
+    if len(artifact_ids) > 50 or any(
+        not isinstance(artifact_id, str)
+        or len(artifact_id) != 36
+        or not artifact_id.startswith("ART-")
+        for artifact_id in artifact_ids
+    ):
+        raise ValueError("approval artifact state is invalid")
+    artifact_ids_json = json.dumps(artifact_ids)
+    artifact_hashes = artifact_hashes or {}
+    if (
+        set(artifact_hashes) != set(artifact_ids)
+        or any(
+            not isinstance(sha, str)
+            or len(sha) != 64
+            or any(char not in "0123456789abcdef" for char in sha)
+            for sha in artifact_hashes.values()
+        )
+    ):
+        raise ValueError("approval artifact hashes are invalid")
+    artifact_hashes_json = json.dumps(
+        artifact_hashes, sort_keys=True, separators=(",", ":")
     )
     if len(arguments_json) > 50000 or (
         text_format_json and len(text_format_json) > 50000
@@ -294,12 +616,20 @@ def pause_session_turn_for_approval(
         ).fetchone()
         if not row or not hmac_compare(row[0], token):
             return None
+        if completed_approval_id and not _complete_approval(
+            conn,
+            session["id"],
+            completed_approval_id,
+            completed_approval_decision,
+        ):
+            return None
         conn.execute(
             "INSERT INTO chat_pending_approvals "
             "(id, session_id, approval_kind, provider_response_id, "
             "provider_item_id, tool_name, server_label, arguments_json, "
-            "text_format_json, created_at, expires_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "text_format_json, created_at, expires_at, deliverable_format, "
+            "artifact_ids_json, artifact_hashes_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 approval_id,
                 session["id"],
@@ -312,6 +642,9 @@ def pause_session_turn_for_approval(
                 text_format_json,
                 now.isoformat(),
                 expires_at.isoformat(),
+                (deliverable_format or "")[:20] or None,
+                artifact_ids_json,
+                artifact_hashes_json,
             ),
         )
         conn.execute(
@@ -322,29 +655,281 @@ def pause_session_turn_for_approval(
     return get_pending_approval(session["id"], approval_id)
 
 
-def decide_pending_approval(
+def begin_pending_approval_execution(
         sid: str, approval_id: str, approve: bool) -> dict:
+    desired_status = "executing_approved" if approve else "executing_rejected"
     with _db() as conn:
         conn.execute("BEGIN IMMEDIATE")
         _expire_pending_approvals(conn, sid)
         row = conn.execute(
             "SELECT id, session_id, approval_kind, provider_response_id, "
             "provider_item_id, tool_name, server_label, arguments_json, "
-            "text_format_json, status, created_at, expires_at "
+            "text_format_json, status, created_at, expires_at, "
+            "deliverable_format, artifact_ids_json, artifact_hashes_json, "
+            "execution_result_json "
             "FROM chat_pending_approvals "
-            "WHERE id=? AND session_id=? AND status='pending'",
+            "WHERE id=? AND session_id=? AND status IN "
+            "('pending','executing_approved','executing_rejected')",
             (approval_id, sid),
         ).fetchone()
-        if not row:
+        if not row or row[9] not in ("pending", desired_status):
             return None
-        conn.execute(
-            "UPDATE chat_pending_approvals SET status=?, decided_at=? "
-            "WHERE id=? AND status='pending'",
-            ("approved" if approve else "rejected", _now(), approval_id),
-        )
+        if row[9] == "pending":
+            conn.execute(
+                "UPDATE chat_pending_approvals SET status=?, decided_at=? "
+                "WHERE id=? AND status='pending'",
+                (desired_status, _now(), approval_id),
+            )
     approval = _approval_from_row(row, include_provider=True)
-    approval["status"] = "approved" if approve else "rejected"
+    approval["status"] = desired_status
     return approval
+
+
+def store_pending_approval_execution(
+        sid: str,
+        approval_id: str,
+        approve: bool,
+        result,
+        artifact_ids: list[str],
+        artifact_hashes: dict[str, str]) -> bool:
+    artifact_ids = list(dict.fromkeys(artifact_ids))
+    if set(artifact_hashes) != set(artifact_ids):
+        raise ValueError("approval execution artifact hashes are invalid")
+    expected = "executing_approved" if approve else "executing_rejected"
+    result_json = json.dumps(
+        result, default=str, sort_keys=True, separators=(",", ":")
+    )
+    artifact_ids_json = json.dumps(artifact_ids)
+    artifact_hashes_json = json.dumps(
+        artifact_hashes, sort_keys=True, separators=(",", ":")
+    )
+    with _db() as conn:
+        cursor = conn.execute(
+            "UPDATE chat_pending_approvals SET execution_result_json=?, "
+            "artifact_ids_json=?, artifact_hashes_json=? "
+            "WHERE id=? AND session_id=? AND status=?",
+            (
+                result_json,
+                artifact_ids_json,
+                artifact_hashes_json,
+                approval_id,
+                sid,
+                expected,
+            ),
+        )
+    return cursor.rowcount == 1
+
+
+def _complete_approval(
+        conn, sid: str, approval_id: str, approve: bool) -> bool:
+    expected = "executing_approved" if approve else "executing_rejected"
+    terminal = "approved" if approve else "rejected"
+    cursor = conn.execute(
+        "UPDATE chat_pending_approvals SET status=?, decided_at=? "
+        "WHERE id=? AND session_id=? AND status=?",
+        (terminal, _now(), approval_id, sid, expected),
+    )
+    return cursor.rowcount == 1
+
+
+def complete_pending_approval(
+        sid: str, approval_id: str, approve: bool) -> bool:
+    with _db() as conn:
+        return _complete_approval(conn, sid, approval_id, approve)
+
+
+def retry_pending_approval(sid: str, approval_id: str) -> bool:
+    with _db() as conn:
+        cursor = conn.execute(
+            "UPDATE chat_pending_approvals SET status='pending', "
+            "decided_at=NULL WHERE id=? AND session_id=? "
+            "AND status IN ('executing_approved','executing_rejected') "
+            "AND execution_result_json IS NULL",
+            (approval_id, sid),
+        )
+    return cursor.rowcount == 1
+
+
+def mark_pending_approval_execution_unknown(
+        sid: str, approval_id: str, approve: bool) -> bool:
+    expected = "executing_approved" if approve else "executing_rejected"
+    with _db() as conn:
+        cursor = conn.execute(
+            "UPDATE chat_pending_approvals SET status='execution_unknown', "
+            "decided_at=? WHERE id=? AND session_id=? AND status=? "
+            "AND execution_result_json IS NULL",
+            (_now(), approval_id, sid, expected),
+        )
+    return cursor.rowcount == 1
+
+
+def _execution_arguments_sha256(tool_name: str, arguments: dict) -> str:
+    payload = json.dumps(
+        {"tool_name": tool_name, "arguments": arguments or {}},
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _execution_from_row(row: tuple) -> dict:
+    return {
+        "state": row[0],
+        "result": json.loads(row[1]) if row[1] is not None else None,
+        "artifact_ids": json.loads(row[2] or "[]"),
+        "artifact_hashes": json.loads(row[3] or "{}"),
+        "started_at": row[4],
+        "completed_at": row[5],
+    }
+
+
+def reserve_tool_execution(
+        sid: str,
+        execution_key: str,
+        tool_name: str,
+        arguments: dict,
+        *,
+        approval_id: str = "") -> dict:
+    """Reserve one tool effect or recover its write-once completed result."""
+    execution_key = str(execution_key or "").strip()
+    tool_name = str(tool_name or "").strip()
+    if (
+        not execution_key
+        or len(execution_key) > 300
+        or not tool_name
+        or len(tool_name) > 200
+        or not isinstance(arguments, dict)
+    ):
+        raise ValueError("tool execution identity is invalid")
+    arguments_sha256 = _execution_arguments_sha256(tool_name, arguments)
+    token = secrets.token_urlsafe(32)
+    now = _now()
+    with _db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT status, result_json, artifact_ids_json, "
+            "artifact_hashes_json, started_at, completed_at, tool_name, "
+            "arguments_sha256 FROM chat_tool_executions "
+            "WHERE session_id=? AND execution_key=?",
+            (sid, execution_key),
+        ).fetchone()
+        if row:
+            if row[6] != tool_name or row[7] != arguments_sha256:
+                return {"state": "conflict"}
+            if row[0] == "reserved":
+                conn.execute(
+                    "UPDATE chat_tool_executions SET status='outcome_unknown', "
+                    "completed_at=? WHERE session_id=? AND execution_key=? "
+                    "AND status='reserved'",
+                    (now, sid, execution_key),
+                )
+                return {
+                    "state": "outcome_unknown",
+                    "started_at": row[4],
+                    "completed_at": now,
+                }
+            return _execution_from_row(row[:6])
+        session_exists = conn.execute(
+            "SELECT 1 FROM chat_sessions WHERE id=?", (sid,)
+        ).fetchone()
+        if not session_exists:
+            return {"state": "conflict"}
+        conn.execute(
+            "INSERT INTO chat_tool_executions "
+            "(session_id, execution_key, approval_id, tool_name, "
+            "arguments_sha256, status, execution_token, started_at) "
+            "VALUES (?,?,?,?,?,'reserved',?,?)",
+            (
+                sid,
+                execution_key,
+                approval_id or None,
+                tool_name,
+                arguments_sha256,
+                token,
+                now,
+            ),
+        )
+    return {"state": "reserved", "execution_token": token, "started_at": now}
+
+
+def complete_tool_execution(
+        sid: str,
+        execution_key: str,
+        execution_token: str,
+        result,
+        artifact_ids: list[str],
+        artifact_hashes: dict[str, str]) -> bool:
+    artifact_ids = list(dict.fromkeys(artifact_ids or []))
+    artifact_hashes = dict(artifact_hashes or {})
+    if set(artifact_ids) != set(artifact_hashes):
+        raise ValueError("tool execution artifact hashes are invalid")
+    result_json = json.dumps(
+        result, default=str, sort_keys=True, separators=(",", ":")
+    )
+    if len(result_json) > 200000:
+        raise ValueError("tool execution result exceeds the persistence limit")
+    with _db() as conn:
+        cursor = conn.execute(
+            "UPDATE chat_tool_executions SET status='completed', "
+            "result_json=?, artifact_ids_json=?, artifact_hashes_json=?, "
+            "completed_at=? WHERE session_id=? AND execution_key=? "
+            "AND status='reserved' AND execution_token=? AND result_json IS NULL",
+            (
+                result_json,
+                json.dumps(artifact_ids),
+                json.dumps(
+                    artifact_hashes, sort_keys=True, separators=(",", ":")
+                ),
+                _now(),
+                sid,
+                execution_key,
+                execution_token,
+            ),
+        )
+    return cursor.rowcount == 1
+
+
+def mark_tool_execution_unknown(
+        sid: str, execution_key: str, execution_token: str) -> bool:
+    with _db() as conn:
+        cursor = conn.execute(
+            "UPDATE chat_tool_executions SET status='outcome_unknown', "
+            "completed_at=? WHERE session_id=? AND execution_key=? "
+            "AND status='reserved' AND execution_token=?",
+            (_now(), sid, execution_key, execution_token),
+        )
+    return cursor.rowcount == 1
+
+
+def record_provider_response_checkpoint(
+        sid: str, operation_key: str, response_id: str) -> bool:
+    """Bind one stable provider idempotency key to exactly one response ID."""
+    operation_key = str(operation_key or "").strip()
+    response_id = str(response_id or "").strip()
+    if (
+        not operation_key
+        or len(operation_key) > 300
+        or not response_id
+        or len(response_id) > 300
+    ):
+        raise ValueError("provider checkpoint identity is invalid")
+    with _db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT response_id FROM chat_provider_checkpoints "
+            "WHERE session_id=? AND operation_key=?",
+            (sid, operation_key),
+        ).fetchone()
+        if row:
+            return hmac_compare(row[0], response_id)
+        conn.execute(
+            "INSERT INTO chat_provider_checkpoints "
+            "(session_id, operation_key, response_id, created_at) "
+            "VALUES (?,?,?,?)",
+            (sid, operation_key, response_id, _now()),
+        )
+    return True
 
 
 def claim_session_turn(
@@ -359,7 +944,8 @@ def claim_session_turn(
         _expire_pending_approvals(conn, sid)
         pending = conn.execute(
             "SELECT id FROM chat_pending_approvals "
-            "WHERE session_id=? AND status='pending'",
+            "WHERE session_id=? AND status IN "
+            "('pending','executing_approved','executing_rejected')",
             (sid,),
         ).fetchall()
         if pending and (
@@ -391,7 +977,13 @@ def claim_session_turn(
 
 
 def finish_session_turn(
-        session: dict, token: str, content: str, response_id: str) -> bool:
+        session: dict,
+        token: str,
+        content: str,
+        response_id: str,
+        *,
+        completed_approval_id: str = None,
+        completed_approval_decision: bool = None) -> bool:
     with _db() as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
@@ -399,6 +991,13 @@ def finish_session_turn(
             (session["id"],),
         ).fetchone()
         if not row or not hmac_compare(row[0], token):
+            return False
+        if completed_approval_id and not _complete_approval(
+            conn,
+            session["id"],
+            completed_approval_id,
+            completed_approval_decision,
+        ):
             return False
         conn.execute(
             "INSERT INTO chat_messages (session_id, role, content) "
@@ -410,7 +1009,7 @@ def finish_session_turn(
             "active_turn_token=NULL, active_turn_started_at=NULL WHERE id=?",
             (response_id, _now(), session["id"]),
         )
-        session["last_response_id"] = response_id
+    session["last_response_id"] = response_id
     return True
 
 
@@ -532,6 +1131,11 @@ def _feature_defs(cfg):
     """Feature registry: (key, label, kind, is_on, detail)."""
     import pathlib
     mcp_path = pathlib.Path(__file__).resolve().parent / "mcp_servers.json"
+    vector_store_ids = cfg.get("vector_store_ids")
+    if not isinstance(vector_store_ids, list):
+        vector_store_ids = (
+            [cfg["vector_store_id"]] if cfg.get("vector_store_id") else []
+        )
     feats = [
         ("streaming", "Streaming responses", "info", True,
          "text, function calls, and structured output always stream"),
@@ -546,8 +1150,9 @@ def _feature_defs(cfg):
          bool(cfg.get("image_generation_enabled")),
          "create/edit images in responses"),
         ("file_search", "File search (vector store)", "info",
-         bool(cfg.get("vector_store_id")),
-         f"vector store {cfg.get('vector_store_id', 'not configured')[:28]}"),
+         bool(vector_store_ids),
+         "vector store "
+         + (str(vector_store_ids[0])[:28] if vector_store_ids else "not configured")),
         ("tool_search_enabled", "Tool search", "toggle",
          bool(cfg.get("tool_search_enabled")),
          "dynamic tool discovery across the full catalog"),

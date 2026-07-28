@@ -26,16 +26,19 @@ Jinja2==3.1.6
 jiter==0.16.0
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
+lxml==6.1.1
 Markdown==3.10.2
 MarkupSafe==3.0.3
 openai==2.48.0
 packaging==26.2
+pillow==12.3.0
 pycparser==3.0
 pydantic==2.13.4
 pydantic_core==2.46.4
 pyee==13.0.1
 pylibsrtp==1.0.0
 pyOpenSSL==26.3.0
+python-pptx==1.0.2
 referencing==0.37.0
 requests==2.34.2
 rpds-py==2026.6.3
@@ -46,3 +49,4 @@ typing-inspection==0.4.2
 typing_extensions==4.16.0
 urllib3==2.7.0
 Werkzeug==3.1.8
+xlsxwriter==3.2.9

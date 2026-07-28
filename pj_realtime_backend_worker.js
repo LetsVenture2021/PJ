@@ -1,4 +1,4 @@
-const CONTRACT_VERSION = "2026-07-28.5";
+const CONTRACT_VERSION = "2026-07-28.6";
 const DEFAULT_REALTIME_MODEL = "gpt-realtime-2.1";
 const FALLBACK_REALTIME_MODEL = "gpt-realtime";
 const REALTIME_VOICE = "marin";
@@ -15,6 +15,12 @@ const REALTIME_EXCLUDED_TOOL_NAMES = new Set([
   "run_codeops_validation",
   "run_shortcut",
   "sync_vector_store",
+  "generate_image_asset",
+  "edit_image_asset",
+  "create_image_variation",
+  "create_controlled_image",
+  "register_vector_image",
+  "delete_image_asset",
 ]);
 
 // Public: GET /health and CORS preflight. Every other route is privileged so
@@ -25,8 +31,30 @@ let toolSchemaCache = {
   tools: [],
   source: "cold_start",
   detail: null,
+  instructions: null,
+  instructions_sha256: null,
+  tool_manifest_sha256: null,
+  prompt_perfecting_version: null,
+  tool_policy_sha256: null,
   fetched_at_ms: 0,
 };
+let toolSchemaReconciliation = {
+  status: "never",
+  attempted_at_ms: 0,
+};
+
+function bridgeSchemaFailure(detail, source = "bridge_error") {
+  toolSchemaReconciliation = {
+    status: "failed",
+    attempted_at_ms: Date.now(),
+  };
+  return {
+    tools: [],
+    source,
+    detail,
+    instructions: null,
+  };
+}
 const accessCertCache = new Map();
 
 const DEFAULT_INSTRUCTIONS =
@@ -72,7 +100,8 @@ function corsHeaders(corsOrigin) {
     "access-control-allow-methods": "GET,POST,OPTIONS",
     "access-control-allow-headers":
       "content-type,authorization,x-pj-client-request-id,x-pj-contract-version",
-    "access-control-expose-headers": "x-request-id,x-pj-contract-version",
+    "access-control-expose-headers":
+      "x-request-id,x-pj-contract-version,content-disposition,content-length,etag",
   };
 }
 
@@ -91,6 +120,30 @@ function responseHeaders(corsOrigin, requestId, contentType = "application/json"
     vary: "Origin",
     ...corsHeaders(corsOrigin),
   };
+}
+
+function safeAttachmentDisposition(value) {
+  if (typeof value !== "string" || !/^attachment(?:;|$)/i.test(value)) {
+    return null;
+  }
+  const encoded = value.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
+  const quoted = value.match(/filename\s*=\s*"([^"]*)"/i);
+  const bare = value.match(/filename\s*=\s*([^;]+)/i);
+  let candidate = encoded?.[1] || quoted?.[1] || bare?.[1] || "";
+  try {
+    candidate = decodeURIComponent(candidate.trim());
+  } catch {
+    return null;
+  }
+  const basename = candidate.replaceAll("\\", "/").split("/").pop()?.trim() || "";
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9._ -]{0,159}$/.test(basename) ||
+    basename === "." ||
+    basename === ".."
+  ) {
+    return null;
+  }
+  return `attachment; filename="${basename.replaceAll('"', "")}"`;
 }
 
 function trimDetail(detail) {
@@ -366,17 +419,31 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
   }
 }
 
-function createSessionConfig(model, env, tools) {
+function createSessionConfig(
+  model,
+  env,
+  tools,
+  voiceMode = "fast",
+  authoritativeInstructions = null,
+) {
+  if (!["fast", "full_power"].includes(voiceMode)) {
+    throw new Error("voiceMode must be fast or full_power");
+  }
   return {
     type: "realtime",
     model,
-    instructions: env.PJ_REALTIME_INSTRUCTIONS || DEFAULT_INSTRUCTIONS,
+    instructions:
+      authoritativeInstructions
+      || env.PJ_REALTIME_INSTRUCTIONS
+      || DEFAULT_INSTRUCTIONS,
     audio: {
       input: {
         transcription: { model: "gpt-4o-transcribe" },
         turn_detection: {
           type: "server_vad",
           silence_duration_ms: 500,
+          create_response: voiceMode === "fast",
+          interrupt_response: true,
         },
       },
       output: { voice: REALTIME_VOICE },
@@ -446,6 +513,27 @@ function parseToolSchemaPayload(rawText, maxTools) {
   return [];
 }
 
+async function sha256Hex(value) {
+  const data = new TextEncoder().encode(String(value));
+  const digest = await crypto.subtle.digest("SHA-256", data);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableJson(item)).join(",")}]`;
+  }
+  if (value && typeof value === "object") {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
 function bridgeHeaders(env, requestId) {
   // Construct a fresh allowlisted header set so Access assertions and browser
   // credentials can never be forwarded to the private tool runtime.
@@ -502,15 +590,28 @@ function isResponsesRoute(method, pathname) {
     if (method === "GET" && pathname === "/responses/capabilities") {
       return true;
     }
+    if (method === "POST" && pathname === "/responses/prompt-perfect") {
+      return true;
+    }
     if ((method === "GET" || method === "POST") && pathname === "/responses/sessions") {
       return true;
     }
     if (method === "GET" && pathname === "/responses/sessions/search") {
       return true;
     }
+    if (
+      method === "GET" &&
+      (
+        /^\/responses\/artifacts\/ART-[a-f0-9]{32}$/.test(pathname) ||
+        /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/artifacts$/.test(pathname)
+      )
+    ) {
+      return true;
+    }
     return method === "POST" && (
       /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/resume$/.test(pathname) ||
       /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/turns$/.test(pathname) ||
+      /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/realtime-messages$/.test(pathname) ||
       /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/approvals\/[A-Za-z0-9_-]{8,128}$/.test(pathname)
     );
   }
@@ -580,9 +681,13 @@ async function handleResponsesProxy(
     }
 
     const isStreamingTurn = /\/turns$/.test(inboundUrl.pathname);
+    const isArtifactDownload =
+      /^\/responses\/artifacts\/ART-[a-f0-9]{32}$/.test(inboundUrl.pathname);
     const headers = {
       ...bridgeHeaders(env, requestId),
-      accept: isStreamingTurn ? "text/event-stream" : "application/json",
+      accept: isStreamingTurn
+        ? "text/event-stream"
+        : (isArtifactDownload ? "application/octet-stream" : "application/json"),
     };
     let body;
     if (request.method === "POST") {
@@ -610,17 +715,33 @@ async function handleResponsesProxy(
       const upstreamContentType =
         bridgeResponse.headers.get("content-type") ||
         (isStreamingTurn ? "text/event-stream" : "application/json");
-      const contentType = upstreamContentType.includes("text/event-stream")
+      const isEventStream = upstreamContentType.includes("text/event-stream");
+      const isJson = upstreamContentType.includes("application/json");
+      const contentType = isEventStream
         ? "text/event-stream"
-        : "application/json";
+        : (isArtifactDownload && !isJson
+          ? upstreamContentType.split(";")[0].trim()
+          : "application/json");
       const responseHeaderSet = responseHeaders(corsOrigin, requestId, contentType);
-      if (contentType === "text/event-stream") {
+      if (isEventStream) {
         responseHeaderSet["x-accel-buffering"] = "no";
+      }
+      if (isArtifactDownload && !isJson) {
+        const disposition = bridgeResponse.headers.get("content-disposition") || "";
+        const etag = bridgeResponse.headers.get("etag") || "";
+        const safeDisposition = safeAttachmentDisposition(disposition);
+        if (safeDisposition) {
+          responseHeaderSet["content-disposition"] = safeDisposition;
+        }
+        if (/^"[A-Za-z0-9._-]{1,160}"$/.test(etag)) {
+          responseHeaderSet.etag = etag;
+        }
       }
       logEvent(requestId, "responses.bridge_complete", {
         path: inboundUrl.pathname,
         status: bridgeResponse.status,
-        streaming: contentType === "text/event-stream",
+        streaming: isEventStream,
+        artifact: isArtifactDownload && !isJson,
       });
       return new Response(bridgeResponse.body, {
         status: bridgeResponse.status,
@@ -665,6 +786,7 @@ async function resolveRealtimeTools(env, requestId, requestUrl, forceRefresh = f
       tools: inlineTools,
       source: "inline_env",
       detail: inlineTools.length ? null : "inline schema env var was present but empty/invalid",
+      instructions: env.PJ_REALTIME_INSTRUCTIONS || DEFAULT_INSTRUCTIONS,
     };
   }
 
@@ -684,6 +806,10 @@ async function resolveRealtimeTools(env, requestId, requestUrl, forceRefresh = f
     };
   }
   if (isLoopTarget(schemaUrl, requestUrl)) {
+    toolSchemaReconciliation = {
+      status: "failed",
+      attempted_at_ms: Date.now(),
+    };
     return {
       tools: [],
       source: "misconfigured",
@@ -692,11 +818,21 @@ async function resolveRealtimeTools(env, requestId, requestUrl, forceRefresh = f
   }
 
   const now = Date.now();
-  if (!forceRefresh && toolSchemaCache.fetched_at_ms && now - toolSchemaCache.fetched_at_ms < cacheTtlMs) {
+  if (
+    !forceRefresh
+    && toolSchemaReconciliation.status === "success"
+    && toolSchemaCache.fetched_at_ms
+    && now - toolSchemaCache.fetched_at_ms < cacheTtlMs
+  ) {
     return {
       tools: toolSchemaCache.tools,
       source: toolSchemaCache.source,
       detail: toolSchemaCache.detail,
+      instructions: toolSchemaCache.instructions,
+      instructions_sha256: toolSchemaCache.instructions_sha256,
+      tool_manifest_sha256: toolSchemaCache.tool_manifest_sha256,
+      prompt_perfecting_version: toolSchemaCache.prompt_perfecting_version,
+      tool_policy_sha256: toolSchemaCache.tool_policy_sha256,
     };
   }
 
@@ -704,6 +840,10 @@ async function resolveRealtimeTools(env, requestId, requestUrl, forceRefresh = f
   try {
     target = new URL(schemaUrl);
   } catch {
+    toolSchemaReconciliation = {
+      status: "failed",
+      attempted_at_ms: Date.now(),
+    };
     return {
       tools: [],
       source: "misconfigured",
@@ -726,30 +866,99 @@ async function resolveRealtimeTools(env, requestId, requestUrl, forceRefresh = f
     const raw = await resp.text();
     if (!resp.ok) {
       const detail = `status=${resp.status}; ${trimDetail(raw)}`;
-      return {
-        tools: [],
-        source: "bridge_error",
-        detail,
-      };
+      return bridgeSchemaFailure(detail);
+    }
+    let parsed = null;
+    try {
+      parsed = raw ? JSON.parse(raw) : null;
+    } catch {
+      parsed = null;
     }
     const tools = parseToolSchemaPayload(raw, maxTools);
+    if (!parsed || parsed.contract_version !== CONTRACT_VERSION) {
+      return bridgeSchemaFailure(
+        "bridge contract version is missing or incompatible",
+      );
+    }
+    const expectedToolManifestSha256 =
+      typeof parsed.tool_manifest_sha256 === "string"
+        ? parsed.tool_manifest_sha256
+        : "";
+    const actualToolManifestSha256 = Array.isArray(parsed.tools)
+      ? await sha256Hex(stableJson(parsed.tools))
+      : "";
+    if (
+      !/^[a-f0-9]{64}$/.test(expectedToolManifestSha256)
+      || actualToolManifestSha256 !== expectedToolManifestSha256
+    ) {
+      return bridgeSchemaFailure(
+        "bridge tool manifest failed SHA-256 validation",
+      );
+    }
+    const instructions =
+      parsed && typeof parsed.instructions === "string"
+        ? parsed.instructions.trim()
+        : "";
+    const instructionsSha256 =
+      parsed && typeof parsed.instructions_sha256 === "string"
+        ? parsed.instructions_sha256
+        : "";
+    const actualInstructionsSha256 = instructions
+      ? await sha256Hex(instructions)
+      : "";
+    if (
+      !instructions
+      || !/^[a-f0-9]{64}$/.test(instructionsSha256)
+      || actualInstructionsSha256 !== instructionsSha256
+    ) {
+      return bridgeSchemaFailure(
+        "bridge instructions are missing or failed SHA-256 validation",
+      );
+    }
+    const promptPerfectingVersion =
+      typeof parsed.prompt_perfecting_version === "string"
+        ? parsed.prompt_perfecting_version.trim()
+        : "";
+    const toolPolicySha256 =
+      typeof parsed.tool_policy_sha256 === "string"
+        ? parsed.tool_policy_sha256
+        : "";
+    if (
+      !promptPerfectingVersion
+      || !/^[a-f0-9]{64}$/.test(toolPolicySha256)
+    ) {
+      return bridgeSchemaFailure(
+        "bridge prompt or policy version metadata is invalid",
+      );
+    }
     toolSchemaCache = {
       tools,
       source: "bridge",
       detail: tools.length ? null : "bridge responded but no function tools were parsed",
+      instructions,
+      instructions_sha256: instructionsSha256,
+      tool_manifest_sha256:
+        actualToolManifestSha256,
+      prompt_perfecting_version: promptPerfectingVersion,
+      tool_policy_sha256: toolPolicySha256,
       fetched_at_ms: Date.now(),
+    };
+    toolSchemaReconciliation = {
+      status: "success",
+      attempted_at_ms: toolSchemaCache.fetched_at_ms,
     };
     return {
       tools: toolSchemaCache.tools,
       source: toolSchemaCache.source,
       detail: toolSchemaCache.detail,
+      instructions: toolSchemaCache.instructions,
+      instructions_sha256: toolSchemaCache.instructions_sha256,
+      tool_manifest_sha256: toolSchemaCache.tool_manifest_sha256,
+      prompt_perfecting_version: toolSchemaCache.prompt_perfecting_version,
+      tool_policy_sha256: toolSchemaCache.tool_policy_sha256,
     };
   } catch (exc) {
-    return {
-      tools: [],
-      source: "bridge_unreachable",
-      detail: trimDetail(exc),
-    };
+    return bridgeSchemaFailure(trimDetail(exc), "bridge_unreachable");
   }
 }
 
@@ -761,10 +970,22 @@ function normalizeSdp(sdpOffer) {
   return `${lines.join("\r\n")}\r\n`;
 }
 
-async function requestRealtimeCall(sdpOffer, model, env, tools) {
+async function requestRealtimeCall(
+  sdpOffer,
+  model,
+  env,
+  tools,
+  voiceMode,
+  instructions,
+) {
   const form = new FormData();
   form.set("sdp", sdpOffer);
-  form.set("session", JSON.stringify(createSessionConfig(model, env, tools)));
+  form.set(
+    "session",
+    JSON.stringify(
+      createSessionConfig(model, env, tools, voiceMode, instructions),
+    ),
+  );
 
   const openaiResp = await fetch("https://api.openai.com/v1/realtime/calls", {
     method: "POST",
@@ -782,7 +1003,13 @@ async function requestRealtimeCall(sdpOffer, model, env, tools) {
   };
 }
 
-async function requestRealtimeClientSecret(model, env, tools) {
+async function requestRealtimeClientSecret(
+  model,
+  env,
+  tools,
+  voiceMode,
+  instructions,
+) {
   const openaiResp = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
     method: "POST",
     headers: {
@@ -790,7 +1017,13 @@ async function requestRealtimeClientSecret(model, env, tools) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      session: createSessionConfig(model, env, tools),
+      session: createSessionConfig(
+        model,
+        env,
+        tools,
+        voiceMode,
+        instructions,
+      ),
     }),
   });
   const text = await openaiResp.text();
@@ -865,6 +1098,28 @@ async function handleSession(request, env, corsOrigin, requestId) {
       requestId,
     );
   }
+  const requestUrl = new URL(request.url);
+  const extras = [...requestUrl.searchParams.keys()].filter(
+    (key) => !["session_id", "voice_mode"].includes(key),
+  );
+  const sessionId = requestUrl.searchParams.get("session_id") || "";
+  const voiceMode = requestUrl.searchParams.get("voice_mode") || "fast";
+  if (
+    extras.length ||
+    !["fast", "full_power"].includes(voiceMode) ||
+    (sessionId && !/^[A-Za-z0-9_-]{8,128}$/.test(sessionId))
+  ) {
+    return jsonResponse(
+      errorPayload(
+        "invalid_realtime_session",
+        "session_id or voice_mode is invalid.",
+        requestId,
+      ),
+      400,
+      corsOrigin,
+      requestId,
+    );
+  }
 
   const rawSdpOffer = await request.text();
   if (!rawSdpOffer.trim()) {
@@ -901,7 +1156,14 @@ async function handleSession(request, env, corsOrigin, requestId) {
     tool_source: toolBundle.source,
     tool_detail: toolBundle.detail,
   });
-  let result = await requestRealtimeCall(sdpOffer, primaryModel, env, realtimeTools);
+  let result = await requestRealtimeCall(
+    sdpOffer,
+    primaryModel,
+    env,
+    realtimeTools,
+    voiceMode,
+    toolBundle.instructions,
+  );
   let selectedModel = primaryModel;
 
   if (shouldTryFallback(result.status, result.text, primaryModel, fallbackModel)) {
@@ -909,7 +1171,14 @@ async function handleSession(request, env, corsOrigin, requestId) {
       from_model: primaryModel,
       to_model: fallbackModel,
     });
-    result = await requestRealtimeCall(sdpOffer, fallbackModel, env, realtimeTools);
+    result = await requestRealtimeCall(
+      sdpOffer,
+      fallbackModel,
+      env,
+      realtimeTools,
+      voiceMode,
+      toolBundle.instructions,
+    );
     selectedModel = fallbackModel;
   }
 
@@ -933,9 +1202,11 @@ async function handleSession(request, env, corsOrigin, requestId) {
   }
 
   logEvent(requestId, "session.success", { model: selectedModel });
+  const headers = responseHeaders(corsOrigin, requestId, "application/sdp");
+  if (sessionId) headers.set("x-pj-session-id", sessionId);
   return new Response(result.text, {
     status: 200,
-    headers: responseHeaders(corsOrigin, requestId, "application/sdp"),
+    headers,
   });
 }
 
@@ -954,9 +1225,10 @@ async function handleToken(request, env, corsOrigin, requestId) {
   }
 
   const rawBody = await request.text();
+  let payload = {};
   if (rawBody.trim()) {
     try {
-      JSON.parse(rawBody);
+      payload = JSON.parse(rawBody);
     } catch {
       return jsonResponse(
         errorPayload("invalid_json", "Expected JSON body for /token when body is present.", requestId),
@@ -965,6 +1237,39 @@ async function handleToken(request, env, corsOrigin, requestId) {
         requestId,
       );
     }
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return jsonResponse(
+      errorPayload(
+        "invalid_realtime_session",
+        "session_id or voice_mode is invalid.",
+        requestId,
+      ),
+      400,
+      corsOrigin,
+      requestId,
+    );
+  }
+  const extras = Object.keys(payload).filter(
+    (key) => !["session_id", "voice_mode"].includes(key),
+  );
+  const sessionId = payload.session_id || "";
+  const voiceMode = payload.voice_mode || "fast";
+  if (
+    extras.length ||
+    !["fast", "full_power"].includes(voiceMode) ||
+    (sessionId && !/^[A-Za-z0-9_-]{8,128}$/.test(sessionId))
+  ) {
+    return jsonResponse(
+      errorPayload(
+        "invalid_realtime_session",
+        "session_id or voice_mode is invalid.",
+        requestId,
+      ),
+      400,
+      corsOrigin,
+      requestId,
+    );
   }
 
   const primaryModel = (env.REALTIME_MODEL || DEFAULT_REALTIME_MODEL).trim();
@@ -978,7 +1283,13 @@ async function handleToken(request, env, corsOrigin, requestId) {
     tool_source: toolBundle.source,
     tool_detail: toolBundle.detail,
   });
-  let result = await requestRealtimeClientSecret(primaryModel, env, realtimeTools);
+  let result = await requestRealtimeClientSecret(
+    primaryModel,
+    env,
+    realtimeTools,
+    voiceMode,
+    toolBundle.instructions,
+  );
   let selectedModel = primaryModel;
 
   if (shouldTryFallback(result.status, result.text, primaryModel, fallbackModel)) {
@@ -986,7 +1297,13 @@ async function handleToken(request, env, corsOrigin, requestId) {
       from_model: primaryModel,
       to_model: fallbackModel,
     });
-    result = await requestRealtimeClientSecret(fallbackModel, env, realtimeTools);
+    result = await requestRealtimeClientSecret(
+      fallbackModel,
+      env,
+      realtimeTools,
+      voiceMode,
+      toolBundle.instructions,
+    );
     selectedModel = fallbackModel;
   }
 
@@ -1028,6 +1345,7 @@ async function handleToken(request, env, corsOrigin, requestId) {
   return jsonResponse(
     {
       ok: true,
+      session_id: sessionId || null,
       model: selectedModel,
       tool_count: realtimeTools.length,
       client_secret: {
@@ -1051,6 +1369,11 @@ async function handleToolSchemas(request, env, corsOrigin, requestId) {
       source: toolBundle.source,
       detail: toolBundle.detail,
       tools: toolBundle.tools,
+      instructions_sha256: toolBundle.instructions_sha256 || null,
+      tool_manifest_sha256: toolBundle.tool_manifest_sha256 || null,
+      prompt_perfecting_version:
+        toolBundle.prompt_perfecting_version || null,
+      tool_policy_sha256: toolBundle.tool_policy_sha256 || null,
     },
     200,
     corsOrigin,
@@ -1180,15 +1503,20 @@ async function handleExecuteTool(request, env, corsOrigin, requestId) {
 }
 
 export {
+  CONTRACT_VERSION,
   bridgeHeaders,
   buildAccessConfig,
+  createSessionConfig,
   deriveResponsesBridgeBaseUrl,
   handleResponsesProxy,
   isPublicRoute,
   isResponsesRoute,
   responseHeaders,
+  safeAttachmentDisposition,
   normalizeFunctionTools,
+  resolveRealtimeTools,
   toolBridgeTimeoutMs,
+  stableJson,
   validateAccessClaims,
   validateAccessIdentity,
 };
@@ -1229,8 +1557,33 @@ export default {
           tool_bridge_auth_configured: bridgeAuthConfigured,
           tool_schema_cache_count: toolSchemaCache.tools.length,
           tool_schema_cache_source: toolSchemaCache.source,
+          tool_manifest_sha256: toolSchemaCache.tool_manifest_sha256,
+          instructions_sha256: toolSchemaCache.instructions_sha256,
+          prompt_perfecting_version:
+            toolSchemaCache.prompt_perfecting_version,
+          tool_policy_sha256: toolSchemaCache.tool_policy_sha256,
+          last_successful_reconciliation_at:
+            toolSchemaCache.source === "bridge" && toolSchemaCache.fetched_at_ms
+              ? new Date(toolSchemaCache.fetched_at_ms).toISOString()
+              : null,
+          tool_schema_reconciliation_status:
+            toolSchemaReconciliation.status,
+          last_reconciliation_attempt_at:
+            toolSchemaReconciliation.attempted_at_ms
+              ? new Date(
+                toolSchemaReconciliation.attempted_at_ms,
+              ).toISOString()
+              : null,
           full_tooling_ready:
-            bridgeConfigured && bridgeAuthConfigured && toolSchemaCache.tools.length > 0,
+            bridgeConfigured
+            && bridgeAuthConfigured
+            && toolSchemaReconciliation.status === "success"
+            && toolSchemaCache.source === "bridge"
+            && toolSchemaCache.tools.length > 0
+            && Boolean(toolSchemaCache.tool_manifest_sha256)
+            && Boolean(toolSchemaCache.instructions_sha256)
+            && Boolean(toolSchemaCache.prompt_perfecting_version)
+            && Boolean(toolSchemaCache.tool_policy_sha256),
           full_power_bridge_configured:
             Boolean(deriveResponsesBridgeBaseUrl(env)) && bridgeAuthConfigured,
           public_endpoints: ["GET /health", "OPTIONS *"],
@@ -1241,11 +1594,15 @@ export default {
             "/tool-schemas",
             "/execute-tool",
             "/responses/capabilities",
+            "/responses/prompt-perfect",
             "/responses/sessions",
             "/responses/sessions/search",
             "/responses/sessions/<id>/resume",
             "/responses/sessions/<id>/turns",
+            "/responses/sessions/<id>/realtime-messages",
+            "/responses/sessions/<id>/artifacts",
             "/responses/sessions/<id>/approvals/<id>",
+            "/responses/artifacts/<artifact-id>",
             "/health",
           ],
         },
