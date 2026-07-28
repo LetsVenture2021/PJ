@@ -7,5 +7,11 @@
   "tool_search_enabled": true,
   "reasoning_effort": "low",
   "code_interpreter_enabled": false,
-  "image_generation_enabled": false
+  "image_generation_enabled": false,
+  "n8n_evaluation_receipt_path": "documents/n8n-evaluation-receipt-v1.json",
+  "n8n_release_approval": {
+    "corpus_sha256": "65b2d20b7c7ac8d92c6c36eeffdb08e6eeb815d33a2567ec30aff13d2c808229",
+    "corpus_version": "1.0.0",
+    "evaluation_receipt_sha256": "83b9aa09d7dd093c9e3830468b274fe5d9d6b2849538dad6c486c484b6b90b27"
+  }
 }

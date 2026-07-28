@@ -16,7 +16,7 @@ import sqlite3
 import subprocess
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -299,6 +299,62 @@ import codeops as _codeops
 TOOL_SCHEMAS.extend(_codeops.CODEOPS_SCHEMAS)
 DISPATCH_TABLE.update(_codeops.CODEOPS_DISPATCH)
 
+
+def get_pj_capability_snapshot() -> dict:
+    """Return bounded local registry and synchronization state."""
+    coding = _skillops.list_coding_capabilities(limit=100)
+    n8n = _skillops.get_n8n_corpus_status(include_census=False)
+    sync = _skillops.get_vector_sync_status(limit=1)
+    latest_sync = sync.get("runs", [{}])[0] if sync.get("runs") else None
+    return {
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "verification_scope": "local_durable_registry",
+        "coding_capabilities": coding.get("count", 0),
+        "n8n_capabilities": {
+            "count": n8n.get("capability_count", 0),
+            "registry_version": n8n.get("registry_version", 0),
+            "status": n8n.get("status", "blocked"),
+            "production_ready": bool(n8n.get("production_ready")),
+            "blocked_reasons": n8n.get("blocked_reasons", []),
+            "release_gates": n8n.get("release_gates", {}),
+        },
+        "vector_sync": (
+            {
+                key: latest_sync.get(key)
+                for key in (
+                    "run_id",
+                    "status",
+                    "files_seen",
+                    "files_processed",
+                    "files_skipped_unchanged",
+                    "files_failed",
+                    "started_at",
+                    "finished_at",
+                )
+            }
+            if latest_sync
+            else {"status": "no_recorded_sync"}
+        ),
+        "secret_values_included": False,
+    }
+
+
+TOOL_SCHEMAS.append({
+    "type": "function",
+    "name": "get_pj_capability_snapshot",
+    "description": (
+        "Return bounded, secret-safe coding, n8n corpus, and vector "
+        "synchronization state from PJ's durable local registry."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False,
+    },
+})
+DISPATCH_TABLE["get_pj_capability_snapshot"] = get_pj_capability_snapshot
+
 _gen_schemas, _gen_dispatch = _skillops.load_generated_skills()
 TOOL_SCHEMAS.extend(_gen_schemas)
 DISPATCH_TABLE.update(_gen_dispatch)
@@ -306,7 +362,9 @@ DISPATCH_TABLE.update(_gen_dispatch)
 _POLICY_MODES = {"allow", "deny", "approval"}
 _BUILTIN_APPROVAL_TOOLS = {
     "approve_codeops_task",
+    "learn_from_vector_store",
     "run_codeops_validation",
+    "sync_vector_store",
 }
 
 
