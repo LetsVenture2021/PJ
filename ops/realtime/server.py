@@ -31,11 +31,13 @@ from flask_cors import CORS
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 from openai import OpenAI
+from werkzeug.exceptions import HTTPException
 
 import chatlog
 import docops
 import promptops
 import skills
+from ops.shared.errors import APIError, map_exception
 from pj_contract import CONTRACT_VERSION
 from realtime_config import realtime_session_config, realtime_tool_schemas
 from responses_runtime import (
@@ -110,19 +112,56 @@ def _json_response(payload, status=200, req_id=None):
 
 
 def _error_response(code, message, status, req_id, detail=None):
+    return _exception_response(
+        APIError(
+            message,
+            code=code,
+            status_code=status,
+            detail=detail,
+        ),
+        req_id,
+    )
+
+
+def _exception_response(exception, req_id):
+    mapped = map_exception(exception, req_id, detail_formatter=_trim_detail)
     return _json_response(
         {
             "ok": False,
-            "error": {
-                "code": code,
-                "message": message,
-                "request_id": req_id,
-                "detail": _trim_detail(detail),
-            },
+            "error": mapped.payload,
         },
-        status=status,
+        status=mapped.status_code,
         req_id=req_id,
     )
+
+
+def _sse_error(exception, req_id):
+    mapped = map_exception(exception, req_id, detail_formatter=_trim_detail)
+    return _sse({"type": "error", "error": mapped.payload})
+
+
+@app.errorhandler(APIError)
+def _handle_api_error(exception):
+    return _exception_response(exception, _request_id())
+
+
+@app.errorhandler(Exception)
+def _handle_unexpected_error(exception):
+    if isinstance(exception, HTTPException):
+        code = {
+            404: "route_not_found",
+            405: "method_not_allowed",
+        }.get(exception.code, "http_error")
+        return _exception_response(
+            APIError(
+                f"{exception.name}.",
+                code=code,
+                status_code=exception.code or 500,
+            ),
+            _request_id(),
+        )
+    app.logger.exception("Unhandled API exception", exc_info=exception)
+    return _exception_response(exception, _request_id())
 
 
 def _is_loopback_request():
@@ -1154,27 +1193,25 @@ def _stream_session_response(
                 approval_execution["approval_id"],
                 approval_execution["approve"],
             )
-        yield _sse({
-            "type": "error",
-            "error": {
-                "code": "approval_execution_outcome_unknown",
-                "message": (
-                    "The action outcome is unknown and will not be replayed."
-                ),
-                "request_id": req_id,
-                "detail": _trim_detail(exc),
-            },
-        })
+        yield _sse_error(
+            APIError(
+                "The action outcome is unknown and will not be replayed.",
+                code="approval_execution_outcome_unknown",
+                status_code=409,
+                detail=exc,
+            ),
+            req_id,
+        )
     except Exception as exc:
-        yield _sse({
-            "type": "error",
-            "error": {
-                "code": "responses_turn_failed",
-                "message": "Responses turn failed.",
-                "request_id": req_id,
-                "detail": _trim_detail(exc),
-            },
-        })
+        yield _sse_error(
+            APIError(
+                "Responses turn failed.",
+                code="responses_turn_failed",
+                status_code=502,
+                detail=exc,
+            ),
+            req_id,
+        )
     finally:
         chatlog.release_session_turn(session["id"], turn_token)
 

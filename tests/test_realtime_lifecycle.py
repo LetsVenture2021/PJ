@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import chatlog
 import realtime_server
+from ops.shared.errors import ConflictError
 
 
 def obj(**values):
@@ -148,6 +149,47 @@ class TestRealtimeSessionLifecycle(unittest.TestCase):
         self.assertEqual(error["code"], code)
         self.assertEqual(error["request_id"], request_id)
         return error
+
+    def test_http_and_realtime_errors_use_the_same_mapping(self):
+        exception = ConflictError(
+            "Another turn is already in progress.",
+            code="session_turn_in_progress",
+            detail="turn lease held",
+        )
+        with realtime_server.app.test_request_context(
+            headers={"x-pj-client-request-id": "mapping-request"}
+        ):
+            http_response = realtime_server._exception_response(
+                exception, "mapping-request"
+            )
+            realtime_event = json.loads(
+                realtime_server._sse_error(exception, "mapping-request")
+                .split("data: ", 1)[1]
+                .strip()
+            )
+
+        self.assertEqual(http_response.status_code, 409)
+        self.assertEqual(
+            http_response.get_json()["error"],
+            realtime_event["error"],
+        )
+        self.assertEqual(
+            realtime_event["error"]["code"],
+            "session_turn_in_progress",
+        )
+
+    def test_unmatched_http_route_uses_central_exception_mapper(self):
+        response = self.client.get(
+            "/not-a-real-route",
+            headers={"x-pj-client-request-id": "missing-route-request"},
+        )
+
+        self.assert_structured_error(
+            response,
+            status=404,
+            code="route_not_found",
+            request_id="missing-route-request",
+        )
 
     def test_connect_start_stream_and_resume_success(self):
         session_id = self.create_realtime_session()

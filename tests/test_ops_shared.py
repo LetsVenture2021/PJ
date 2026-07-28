@@ -4,6 +4,19 @@ import unittest
 from pathlib import Path
 
 import promptops
+from ops.shared.errors import (
+    APIError,
+    AuthenticationError,
+    AuthorizationError,
+    ConflictError,
+    NotFoundError,
+    ServiceUnavailableError,
+    UnprocessableError,
+    UpstreamError,
+    UpstreamTimeoutError,
+    ValidationError,
+    map_exception,
+)
 from ops.shared.io import atomic_copy, sha256_file, write_json_atomic
 from ops.shared.providers.openai import OpenAIRealtimeProvider
 from ops.shared.retry import RetryPolicy, get_with_retry
@@ -35,6 +48,57 @@ class _HttpProvider:
 
 
 class OpsSharedTestCase(unittest.TestCase):
+    def test_error_taxonomy_has_stable_status_and_codes(self):
+        cases = [
+            (ValidationError(), 400, "invalid_request"),
+            (AuthenticationError(), 401, "authentication_required"),
+            (AuthorizationError(), 403, "forbidden"),
+            (NotFoundError(), 404, "not_found"),
+            (ConflictError(), 409, "conflict"),
+            (UnprocessableError(), 422, "unprocessable_request"),
+            (UpstreamError(), 502, "upstream_error"),
+            (ServiceUnavailableError(), 503, "service_unavailable"),
+            (UpstreamTimeoutError(), 504, "upstream_timeout"),
+        ]
+
+        for error, status, code in cases:
+            with self.subTest(error=type(error).__name__):
+                mapped = map_exception(error, "request-123")
+                self.assertEqual(mapped.status_code, status)
+                self.assertEqual(mapped.payload["code"], code)
+                self.assertEqual(mapped.payload["request_id"], "request-123")
+
+    def test_unknown_exception_maps_to_api_safe_internal_error(self):
+        mapped = map_exception(RuntimeError("database password leaked"), "request-123")
+
+        self.assertEqual(mapped.status_code, 500)
+        self.assertEqual(mapped.payload["code"], "internal_error")
+        self.assertEqual(mapped.payload["message"], "An unexpected error occurred.")
+        self.assertIsNone(mapped.payload["detail"])
+
+    def test_custom_api_error_preserves_stable_contract(self):
+        mapped = map_exception(
+            APIError(
+                "A turn is already active.",
+                code="session_turn_in_progress",
+                status_code=409,
+                detail="lease held",
+            ),
+            "request-123",
+            detail_formatter=str.upper,
+        )
+
+        self.assertEqual(mapped.status_code, 409)
+        self.assertEqual(
+            mapped.payload,
+            {
+                "code": "session_turn_in_progress",
+                "message": "A turn is already active.",
+                "request_id": "request-123",
+                "detail": "LEASE HELD",
+            },
+        )
+
     def test_realtime_provider_uses_supplied_credentials(self):
         class Http:
             def __init__(self):
