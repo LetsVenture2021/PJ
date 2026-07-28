@@ -30,7 +30,7 @@ jsonschema-specifications==2025.9.1
 lxml==6.1.1
 Markdown==3.10.2
 MarkupSafe==3.0.3
-openai==2.48.0
+openai==2.49.0
 openpyxl==3.1.5
 packaging==26.2
 pillow==12.3.0
