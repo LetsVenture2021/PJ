@@ -1,0 +1,236 @@
+{
+  "census_path": "documents/n8n-source-census-v1.json",
+  "census_sha256": "dac3893c4c2949a66f090a435b2c6ec3dcb3c6fbb8a49cf13da70d2ad00ed5ee",
+  "corpus_path": "documents/n8n-capability-corpus-v1.md",
+  "evaluated_at": "2026-07-28T14:13:46.793710+00:00",
+  "evaluation_method": "deterministic-token-retrieval-and-structural-scan",
+  "gates": {
+    "gates": {
+      "capability_count": true,
+      "inaccessible_source_disposition": true,
+      "inventory_coverage": true,
+      "metric_consistency": true,
+      "security_warning_retrieval": true,
+      "source_integrity": true,
+      "top5_retrieval": true,
+      "zero_credential_exposure": true,
+      "zero_invented_node_parameters": true
+    },
+    "metrics": {
+      "canonical_pages_covered": 40,
+      "canonical_pages_total": 40,
+      "credential_exposures": 0,
+      "inaccessible_disposition_coverage": 1.0,
+      "inaccessible_sources_dispositioned": 0,
+      "inaccessible_sources_total": 0,
+      "invented_node_parameters": 0,
+      "inventory_coverage": 1.0,
+      "retrieval_cases_total": 10,
+      "retrieval_top5_passed": 10,
+      "security_warning_cases_passed": 5,
+      "security_warning_cases_total": 5,
+      "security_warning_retrieval_rate": 1.0,
+      "top5_retrieval_rate": 1.0
+    },
+    "passed": true
+  },
+  "metrics": {
+    "canonical_pages_covered": 40,
+    "canonical_pages_total": 40,
+    "credential_exposures": 0,
+    "inaccessible_sources_dispositioned": 0,
+    "inaccessible_sources_total": 0,
+    "invented_node_parameters": 0,
+    "retrieval_cases_total": 10,
+    "retrieval_top5_passed": 10,
+    "security_warning_cases_passed": 5,
+    "security_warning_cases_total": 5
+  },
+  "parser_errors": [],
+  "retrieval_cases": [
+    {
+      "expected_item_id": "N8N-024",
+      "passed": true,
+      "query": "schedule timezone trigger activation",
+      "top5_item_ids": [
+        "N8N-024",
+        "N8N-001",
+        "N8N-025",
+        "N8N-002",
+        "N8N-003"
+      ]
+    },
+    {
+      "expected_item_id": "N8N-025",
+      "passed": true,
+      "query": "webhook endpoint authentication request validation",
+      "top5_item_ids": [
+        "N8N-025",
+        "N8N-003",
+        "N8N-017",
+        "N8N-023",
+        "N8N-026"
+      ]
+    },
+    {
+      "expected_item_id": "N8N-023",
+      "passed": true,
+      "query": "HTTP Request API response integration",
+      "top5_item_ids": [
+        "N8N-023",
+        "N8N-026",
+        "N8N-025",
+        "N8N-030",
+        "N8N-038"
+      ]
+    },
+    {
+      "expected_item_id": "N8N-009",
+      "passed": true,
+      "query": "sub-workflow reusable inputs outputs ownership",
+      "top5_item_ids": [
+        "N8N-009",
+        "N8N-039",
+        "N8N-001",
+        "N8N-002",
+        "N8N-003"
+      ]
+    },
+    {
+      "expected_item_id": "N8N-014",
+      "passed": true,
+      "query": "item linking lineage source data",
+      "top5_item_ids": [
+        "N8N-014",
+        "N8N-006",
+        "N8N-012",
+        "N8N-013",
+        "N8N-001"
+      ]
+    },
+    {
+      "expected_item_id": "N8N-018",
+      "passed": true,
+      "query": "pinned mock data testing samples",
+      "top5_item_ids": [
+        "N8N-018",
+        "N8N-001",
+        "N8N-002",
+        "N8N-003",
+        "N8N-004"
+      ]
+    },
+    {
+      "expected_item_id": "N8N-033",
+      "passed": true,
+      "query": "queue mode workers broker scaling",
+      "top5_item_ids": [
+        "N8N-033",
+        "N8N-032",
+        "N8N-034",
+        "N8N-001",
+        "N8N-002"
+      ]
+    },
+    {
+      "expected_item_id": "N8N-010",
+      "passed": true,
+      "query": "error workflow alert diagnostic context",
+      "top5_item_ids": [
+        "N8N-010",
+        "N8N-001",
+        "N8N-002",
+        "N8N-003",
+        "N8N-004"
+      ]
+    },
+    {
+      "expected_item_id": "N8N-040",
+      "passed": true,
+      "query": "source control environments promotion review",
+      "top5_item_ids": [
+        "N8N-040",
+        "N8N-005",
+        "N8N-006",
+        "N8N-007",
+        "N8N-008"
+      ]
+    },
+    {
+      "expected_item_id": "N8N-019",
+      "passed": true,
+      "query": "binary files images storage metadata",
+      "top5_item_ids": [
+        "N8N-019",
+        "N8N-004",
+        "N8N-012",
+        "N8N-032",
+        "N8N-033"
+      ]
+    }
+  ],
+  "schema_version": "1",
+  "security_warning_cases": [
+    {
+      "expected_item_id": "N8N-030",
+      "passed": true,
+      "query": "SSRF server-side request forgery outbound network",
+      "top5_item_ids": [
+        "N8N-030",
+        "N8N-011",
+        "N8N-023",
+        "N8N-001",
+        "N8N-002"
+      ]
+    },
+    {
+      "expected_item_id": "N8N-031",
+      "passed": true,
+      "query": "redact sensitive execution data logs",
+      "top5_item_ids": [
+        "N8N-031",
+        "N8N-035",
+        "N8N-004",
+        "N8N-038",
+        "N8N-001"
+      ]
+    },
+    {
+      "expected_item_id": "N8N-037",
+      "passed": true,
+      "query": "community nodes supply-chain unverified risk",
+      "top5_item_ids": [
+        "N8N-037",
+        "N8N-015",
+        "N8N-001",
+        "N8N-002",
+        "N8N-003"
+      ]
+    },
+    {
+      "expected_item_id": "N8N-028",
+      "passed": true,
+      "query": "external secrets vault least privilege",
+      "top5_item_ids": [
+        "N8N-028",
+        "N8N-027",
+        "N8N-001",
+        "N8N-002",
+        "N8N-003"
+      ]
+    },
+    {
+      "expected_item_id": "N8N-039",
+      "passed": true,
+      "query": "projects RBAC roles least privilege ownership",
+      "top5_item_ids": [
+        "N8N-039",
+        "N8N-009",
+        "N8N-001",
+        "N8N-002",
+        "N8N-003"
+      ]
+    }
+  ],
+  "source_integrity": true
+}

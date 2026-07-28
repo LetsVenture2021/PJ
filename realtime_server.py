@@ -10,19 +10,35 @@ Provides:
 import hmac
 import json
 import os
+import re
 from pathlib import Path
 from uuid import uuid4
 
 import requests
-from flask import Flask, request, Response, send_from_directory
+from flask import Flask, request, Response, send_from_directory, stream_with_context
 from flask_cors import CORS
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
+from openai import OpenAI
 
+import chatlog
 import skills
-from realtime_config import realtime_session_config
+from realtime_config import realtime_session_config, realtime_tool_schemas
+from responses_runtime import (
+    capability_manifest,
+    dispatch_realtime_function,
+    load_config,
+    ResponsesOrchestrator,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
-CONTRACT_VERSION = "2026-07-28.4"
+CONTRACT_VERSION = "2026-07-28.5"
 MAX_ERROR_DETAIL_LENGTH = 320
+MAX_SESSION_TITLE_LENGTH = 120
+MAX_MESSAGE_LENGTH = 20000
+SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+SCHEMA_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+OPENAI_CLIENT_FACTORY = OpenAI
 
 app = Flask(__name__, static_folder=str(BASE_DIR / "assets"), static_url_path="/assets")
 CORS(app)  # allow local browser origins when running on localhost
@@ -68,7 +84,7 @@ def _error_response(code, message, status, req_id, detail=None):
     )
 
 
-def _check_bridge_auth(req_id):
+def _check_bridge_auth(req_id, *, required=False):
     expected = (os.getenv("PJ_TOOL_BRIDGE_TOKEN") or "").strip()
     if not expected:
         return _error_response(
@@ -93,7 +109,7 @@ def _check_bridge_auth(req_id):
 
 def _function_tool_schemas():
     tools = []
-    for schema in skills.TOOL_SCHEMAS:
+    for schema in realtime_tool_schemas():
         if not isinstance(schema, dict):
             continue
         if schema.get("type") != "function":
@@ -102,6 +118,133 @@ def _function_tool_schemas():
             continue
         tools.append(schema)
     return tools
+
+
+def _validated_json(req_id, *, allowed, required=()):
+    if not request.is_json:
+        return None, _error_response(
+            "invalid_content_type",
+            "Expected Content-Type: application/json.",
+            415,
+            req_id,
+        )
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return None, _error_response(
+            "invalid_json",
+            "Expected a JSON object.",
+            400,
+            req_id,
+        )
+    extras = sorted(set(payload) - set(allowed))
+    missing = sorted(set(required) - set(payload))
+    if extras or missing:
+        detail = {
+            "unexpected_fields": extras,
+            "missing_fields": missing,
+        }
+        return None, _error_response(
+            "invalid_request_body",
+            "Request body does not match the endpoint contract.",
+            400,
+            req_id,
+            detail=json.dumps(detail),
+        )
+    return payload, None
+
+
+def _validated_limit(req_id, default=20, maximum=100):
+    extras = sorted(set(request.args) - {"limit"})
+    if extras:
+        return None, _error_response(
+            "invalid_query",
+            "Unexpected query parameters.",
+            400,
+            req_id,
+            detail=", ".join(extras),
+        )
+    raw = request.args.get("limit", str(default))
+    try:
+        limit = int(raw)
+    except ValueError:
+        limit = 0
+    if limit < 1 or limit > maximum:
+        return None, _error_response(
+            "invalid_limit",
+            f"limit must be between 1 and {maximum}.",
+            400,
+            req_id,
+        )
+    return limit, None
+
+
+def _validated_session(session_id, req_id):
+    if not SESSION_ID_PATTERN.fullmatch(session_id):
+        return None, _error_response(
+            "session_not_found",
+            "Session was not found.",
+            404,
+            req_id,
+        )
+    session = chatlog.get_session(session_id)
+    if not session:
+        return None, _error_response(
+            "session_not_found",
+            "Session was not found.",
+            404,
+            req_id,
+        )
+    return session, None
+
+
+def _validated_structured_output(value, req_id):
+    if value is None:
+        return None, None
+    if not isinstance(value, dict) or set(value) - {"name", "schema", "strict"}:
+        return None, _error_response(
+            "invalid_structured_output",
+            "structured_output must contain only name, schema, and strict.",
+            400,
+            req_id,
+        )
+    name = value.get("name")
+    schema = value.get("schema")
+    strict = value.get("strict", True)
+    if not isinstance(name, str) or not SCHEMA_NAME_PATTERN.fullmatch(name):
+        return None, _error_response(
+            "invalid_structured_output",
+            "structured_output.name is invalid.",
+            400,
+            req_id,
+        )
+    if not isinstance(schema, dict) or not isinstance(strict, bool):
+        return None, _error_response(
+            "invalid_structured_output",
+            "structured_output.schema must be an object and strict must be boolean.",
+            400,
+            req_id,
+        )
+    try:
+        Draft202012Validator.check_schema(schema)
+    except SchemaError as exc:
+        return None, _error_response(
+            "invalid_structured_output_schema",
+            "structured_output.schema is not a valid JSON Schema.",
+            400,
+            req_id,
+            detail=exc.message,
+        )
+    return {
+        "type": "json_schema",
+        "name": name,
+        "schema": schema,
+        "strict": strict,
+    }, None
+
+
+def _sse(event):
+    event_type = event.get("type", "message")
+    return f"event: {event_type}\ndata: {json.dumps(event, default=str)}\n\n"
 
 
 @app.route("/", methods=["GET"])
@@ -120,7 +263,20 @@ def health():
             "contract_version": CONTRACT_VERSION,
             "tool_count": len(_function_tool_schemas()),
             "bridge_auth_enabled": bool((os.getenv("PJ_TOOL_BRIDGE_TOKEN") or "").strip()),
-            "endpoints": ["/session", "/token", "/execute-tool", "/tool-schemas", "/webhook", "/health"],
+            "endpoints": [
+                "/session",
+                "/token",
+                "/execute-tool",
+                "/tool-schemas",
+                "/responses/capabilities",
+                "/responses/sessions",
+                "/responses/sessions/search",
+                "/responses/sessions/<id>/resume",
+                "/responses/sessions/<id>/turns",
+                "/responses/sessions/<id>/approvals/<id>",
+                "/webhook",
+                "/health",
+            ],
         },
         status=200,
         req_id=req_id,
@@ -143,6 +299,378 @@ def tool_schemas():
         status=200,
         req_id=req_id,
     )
+
+
+@app.route("/responses/capabilities", methods=["GET"])
+def responses_capabilities():
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    return _json_response(
+        {"ok": True, "capabilities": capability_manifest(load_config())},
+        req_id=req_id,
+    )
+
+
+@app.route("/responses/sessions", methods=["POST"])
+def create_responses_session():
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    payload, error = _validated_json(req_id, allowed={"title"})
+    if error:
+        return error
+    title = payload.get("title", "")
+    if not isinstance(title, str) or len(title.strip()) > MAX_SESSION_TITLE_LENGTH:
+        return _error_response(
+            "invalid_session_title",
+            f"title must be a string up to {MAX_SESSION_TITLE_LENGTH} characters.",
+            400,
+            req_id,
+        )
+    session = chatlog.new_session(title.strip(), channel="web")
+    session.pop("last_response_id", None)
+    return _json_response({"ok": True, "session": session}, 201, req_id)
+
+
+@app.route("/responses/sessions", methods=["GET"])
+def list_responses_sessions():
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    limit, error = _validated_limit(req_id)
+    if error:
+        return error
+    sessions = chatlog.list_sessions(limit)
+    return _json_response(
+        {"ok": True, "count": len(sessions), "sessions": sessions},
+        req_id=req_id,
+    )
+
+
+@app.route("/responses/sessions/search", methods=["GET"])
+def search_responses_sessions():
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    extras = sorted(set(request.args) - {"q", "limit"})
+    query = request.args.get("q", "")
+    try:
+        limit = int(request.args.get("limit", "20"))
+    except ValueError:
+        limit = 0
+    if extras or not query.strip() or len(query) > 200 or not 1 <= limit <= 100:
+        return _error_response(
+            "invalid_query",
+            "q is required (maximum 200 characters) and limit must be 1-100.",
+            400,
+            req_id,
+            detail=", ".join(extras) if extras else None,
+        )
+    matches = chatlog.search(query.strip(), limit)
+    return _json_response(
+        {"ok": True, "count": len(matches), "matches": matches},
+        req_id=req_id,
+    )
+
+
+@app.route("/responses/sessions/<session_id>/resume", methods=["POST"])
+def resume_responses_session(session_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    payload, error = _validated_json(req_id, allowed=set())
+    if error:
+        return error
+    session, error = _validated_session(session_id, req_id)
+    if error:
+        return error
+    return _json_response(
+        {"ok": True, "session": chatlog.session_detail(session["id"])},
+        req_id=req_id,
+    )
+
+
+@app.route("/responses/sessions/<session_id>/turns", methods=["POST"])
+def stream_responses_turn(session_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    session, error = _validated_session(session_id, req_id)
+    if error:
+        return error
+    payload, error = _validated_json(
+        req_id,
+        allowed={"message", "structured_output"},
+        required={"message"},
+    )
+    if error:
+        return error
+    message = payload["message"]
+    if (
+        not isinstance(message, str)
+        or not message.strip()
+        or len(message) > MAX_MESSAGE_LENGTH
+    ):
+        return _error_response(
+            "invalid_message",
+            f"message must be a non-empty string up to {MAX_MESSAGE_LENGTH} characters.",
+            400,
+            req_id,
+        )
+    text_format, error = _validated_structured_output(
+        payload.get("structured_output"), req_id
+    )
+    if error:
+        return error
+    if "OPENAI_API_KEY" not in os.environ:
+        return _error_response(
+            "missing_openai_api_key",
+            "OPENAI_API_KEY is not set.",
+            500,
+            req_id,
+        )
+
+    message = message.strip()
+    if chatlog.list_pending_approvals(session["id"]):
+        return _error_response(
+            "session_approval_pending",
+            "Resolve the pending owner approval before starting another turn.",
+            409,
+            req_id,
+        )
+    turn_token = chatlog.claim_session_turn(session["id"])
+    if not turn_token:
+        return _error_response(
+            "session_turn_in_progress",
+            "Another turn is already in progress for this session.",
+            409,
+            req_id,
+        )
+    chatlog.record_turn(session, "user", message)
+
+    response = Response(
+        stream_with_context(_stream_session_response(
+            session,
+            turn_token,
+            message,
+            previous_response_id=session.get("last_response_id"),
+            text_format=text_format,
+            req_id=req_id,
+        )),
+        status=200,
+        mimetype="text/event-stream",
+    )
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    response.headers["x-request-id"] = req_id
+    response.headers["x-pj-contract-version"] = CONTRACT_VERSION
+    return response
+
+
+def _stream_session_response(
+        session,
+        turn_token,
+        input_value,
+        *,
+        previous_response_id,
+        text_format,
+        req_id,
+        prelude=()):
+    yield _sse({
+        "type": "session",
+        "session_id": session["id"],
+        "request_id": req_id,
+    })
+    for event in prelude:
+        yield _sse(event)
+    try:
+        orchestrator = ResponsesOrchestrator(
+            OPENAI_CLIENT_FACTORY(), load_config()
+        )
+        for event in orchestrator.stream_turn(
+            input_value,
+            previous_response_id=previous_response_id,
+            text_format=text_format,
+        ):
+            public_event = dict(event)
+            response_id = public_event.pop("_response_id", None)
+            provider_item_id = public_event.pop("_provider_item_id", None)
+            if public_event["type"] == "approval.required":
+                if not response_id or not provider_item_id:
+                    raise RuntimeError(
+                        "Approval request did not include provider continuity"
+                    )
+                pending = chatlog.pause_session_turn_for_approval(
+                    session,
+                    turn_token,
+                    approval_kind=public_event["approval_kind"],
+                    provider_response_id=response_id,
+                    provider_item_id=provider_item_id,
+                    tool_name=public_event.get("name") or "",
+                    server_label=public_event.get("server_label") or "",
+                    arguments=public_event.get("arguments") or {},
+                    text_format=text_format,
+                )
+                if not pending:
+                    raise RuntimeError(
+                        "Session turn lease expired before approval was stored"
+                    )
+                public_event.update({
+                    "approval_id": pending["approval_id"],
+                    "expires_at": pending["expires_at"],
+                    "session_id": session["id"],
+                })
+                yield _sse(public_event)
+                return
+            if public_event["type"] == "completion":
+                stored = chatlog.finish_session_turn(
+                    session,
+                    turn_token,
+                    public_event.get("text", ""),
+                    response_id,
+                )
+                if not stored:
+                    raise RuntimeError(
+                        "Session turn lease expired before completion"
+                    )
+                public_event["session_id"] = session["id"]
+            yield _sse(public_event)
+    except Exception as exc:
+        yield _sse({
+            "type": "error",
+            "error": {
+                "code": "responses_turn_failed",
+                "message": "Responses turn failed.",
+                "request_id": req_id,
+                "detail": _trim_detail(exc),
+            },
+        })
+    finally:
+        chatlog.release_session_turn(session["id"], turn_token)
+
+
+@app.route(
+    "/responses/sessions/<session_id>/approvals/<approval_id>",
+    methods=["POST"],
+)
+def resolve_responses_approval(session_id, approval_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    session, error = _validated_session(session_id, req_id)
+    if error:
+        return error
+    if not SESSION_ID_PATTERN.fullmatch(approval_id):
+        return _error_response(
+            "approval_not_found", "Approval was not found.", 404, req_id
+        )
+    payload, error = _validated_json(
+        req_id, allowed={"approve"}, required={"approve"}
+    )
+    if error:
+        return error
+    approve = payload["approve"]
+    if not isinstance(approve, bool):
+        return _error_response(
+            "invalid_approval_decision",
+            "approve must be a boolean.",
+            400,
+            req_id,
+        )
+    if "OPENAI_API_KEY" not in os.environ:
+        return _error_response(
+            "missing_openai_api_key",
+            "OPENAI_API_KEY is not set.",
+            500,
+            req_id,
+        )
+    pending = chatlog.get_pending_approval(session["id"], approval_id)
+    if not pending:
+        return _error_response(
+            "approval_not_found", "Approval was not found.", 404, req_id
+        )
+    turn_token = chatlog.claim_session_turn(
+        session["id"], pending_approval_id=approval_id
+    )
+    if not turn_token:
+        return _error_response(
+            "session_turn_in_progress",
+            "Another turn is already in progress for this session.",
+            409,
+            req_id,
+        )
+    pending = chatlog.decide_pending_approval(
+        session["id"], approval_id, approve
+    )
+    if not pending:
+        chatlog.release_session_turn(session["id"], turn_token)
+        return _error_response(
+            "approval_already_resolved",
+            "Approval was already resolved or expired.",
+            409,
+            req_id,
+        )
+
+    prelude = [{
+        "type": "approval.resolved",
+        "approval_id": approval_id,
+        "approval_kind": pending["approval_kind"],
+        "name": pending["name"],
+        "approved": approve,
+    }]
+    if pending["approval_kind"] == "mcp":
+        continuation = [{
+            "type": "mcp_approval_response",
+            "approval_request_id": pending["provider_item_id"],
+            "approve": approve,
+        }]
+    else:
+        if approve:
+            result = skills.dispatch(
+                pending["name"],
+                pending["arguments"],
+                approval_granted=True,
+            )
+        else:
+            result = {"error": "The owner rejected this tool call."}
+        prelude.append({
+            "type": "tool.result",
+            "call_id": pending["provider_item_id"],
+            "name": pending["name"],
+            "result": result,
+        })
+        continuation = [{
+            "type": "function_call_output",
+            "call_id": pending["provider_item_id"],
+            "output": json.dumps(result, default=str),
+        }]
+
+    response = Response(
+        stream_with_context(_stream_session_response(
+            session,
+            turn_token,
+            continuation,
+            previous_response_id=pending["provider_response_id"],
+            text_format=pending["text_format"],
+            req_id=req_id,
+            prelude=prelude,
+        )),
+        status=200,
+        mimetype="text/event-stream",
+    )
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["X-Accel-Buffering"] = "no"
+    response.headers["x-request-id"] = req_id
+    response.headers["x-pj-contract-version"] = CONTRACT_VERSION
+    return response
 
 
 @app.route("/session", methods=["POST"])
@@ -375,7 +903,7 @@ def execute_tool():
         )
 
     try:
-        result = skills.dispatch(name, arguments)
+        result = dispatch_realtime_function(name, arguments)
     except ValueError as exc:
         return _error_response(
             "tool_dispatch_error",

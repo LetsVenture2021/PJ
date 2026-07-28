@@ -1,4 +1,4 @@
-const CONTRACT_VERSION = "2026-07-28.4";
+const CONTRACT_VERSION = "2026-07-28.5";
 const DEFAULT_REALTIME_MODEL = "gpt-realtime-2.1";
 const FALLBACK_REALTIME_MODEL = "gpt-realtime";
 const REALTIME_VOICE = "marin";
@@ -7,6 +7,15 @@ const DEFAULT_TOOL_SCHEMA_CACHE_TTL_MS = 60000;
 const DEFAULT_MAX_REALTIME_TOOLS = 256;
 const DEFAULT_ACCESS_CERT_CACHE_TTL_MS = 300000;
 const ACCESS_CLOCK_SKEW_SECONDS = 60;
+const MAX_RESPONSES_REQUEST_BYTES = 262144;
+const REALTIME_EXCLUDED_TOOL_NAMES = new Set([
+  "approve_codeops_task",
+  "create_skill",
+  "learn_from_vector_store",
+  "run_codeops_validation",
+  "run_shortcut",
+  "sync_vector_store",
+]);
 
 // Public: GET /health and CORS preflight. Every other route is privileged so
 // future Full Power endpoints fail closed until they explicitly authenticate.
@@ -397,6 +406,9 @@ function normalizeFunctionTools(rawTools, maxTools) {
     if (!name) {
       continue;
     }
+    if (REALTIME_EXCLUDED_TOOL_NAMES.has(name)) {
+      continue;
+    }
     const parameters =
       item.parameters && typeof item.parameters === "object"
         ? item.parameters
@@ -412,6 +424,10 @@ function normalizeFunctionTools(rawTools, maxTools) {
     }
   }
   return normalized;
+}
+
+function toolBridgeTimeoutMs(toolName) {
+  return toolName === "delegate_advanced_task" ? 280000 : 85000;
 }
 
 function parseToolSchemaPayload(rawText, maxTools) {
@@ -457,6 +473,172 @@ function deriveToolSchemasUrl(env) {
     return bridgeUrl.replace("/execute-tool", "/tool-schemas");
   }
   return `${bridgeUrl.replace(/\/+$/, "")}/tool-schemas`;
+}
+
+function deriveResponsesBridgeBaseUrl(env) {
+    const raw = (
+      env.PJ_RESPONSES_BRIDGE_URL ||
+      env.PJ_TOOL_BRIDGE_URL ||
+      ""
+    ).trim();
+    if (!raw) {
+      return "";
+    }
+    let target;
+    try {
+      target = new URL(raw);
+    } catch {
+      return "";
+    }
+    target.search = "";
+    target.hash = "";
+    target.pathname = target.pathname
+      .replace(/\/(?:execute-tool|tool-schemas)\/?$/, "")
+      .replace(/\/+$/, "");
+    return target.toString().replace(/\/+$/, "");
+  }
+
+function isResponsesRoute(method, pathname) {
+    if (method === "GET" && pathname === "/responses/capabilities") {
+      return true;
+    }
+    if ((method === "GET" || method === "POST") && pathname === "/responses/sessions") {
+      return true;
+    }
+    if (method === "GET" && pathname === "/responses/sessions/search") {
+      return true;
+    }
+    return method === "POST" && (
+      /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/resume$/.test(pathname) ||
+      /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/turns$/.test(pathname) ||
+      /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/approvals\/[A-Za-z0-9_-]{8,128}$/.test(pathname)
+    );
+  }
+
+async function handleResponsesProxy(
+    request,
+    env,
+    corsOrigin,
+    requestId,
+    fetchImpl = fetch,
+  ) {
+    const inboundUrl = new URL(request.url);
+    if (!isResponsesRoute(request.method, inboundUrl.pathname)) {
+      return jsonResponse(
+        errorPayload("not_found", "Not found.", requestId),
+        404,
+        corsOrigin,
+        requestId,
+      );
+    }
+    if (!(env.PJ_TOOL_BRIDGE_TOKEN || "").trim()) {
+      return jsonResponse(
+        errorPayload(
+          "bridge_auth_not_configured",
+          "The private runtime credential is not configured.",
+          requestId,
+        ),
+        503,
+        corsOrigin,
+        requestId,
+      );
+    }
+
+    let bridgeBase;
+    try {
+      bridgeBase = deriveResponsesBridgeBaseUrl(env);
+    } catch {
+      bridgeBase = "";
+    }
+    if (!bridgeBase) {
+      return jsonResponse(
+        errorPayload(
+          "responses_bridge_not_configured",
+          "The Full Power runtime bridge is not configured.",
+          requestId,
+        ),
+        503,
+        corsOrigin,
+        requestId,
+      );
+    }
+
+    const target = new URL(bridgeBase);
+    target.pathname = `${target.pathname.replace(/\/+$/, "")}${inboundUrl.pathname}`;
+    target.search = inboundUrl.search;
+    if (isLoopTarget(target.toString(), request.url)) {
+      return jsonResponse(
+        errorPayload(
+          "bridge_loop_detected",
+          "The Full Power runtime bridge would recurse.",
+          requestId,
+        ),
+        500,
+        corsOrigin,
+        requestId,
+      );
+    }
+
+    const isStreamingTurn = /\/turns$/.test(inboundUrl.pathname);
+    const headers = {
+      ...bridgeHeaders(env, requestId),
+      accept: isStreamingTurn ? "text/event-stream" : "application/json",
+    };
+    let body;
+    if (request.method === "POST") {
+      body = await request.text();
+      if (new TextEncoder().encode(body).byteLength > MAX_RESPONSES_REQUEST_BYTES) {
+        return jsonResponse(
+          errorPayload(
+            "request_too_large",
+            `Request body exceeds ${MAX_RESPONSES_REQUEST_BYTES} bytes.`,
+            requestId,
+          ),
+          413,
+          corsOrigin,
+          requestId,
+        );
+      }
+    }
+
+    try {
+      const bridgeResponse = await fetchImpl(target.toString(), {
+        method: request.method,
+        headers,
+        ...(body !== undefined ? { body } : {}),
+      });
+      const upstreamContentType =
+        bridgeResponse.headers.get("content-type") ||
+        (isStreamingTurn ? "text/event-stream" : "application/json");
+      const contentType = upstreamContentType.includes("text/event-stream")
+        ? "text/event-stream"
+        : "application/json";
+      const responseHeaderSet = responseHeaders(corsOrigin, requestId, contentType);
+      if (contentType === "text/event-stream") {
+        responseHeaderSet["x-accel-buffering"] = "no";
+      }
+      logEvent(requestId, "responses.bridge_complete", {
+        path: inboundUrl.pathname,
+        status: bridgeResponse.status,
+        streaming: contentType === "text/event-stream",
+      });
+      return new Response(bridgeResponse.body, {
+        status: bridgeResponse.status,
+        headers: responseHeaderSet,
+      });
+    } catch (exc) {
+      return jsonResponse(
+        errorPayload(
+          "responses_bridge_unreachable",
+          "The Full Power runtime request failed before completion.",
+          requestId,
+          trimDetail(exc),
+        ),
+        502,
+        corsOrigin,
+        requestId,
+      );
+    }
 }
 
 function isLoopTarget(targetUrl, requestUrl) {
@@ -957,7 +1139,7 @@ async function handleExecuteTool(request, env, corsOrigin, requestId) {
     const bridgeResp = await fetchWithTimeout(
       bridgeTarget.toString(),
       { method: "POST", headers: bridgeHeaders(env, requestId), body: JSON.stringify(payload) },
-      20000,
+      toolBridgeTimeoutMs(payload?.name),
     );
     const body = await bridgeResp.text();
     if (!bridgeResp.ok) {
@@ -1000,8 +1182,13 @@ async function handleExecuteTool(request, env, corsOrigin, requestId) {
 export {
   bridgeHeaders,
   buildAccessConfig,
+  deriveResponsesBridgeBaseUrl,
+  handleResponsesProxy,
   isPublicRoute,
+  isResponsesRoute,
   responseHeaders,
+  normalizeFunctionTools,
+  toolBridgeTimeoutMs,
   validateAccessClaims,
   validateAccessIdentity,
 };
@@ -1044,9 +1231,23 @@ export default {
           tool_schema_cache_source: toolSchemaCache.source,
           full_tooling_ready:
             bridgeConfigured && bridgeAuthConfigured && toolSchemaCache.tools.length > 0,
+          full_power_bridge_configured:
+            Boolean(deriveResponsesBridgeBaseUrl(env)) && bridgeAuthConfigured,
           public_endpoints: ["GET /health", "OPTIONS *"],
           privileged_route_policy: "all other routes require an authorized Cloudflare Access identity",
-          endpoints: ["/session", "/token", "/tool-schemas", "/execute-tool", "/health"],
+          endpoints: [
+            "/session",
+            "/token",
+            "/tool-schemas",
+            "/execute-tool",
+            "/responses/capabilities",
+            "/responses/sessions",
+            "/responses/sessions/search",
+            "/responses/sessions/<id>/resume",
+            "/responses/sessions/<id>/turns",
+            "/responses/sessions/<id>/approvals/<id>",
+            "/health",
+          ],
         },
         200,
         corsOrigin,
@@ -1091,6 +1292,10 @@ export default {
 
     if (request.method === "POST" && url.pathname === "/execute-tool") {
       return handleExecuteTool(request, env, corsOrigin, requestId);
+    }
+
+    if (url.pathname.startsWith("/responses/")) {
+      return handleResponsesProxy(request, env, corsOrigin, requestId);
     }
 
     return jsonResponse(

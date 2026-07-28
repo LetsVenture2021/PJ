@@ -3,12 +3,6 @@
 #
 # Configure the Access application on pj-assistant.ai/* with an owner-only
 # Allow policy. The Worker independently verifies the injected assertion.
-#
-# Live Access metadata:
-# Main app: 7a511bef-c421-4baa-a5b2-9c7b3c0481ca
-# Approved-users policy: d0b2d5bd-46a0-4e8b-bc2b-de44403e487f
-# Public /health app: 8dc32fef-ee81-480b-967c-f20b32eaf8a0
-# Public /health policy: 744e63b6-7d94-4145-97b4-2aaa406f0ce3
 
 name = "pj-realtime-backend"
 main = "pj_realtime_backend_worker.js"
@@ -17,7 +11,7 @@ compatibility_date = "2026-07-28"
 [vars]
 PJ_ALLOWED_ORIGINS = "https://pj-assistant.ai,https://www.pj-assistant.ai"
 CF_ACCESS_TEAM_DOMAIN = "aimhi.cloudflareaccess.com"
-CF_ACCESS_AUD = "42b089742f4d6a7c403dbd5add7ec9ff1aa7fe52d46b8924278101dd2af37664"
+CF_ACCESS_AUD = "replace-with-access-application-aud"
 
 # Store these with `wrangler secret put`; never commit their values:
 # OPENAI_API_KEY
@@ -25,4 +19,6 @@ CF_ACCESS_AUD = "42b089742f4d6a7c403dbd5add7ec9ff1aa7fe52d46b8924278101dd2af3766
 # PJ_TOOL_BRIDGE_TOKEN
 #
 # PJ_TOOL_BRIDGE_URL and PJ_TOOL_SCHEMAS_URL must target the private runtime.
+# PJ_RESPONSES_BRIDGE_URL may optionally override the runtime base URL used for
+# Full Power routes; it is derived from PJ_TOOL_BRIDGE_URL when omitted.
 # CF_ACCESS_CERT_CACHE_TTL_MS may optionally override the 300000 ms default.

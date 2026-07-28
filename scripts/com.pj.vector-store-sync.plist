@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.pj.vector-store-sync</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PJ_PYTHON__</string>
+    <string>__PJ_ROOT__/scripts/vector_store_sync.py</string>
+    <string>--keychain-service</string>
+    <string>__PJ_KEYCHAIN_SERVICE__</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__PJ_ROOT__</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>__PJ_LOG_DIR__/vector-store-sync.log</string>
+  <key>StandardErrorPath</key>
+  <string>__PJ_LOG_DIR__/vector-store-sync.error.log</string>
+</dict>
+</plist>
