@@ -51,6 +51,25 @@ voice, a local browser client, and an optional Cloudflare Worker edge proxy.
   and token-authenticated inference. See
   [`docs/huggingface-mcp-server.md`](docs/huggingface-mcp-server.md).
 
+## Code organization
+
+Operation implementations live under the `ops/` package and are grouped by
+domain:
+
+- `ops/skills`, `ops/docs`, `ops/realtime`, and `ops/prompting` own the primary
+  assistant workflows.
+- `ops/code`, `ops/images`, `ops/presentations`, `ops/strategy`, and `ops/chief`
+  contain the remaining governed operation families.
+- `ops/shared` contains atomic I/O, validation, retry and logging utilities,
+  provider adapters, and the protocols used between orchestration and provider
+  code.
+
+The original top-level modules remain compatibility aliases, so existing
+imports and monkeypatch-based integrations continue to resolve to the same
+module objects. New code should import domain APIs from `ops.*`. Provider calls
+from prompting and Responses orchestration cross the `ResponsesProvider`
+interface and use the OpenAI adapter in `ops/shared/providers`.
+
 ## Prerequisites and setup
 
 - Python **3.11** (the version exercised by CI) and `pip`.
