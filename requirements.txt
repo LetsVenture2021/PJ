@@ -36,7 +36,7 @@ packaging==26.2
 pillow==12.3.0
 pycparser==3.0
 pydantic==2.13.4
-pydantic_core==2.47.0
+pydantic_core==2.46.4
 pyee==13.0.1
 pylibsrtp==1.0.0
 pyOpenSSL==26.3.0
