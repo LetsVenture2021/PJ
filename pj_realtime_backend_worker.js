@@ -532,13 +532,19 @@ function toolBridgeTimeoutMs(toolName) {
   return toolName === "delegate_advanced_task" ? 280000 : 85000;
 }
 
-function parseToolSchemaPayload(rawText, maxTools) {
-  let parsed;
-  try {
-    parsed = rawText ? JSON.parse(rawText) : null;
-  } catch {
-    parsed = null;
+function parseJsonOrNull(rawText) {
+  if (!rawText) {
+    return null;
   }
+  try {
+    return JSON.parse(rawText);
+  } catch {
+    return null;
+  }
+}
+
+function parseToolSchemaPayload(rawText, maxTools) {
+  const parsed = parseJsonOrNull(rawText);
   if (Array.isArray(parsed)) {
     return normalizeFunctionTools(parsed, maxTools);
   }
@@ -1067,12 +1073,7 @@ async function requestRealtimeClientSecret(
 }
 
 function extractClientSecretPayload(rawText) {
-  let parsed;
-  try {
-    parsed = rawText ? JSON.parse(rawText) : null;
-  } catch {
-    parsed = null;
-  }
+  const parsed = parseJsonOrNull(rawText);
   const value = parsed?.client_secret?.value || parsed?.value || null;
   return {
     parsed,
