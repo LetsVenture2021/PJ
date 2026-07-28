@@ -340,6 +340,7 @@
 
     .artifact-card-title {
       font-weight: 700;
+      word-break: break-word;
       color: #fff;
     }
 
@@ -506,7 +507,9 @@
     const localHostnames = new Set(["localhost", "127.0.0.1"]);
     const DEFAULT_API_BASE = localHostnames.has(window.location.hostname)
       ? `${window.location.protocol}//${window.location.hostname}:3001`
-      : window.location.origin;
+      : window.location.hostname === "www.pj-assistant.ai"
+        ? "https://pj-assistant.ai"
+        : window.location.origin;
     const STORAGE_KEY = "pj-web-app-api-base";
     const PHASE = {
       IDLE: "idle",
@@ -839,12 +842,13 @@
         state.realtimeItems.set(externalId, item);
       }
       item.text = append ? `${item.text}${text || ""}` : String(text || "");
-      item.status = status;
+      const nextStatus = item.status === "interrupted" ? "interrupted" : status;
+      item.status = nextStatus;
       item.responseId = responseId || item.responseId;
       item.source = source || item.source;
       item.bubble.textContent = item.text;
       item.bubble.dataset.externalId = externalId;
-      item.bubble.dataset.status = status;
+      item.bubble.dataset.status = nextStatus;
       scrollMessagesToBottom();
       return item;
     }

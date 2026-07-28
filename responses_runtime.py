@@ -506,11 +506,34 @@ def _stream_error(event):
     )
 
 
+_DELIVERABLE_INTENT_PATTERN = re.compile(
+    r"\b(?:"
+    r"create|creates|created|creating|"
+    r"export|exports|exported|exporting|"
+    r"generate|generates|generated|generating|"
+    r"build|builds|built|building|"
+    r"save|saves|saved|saving|"
+    r"download|downloads|downloaded|downloading|"
+    r"draft|drafts|drafted|drafting|"
+    r"produce|produces|produced|producing"
+    r")\b"
+)
+
+
 def requested_deliverable_format(message):
-    """Map explicit file requests to the exact artifact format required."""
+    """Map explicit file requests to the exact artifact format required.
+
+    Bare informational mentions of a format (for example "What is a .docx
+    file used for?" or "Explain HTML") must not force artifact creation.
+    A format is only treated as required when the message also carries
+    clear creation intent (create, export, generate, build, save,
+    download, draft, or produce) alongside the format reference.
+    """
     if not isinstance(message, str):
         return None
     text = message.casefold()
+    if not _DELIVERABLE_INTENT_PATTERN.search(text):
+        return None
     checks = (
         ("pptx", (r"\bpower\s*point\b", r"\bpowerpoint\b", r"\.pptx\b", r"\bpptx\b")),
         ("pdf", (r"\bportable document format\b", r"\.pdf\b", r"\bpdf\b")),
@@ -566,7 +589,7 @@ _SERVER_PATH_FIELDS = {
 
 
 def redact_server_paths(value):
-    """Remove absolute server paths while retaining repository-relative evidence."""
+    """Remove server filesystem paths from events sent to browser clients."""
     if isinstance(value, dict):
         cleaned = {}
         for key, item in value.items():
@@ -575,6 +598,13 @@ def redact_server_paths(value):
                 normalized_key in _SERVER_PATH_FIELDS
                 or normalized_key.endswith(("_path", "_paths"))
             ):
+                if isinstance(item, str) and not (
+                    item.startswith("/")
+                    or re.match(r"^[A-Za-z]:[\\/]", item)
+                    or item.startswith("\\\\")
+                    or item.startswith("file://")
+                ):
+                    cleaned[key] = redact_server_paths(item)
                 continue
             cleaned[key] = redact_server_paths(item)
         return cleaned
@@ -1275,7 +1305,13 @@ def delegate_advanced_task(prompt, *, client=None, cfg=None):
         _delegation_active.reset(token)
 
 
-def dispatch_realtime_function(name, arguments, *, client=None, cfg=None):
+def dispatch_realtime_function(
+        name,
+        arguments,
+        *,
+        client=None,
+        cfg=None,
+        approval_granted=False):
     if name == ADVANCED_DELEGATION_TOOL["name"]:
         return delegate_advanced_task(
             arguments.get("prompt") if isinstance(arguments, dict) else None,
@@ -1291,4 +1327,8 @@ def dispatch_realtime_function(name, arguments, *, client=None, cfg=None):
     }
     if name not in allowed:
         raise ValueError(f"Tool '{name}' is not available in Realtime mode.")
+    if approval_granted:
+        return redact_server_paths(
+            dispatch_approved_local_function(name, arguments)
+        )
     return redact_server_paths(dispatch_local_function(name, arguments))

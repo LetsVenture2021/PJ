@@ -299,6 +299,7 @@ import codeops as _codeops
 TOOL_SCHEMAS.extend(_codeops.CODEOPS_SCHEMAS)
 DISPATCH_TABLE.update(_codeops.CODEOPS_DISPATCH)
 
+
 # --- ImageOps: governed image assets and opt-in generation -------------------
 import imageops as _imageops
 
@@ -395,8 +396,10 @@ DISPATCH_TABLE.update(_gen_dispatch)
 _POLICY_MODES = {"allow", "deny", "approval"}
 _BUILTIN_APPROVAL_TOOLS = {
     "approve_codeops_task",
+    "create_skill",
     "learn_from_vector_store",
     "run_codeops_validation",
+    "run_shortcut",
     "sync_vector_store",
     "generate_image_asset",
     "edit_image_asset",

@@ -421,15 +421,33 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 20000, fetchImpl 
   }
 }
 
-async function fetchTextWithTimeout(url, options, timeoutMs, fetchImpl) {
+async function fetchTextWithTimeout(
+  url,
+  options = {},
+  timeoutMs = 20000,
+  fetchImpl = fetch,
+) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(new Error("timeout")), timeoutMs);
-  try {
-    const response = await fetchImpl(url, { ...options, signal: controller.signal });
+  const timeoutError = new Error("timeout");
+  let timeout;
+  const deadline = new Promise((_, reject) => {
+    timeout = setTimeout(() => {
+      controller.abort(timeoutError);
+      reject(timeoutError);
+    }, timeoutMs);
+  });
+  const request = (async () => {
+    const response = await fetchImpl(url, {
+      ...options,
+      signal: controller.signal,
+    });
     return {
       response,
       text: await response.text(),
     };
+  })();
+  try {
+    return await Promise.race([request, deadline]);
   } finally {
     clearTimeout(timeout);
   }
@@ -743,9 +761,10 @@ async function handleResponsesProxy(
         responseHeaderSet["x-accel-buffering"] = "no";
       }
       if (isArtifactDownload && !isJson) {
-        const disposition = bridgeResponse.headers.get("content-disposition") || "";
+        const safeDisposition = safeAttachmentDisposition(
+          bridgeResponse.headers.get("content-disposition") || "",
+        );
         const etag = bridgeResponse.headers.get("etag") || "";
-        const safeDisposition = safeAttachmentDisposition(disposition);
         if (safeDisposition) {
           responseHeaderSet["content-disposition"] = safeDisposition;
         }
@@ -1557,6 +1576,7 @@ export {
   buildAccessConfig,
   createSessionConfig,
   deriveResponsesBridgeBaseUrl,
+  fetchTextWithTimeout,
   handleSession,
   handleResponsesProxy,
   isPublicRoute,
@@ -1599,6 +1619,19 @@ export default {
     if (request.method === "GET" && url.pathname === "/health") {
       const bridgeConfigured = Boolean((env.PJ_TOOL_BRIDGE_URL || "").trim());
       const bridgeAuthConfigured = Boolean((env.PJ_TOOL_BRIDGE_TOKEN || "").trim());
+      const resolvedTools = await resolveRealtimeTools(
+        env,
+        requestId,
+        request.url,
+      );
+      const resolvedToolNames = new Set(
+        resolvedTools.tools.map((tool) => tool.name),
+      );
+      const n8nToolsReady = [
+        "list_n8n_capabilities",
+        "get_n8n_corpus_status",
+        "get_pj_capability_snapshot",
+      ].every((name) => resolvedToolNames.has(name));
       return jsonResponse(
         {
           ok: true,
@@ -1636,6 +1669,7 @@ export default {
             && Boolean(toolSchemaCache.instructions_sha256)
             && Boolean(toolSchemaCache.prompt_perfecting_version)
             && Boolean(toolSchemaCache.tool_policy_sha256),
+          n8n_corpus_tools_ready: n8nToolsReady,
           full_power_bridge_configured:
             Boolean(deriveResponsesBridgeBaseUrl(env)) && bridgeAuthConfigured,
           public_endpoints: ["GET /health", "OPTIONS *"],

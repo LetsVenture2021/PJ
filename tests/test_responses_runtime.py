@@ -13,6 +13,7 @@ import realtime_config
 import realtime_server
 import responses_runtime
 import skills
+import voice
 
 
 def obj(**values):
@@ -209,6 +210,123 @@ class TestResponsesRuntime(unittest.TestCase):
             ]
         )
 
+    def test_document_tool_emits_artifact_before_public_result(self):
+        function_response = obj(
+            id="resp_document",
+            output_text="",
+            output=[obj(
+                type="function_call",
+                name="draft_document",
+                call_id="call_document",
+                arguments=json.dumps({
+                    "template": "meeting_memo",
+                    "title": "Download",
+                    "sections_json": "{}",
+                }),
+            )],
+        )
+        client = FakeClient([
+            [obj(type="response.completed", response=function_response)],
+            final_stream("Document ready.", response_id="resp_done"),
+        ])
+        artifact = {
+            "artifact_id": "ART-" + ("a" * 32),
+            "doc_id": "DOC-test",
+            "version": 1,
+            "format": "md",
+            "filename": "document.md",
+            "mime_type": "text/markdown; charset=utf-8",
+            "byte_size": 12,
+            "sha256": "b" * 64,
+            "status": "ready",
+            "audience_ready": False,
+            "download_url": "/responses/artifacts/ART-" + ("a" * 32),
+        }
+        orchestrator = responses_runtime.ResponsesOrchestrator(
+            client,
+            self.cfg,
+            dispatcher=lambda _name, _arguments: {
+                "status": "draft",
+                "path": "/private/document.md",
+                "artifact": artifact,
+            },
+        )
+        with patch.object(
+            responses_runtime,
+            "_verified_artifact_from_result",
+            return_value=artifact,
+        ):
+            events = list(orchestrator.stream_turn("Create a document"))
+
+        event_types = [event["type"] for event in events]
+        self.assertLess(
+            event_types.index("artifact.ready"),
+            event_types.index("tool.result"),
+        )
+        tool_result = next(
+            event for event in events if event["type"] == "tool.result"
+        )
+        self.assertNotIn("path", tool_result["result"])
+        continuation_output = json.loads(
+            client.responses.calls[1]["input"][0]["output"]
+        )
+        self.assertNotIn("path", continuation_output)
+        self.assertEqual(events[-1]["artifacts"], [artifact])
+
+    def test_path_redaction_preserves_repository_relative_paths(self):
+        result = responses_runtime.redact_server_paths({
+            "matches": [
+                {"path": "src/example.py", "line": 3},
+                {"path": "/private/project/secret.py", "line": 4},
+            ],
+            "output_path": "reports/result.json",
+            "source_path": r"C:\private\source.py",
+        })
+        self.assertEqual(result["matches"][0]["path"], "src/example.py")
+        self.assertNotIn("path", result["matches"][1])
+        self.assertEqual(result["output_path"], "reports/result.json")
+        self.assertNotIn("source_path", result)
+        embedded = responses_runtime.redact_server_paths({
+            "artifact_error": (
+                "copy failed: /Users/private/document.md; "
+                "see https://example.test/docs/path"
+            ),
+        })
+        self.assertNotIn("/Users/private/document.md", embedded["artifact_error"])
+        self.assertIn("[server path redacted]", embedded["artifact_error"])
+        self.assertIn(
+            "https://example.test/docs/path", embedded["artifact_error"]
+        )
+        download_url = "/responses/artifacts/ART-" + ("c" * 32)
+        self.assertEqual(
+            responses_runtime.redact_server_paths(download_url),
+            download_url,
+        )
+
+    def test_terminal_voice_sanitizes_tool_results(self):
+        with (
+            patch.object(
+                voice,
+                "dispatch_realtime_function",
+                return_value={
+                    "path": "/Users/private/document.md",
+                    "artifact": {
+                        "download_url":
+                            "/responses/artifacts/ART-" + ("d" * 32),
+                    },
+                },
+            ),
+            patch("builtins.print"),
+        ):
+            output = json.loads(
+                voice._run_tool_call("draft_document", "{}")
+            )
+        self.assertNotIn("path", output)
+        self.assertEqual(
+            output["artifact"]["download_url"],
+            "/responses/artifacts/ART-" + ("d" * 32),
+        )
+
     def test_recursive_local_tool_turn_streams_typed_events_and_continuity(self):
         function_response = obj(
             id="resp_tool",
@@ -399,6 +517,7 @@ class TestResponsesRuntime(unittest.TestCase):
                 "ART-0123456789abcdef0123456789abcdef/extra"
             ),
             "source_path": "relative/source.md",
+            "output_path": r"C:\private\source.py",
         }
         redacted = responses_runtime.redact_server_paths(value)
         serialized = json.dumps(redacted)
@@ -408,7 +527,13 @@ class TestResponsesRuntime(unittest.TestCase):
         self.assertNotIn(r"C:\\PJ", serialized)
         self.assertNotIn(r"\\server\private", redacted["error"])
         self.assertNotIn("file://", serialized)
-        self.assertNotIn("source_path", redacted)
+        # A path-like field whose value is not itself an absolute server
+        # path is repository-relative evidence: it is kept (not silently
+        # dropped), matching a client-safe result.
+        self.assertEqual(redacted["source_path"], "relative/source.md")
+        # A path-like field whose value IS an absolute server path is
+        # dropped outright rather than merely text-redacted in place.
+        self.assertNotIn("output_path", redacted)
         self.assertEqual(
             redacted["documentation"],
             "see https://docs.n8n.io/integrations/builtin/core-nodes/",
@@ -979,6 +1104,64 @@ class TestResponsesRoutes(unittest.TestCase):
             response.get_json()["error"]["code"],
             "bridge_auth_not_configured",
         )
+
+    def test_local_web_session_authorizes_same_origin_browser_only(self):
+        with (
+            patch.dict(os.environ, {"PJ_TOOL_BRIDGE_TOKEN": ""}),
+            patch.dict(
+                realtime_server.app.config,
+                {"LOCAL_WEB_OWNER_SESSION_ENABLED": True},
+            ),
+        ):
+            loaded = self.client.get(
+                "/",
+                environ_base={"REMOTE_ADDR": "127.0.0.1"},
+            )
+            self.assertEqual(loaded.status_code, 200)
+            loaded.close()
+            allowed = self.client.get(
+                "/responses/capabilities",
+                headers={"Referer": "http://localhost/"},
+                environ_base={"REMOTE_ADDR": "127.0.0.1"},
+            )
+            denied = self.client.get(
+                "/responses/capabilities",
+                headers={"Origin": "https://attacker.example"},
+                environ_base={"REMOTE_ADDR": "127.0.0.1"},
+            )
+
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(denied.status_code, 503)
+        self.assertEqual(
+            denied.get_json()["error"]["code"],
+            "bridge_auth_not_configured",
+        )
+
+    def test_builtin_web_client_rejects_non_loopback_requests(self):
+        with patch.dict(
+            realtime_server.app.config,
+            {"LOCAL_WEB_OWNER_SESSION_ENABLED": True},
+        ):
+            response = self.client.get(
+                "/",
+                environ_base={"REMOTE_ADDR": "192.0.2.10"},
+            )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.get_json()["error"]["code"],
+            "local_web_only",
+        )
+
+    def test_builtin_web_client_is_disabled_without_explicit_local_mode(self):
+        with patch.dict(
+            realtime_server.app.config,
+            {"LOCAL_WEB_OWNER_SESSION_ENABLED": False},
+        ):
+            response = self.client.get(
+                "/",
+                environ_base={"REMOTE_ADDR": "127.0.0.1"},
+            )
+        self.assertEqual(response.status_code, 403)
 
     def test_session_lifecycle_stream_and_server_side_response_id(self):
         created = self.client.post(
@@ -1957,6 +2140,50 @@ class TestResponsesRoutes(unittest.TestCase):
             chatlog.list_session_artifact_ids(session["id"]),
             [exported["artifact"]["artifact_id"]],
         )
+
+
+class TestRequestedDeliverableFormat(unittest.TestCase):
+    """requested_deliverable_format must require creation intent, not just
+    a bare mention of a file format, before forcing artifact creation."""
+
+    def test_bare_informational_mentions_do_not_force_artifacts(self):
+        informational_messages = (
+            "What is a .docx file used for?",
+            "Explain HTML",
+            "What's the difference between PDF and DOCX?",
+            "I opened the pptx you sent yesterday.",
+            "Tell me about markdown files.",
+            "Is rtf still commonly used?",
+            "Why would someone need an xlsx instead of a csv?",
+            "What does PDF stand for?",
+        )
+        for message in informational_messages:
+            with self.subTest(message=message):
+                self.assertIsNone(
+                    responses_runtime.requested_deliverable_format(message)
+                )
+
+    def test_genuine_creation_requests_still_enforce_artifacts(self):
+        creation_messages = {
+            "Create a PDF report for the board.": "pdf",
+            "Please export this as a docx file.": "docx",
+            "Generate a PowerPoint presentation on Q3 results.": "pptx",
+            "Can you build an Excel workbook with the numbers?": "xlsx",
+            "Save this as an rtf file.": "rtf",
+            "Download the summary as an html file.": "html",
+            "Draft a markdown document with the notes.": "md",
+            "Produce a Word document summarizing the call.": "docx",
+        }
+        for message, expected_format in creation_messages.items():
+            with self.subTest(message=message):
+                self.assertEqual(
+                    responses_runtime.requested_deliverable_format(message),
+                    expected_format,
+                )
+
+    def test_non_string_input_returns_none(self):
+        self.assertIsNone(responses_runtime.requested_deliverable_format(None))
+        self.assertIsNone(responses_runtime.requested_deliverable_format(42))
 
 
 if __name__ == "__main__":

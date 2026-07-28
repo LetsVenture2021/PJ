@@ -1,3 +1,4 @@
+import hashlib
 import io
 import json
 import os
@@ -8,29 +9,33 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from openpyxl import load_workbook
-from pptx import Presentation
-
 import chatlog
 import docops
 import realtime_server
 import responses_runtime
+from openpyxl import load_workbook
+from pptx import Presentation
 
 
 class TestDocumentDownloads(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         root = Path(self.temp_dir.name)
-        self.old_doc_db = docops._DB_PATH
+        self.old_docops = {
+            "_DB_PATH": docops._DB_PATH,
+            "DOCS_DIR": docops.DOCS_DIR,
+            "EXPORTS_DIR": docops.EXPORTS_DIR,
+            "ARTIFACTS_DIR": docops.ARTIFACTS_DIR,
+        }
         self.old_chat_db = chatlog._DB_PATH
-        self.old_docs = docops.DOCS_DIR
-        self.old_exports = docops.EXPORTS_DIR
         docops._DB_PATH = root / "test.sqlite3"
         chatlog._DB_PATH = docops._DB_PATH
         docops.DOCS_DIR = root / "documents"
         docops.EXPORTS_DIR = docops.DOCS_DIR / "exports"
+        docops.ARTIFACTS_DIR = docops.EXPORTS_DIR / ".artifacts"
         docops.DOCS_DIR.mkdir()
         docops.EXPORTS_DIR.mkdir()
+        docops.ARTIFACTS_DIR.mkdir()
         self.env = patch.dict(
             os.environ,
             {
@@ -40,21 +45,35 @@ class TestDocumentDownloads(unittest.TestCase):
             clear=False,
         )
         self.env.start()
+        self.prompt_perfecting = patch.object(
+            realtime_server.promptops,
+            "perfect_prompt",
+            side_effect=lambda client, cfg, prompt, *, surface, required=True: {
+                "original_prompt": prompt,
+                "refined_prompt": prompt,
+                "changed": False,
+                "version": "test",
+                "surface": surface,
+                "intent_summary": "unchanged",
+                "constraints_preserved": [],
+                "original_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+                "refined_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+            },
+        )
+        self.prompt_perfecting.start()
         realtime_server.app.config.update(TESTING=True)
         self.client = realtime_server.app.test_client()
         authorization_scheme = "Bear" + "er"
         self.auth = {
-            "Authorization": (
-                f"{authorization_scheme} bridge-secret"
-            )
+            "Authorization": f"{authorization_scheme} bridge-secret"
         }
 
     def tearDown(self):
+        self.prompt_perfecting.stop()
         self.env.stop()
-        docops._DB_PATH = self.old_doc_db
+        for name, value in self.old_docops.items():
+            setattr(docops, name, value)
         chatlog._DB_PATH = self.old_chat_db
-        docops.DOCS_DIR = self.old_docs
-        docops.EXPORTS_DIR = self.old_exports
         self.temp_dir.cleanup()
 
     @staticmethod
@@ -67,18 +86,173 @@ class TestDocumentDownloads(unittest.TestCase):
             "Action Items": "Ship after validation.",
         })
 
-    def _draft(self):
+    def _draft(self, *, finalize=False):
         result = docops.draft_document(
             "meeting_memo",
             "Download Validation",
             self._sections(),
-            finalize=True,
+            finalize=finalize,
         )
+        self.assertNotIn("artifact_error", result)
         self.assertEqual(result["artifact"]["status"], "ready")
         return result
 
-    def test_markdown_and_generic_exports_use_immutable_downloads(self):
+    def test_created_document_has_immutable_markdown_artifact(self):
         drafted = self._draft()
+        artifact = drafted["artifact"]
+        self.assertEqual(artifact["format"], "md")
+        self.assertFalse(artifact["audience_ready"])
+        self.assertNotIn("path", artifact)
+
+        resolved = docops.resolve_export_artifact(artifact["artifact_id"])
+        self.assertEqual(resolved, artifact | {"created_at": resolved["created_at"]})
+        metadata, snapshot = docops.open_export_artifact_snapshot(
+            artifact["artifact_id"]
+        )
+        try:
+            self.assertEqual(metadata["sha256"], artifact["sha256"])
+            self.assertIn(b"# Download Validation", snapshot.read())
+        finally:
+            snapshot.close()
+
+    def test_finalization_creates_new_audience_ready_artifact(self):
+        drafted = self._draft()
+        finalized = docops.finalize_document(drafted["doc_id"])
+        self.assertEqual(finalized["status"], "final")
+        self.assertTrue(finalized["artifact"]["audience_ready"])
+        self.assertNotEqual(
+            drafted["artifact"]["artifact_id"],
+            finalized["artifact"]["artifact_id"],
+        )
+        repeated = docops.finalize_document(drafted["doc_id"])
+        self.assertEqual(repeated["status"], "already_final")
+        self.assertEqual(
+            repeated["artifact"]["artifact_id"],
+            finalized["artifact"]["artifact_id"],
+        )
+
+    def test_all_supported_exports_are_registered(self):
+        drafted = self._draft(finalize=True)
+        formats = ["html", "pdf", "xlsx"]
+        if shutil.which("textutil"):
+            formats.extend(["docx", "rtf"])
+        expected_mime_types = {
+            "html": "text/html; charset=utf-8",
+            "pdf": "application/pdf",
+            "docx": (
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+            "rtf": "application/rtf",
+            "xlsx": (
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+        }
+        for format_name in formats:
+            with self.subTest(format=format_name):
+                exported = docops.export_document(
+                    drafted["doc_id"], format=format_name
+                )
+                self.assertNotIn("error", exported)
+                artifact = exported["artifact"]
+                self.assertEqual(artifact["format"], format_name)
+                self.assertTrue(artifact["audience_ready"])
+                self.assertGreater(artifact["byte_size"], 0)
+                self.assertEqual(artifact["mime_type"],
+                                 expected_mime_types[format_name])
+                internal = docops.resolve_export_artifact(
+                    artifact["artifact_id"], include_path=True
+                )
+                self.assertEqual(internal["status"], "ready")
+                content = Path(internal["path"]).read_bytes()
+                if format_name == "pdf":
+                    self.assertTrue(content.startswith(b"%PDF-"))
+                elif format_name == "xlsx":
+                    self.assertTrue(content.startswith(b"PK"))
+
+                downloaded = self.client.get(
+                    artifact["download_url"], headers=self.auth
+                )
+                try:
+                    self.assertEqual(downloaded.status_code, 200)
+                    self.assertEqual(downloaded.data, content)
+                    self.assertEqual(
+                        downloaded.headers["Content-Type"],
+                        expected_mime_types[format_name],
+                    )
+                finally:
+                    downloaded.close()
+
+                if format_name == "xlsx":
+                    workbook = load_workbook(
+                        internal["path"], read_only=True
+                    )
+                    try:
+                        sheet = workbook["Document"]
+                        self.assertEqual(
+                            sheet["A1"].value, "Download Validation"
+                        )
+                        self.assertEqual(sheet["A8"].value, "Attendees")
+                    finally:
+                        workbook.close()
+
+    def test_pptx_export_requires_a_governed_presentation(self):
+        drafted = self._draft(finalize=True)
+        rejected = docops.export_document(drafted["doc_id"], format="pptx")
+        self.assertEqual(rejected.get("status"), "rejected")
+        self.assertNotIn("artifact", rejected)
+
+        slides = json.dumps([{
+            "layout": "title",
+            "title": "Download Validation",
+            "subtitle": "Governed presentation export",
+        }])
+        presentation_doc = docops.draft_presentation(
+            "Download Validation",
+            "Internal stakeholders",
+            slides,
+            finalize=True,
+        )
+        exported = docops.export_document(
+            presentation_doc["doc_id"], format="pptx"
+        )
+        self.assertNotIn("error", exported)
+        artifact = exported["artifact"]
+        self.assertEqual(artifact["format"], "pptx")
+        self.assertTrue(artifact["audience_ready"])
+        self.assertGreater(artifact["byte_size"], 0)
+        self.assertEqual(
+            artifact["mime_type"],
+            "application/vnd.openxmlformats-officedocument."
+            "presentationml.presentation",
+        )
+        internal = docops.resolve_export_artifact(
+            artifact["artifact_id"], include_path=True
+        )
+        self.assertEqual(internal["status"], "ready")
+        content = Path(internal["path"]).read_bytes()
+        self.assertTrue(content.startswith(b"PK"))
+
+        downloaded = self.client.get(
+            artifact["download_url"], headers=self.auth
+        )
+        try:
+            self.assertEqual(downloaded.status_code, 200)
+            self.assertEqual(downloaded.data, content)
+            self.assertEqual(
+                downloaded.headers["Content-Type"],
+                "application/vnd.openxmlformats-officedocument."
+                "presentationml.presentation",
+            )
+        finally:
+            downloaded.close()
+
+        presentation = Presentation(internal["path"])
+        self.assertGreaterEqual(len(presentation.slides), 1)
+
+    def test_markdown_and_generic_exports_use_immutable_downloads(self):
+        drafted = self._draft(finalize=True)
         self.assertEqual(drafted["artifact"]["format"], "md")
         self.assertTrue(drafted["artifact"]["audience_ready"])
         self.assertNotIn("path", drafted["artifact"])
@@ -213,6 +387,100 @@ class TestDocumentDownloads(unittest.TestCase):
         finally:
             workbook.close()
 
+    def test_tampered_immutable_artifact_is_rejected(self):
+        artifact = self._draft()["artifact"]
+        internal = docops.resolve_export_artifact(
+            artifact["artifact_id"], include_path=True
+        )
+        Path(internal["path"]).write_bytes(b"tampered")
+        blocked = docops.resolve_export_artifact(artifact["artifact_id"])
+        self.assertEqual(blocked["status"], "blocked")
+
+        response = self.client.get(
+            f"/responses/artifacts/{artifact['artifact_id']}",
+            headers=self.auth,
+        )
+        self.assertEqual(response.status_code, 409)
+        rendered = response.get_data(as_text=True)
+        self.assertNotIn(str(self.temp_dir.name), rendered)
+        self.assertNotIn(".artifacts", rendered)
+
+    def test_resume_restores_artifact_and_authenticated_download(self):
+        artifact = self._draft(finalize=True)["artifact"]
+        session = chatlog.new_session(channel="web")
+        self.assertTrue(
+            chatlog.link_session_artifact(session["id"], artifact["artifact_id"])
+        )
+
+        resumed = self.client.post(
+            f"/responses/sessions/{session['id']}/resume",
+            json={},
+            headers=self.auth,
+        )
+        self.assertEqual(resumed.status_code, 200)
+        self.assertEqual(
+            resumed.get_json()["session"]["artifacts"][0]["artifact_id"],
+            artifact["artifact_id"],
+        )
+
+        denied = self.client.get(
+            f"/responses/artifacts/{artifact['artifact_id']}"
+        )
+        self.assertEqual(denied.status_code, 401)
+        downloaded = self.client.get(
+            f"/responses/artifacts/{artifact['artifact_id']}",
+            headers=self.auth,
+        )
+        try:
+            self.assertEqual(downloaded.status_code, 200)
+            self.assertEqual(downloaded.data.hex(), Path(
+                docops.resolve_export_artifact(
+                    artifact["artifact_id"], include_path=True
+                )["path"]
+            ).read_bytes().hex())
+            self.assertIn(
+                artifact["filename"],
+                downloaded.headers["Content-Disposition"],
+            )
+            self.assertEqual(
+                downloaded.headers["Cache-Control"], "private, no-store"
+            )
+        finally:
+            downloaded.close()
+
+    def test_artifact_event_is_linked_to_active_chat(self):
+        artifact = self._draft()["artifact"]
+        session = chatlog.new_session(channel="web")
+
+        class FakeOrchestrator:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def stream_turn(self, *_args, **_kwargs):
+                yield {"type": "artifact.ready", **artifact}
+                yield {
+                    "type": "completion",
+                    "text": "Document ready.",
+                    "artifacts": [artifact],
+                    "_response_id": "resp-document",
+                }
+
+        with patch.object(
+            realtime_server, "ResponsesOrchestrator", FakeOrchestrator
+        ):
+            response = self.client.post(
+                f"/responses/sessions/{session['id']}/turns",
+                json={"message": "Create a document"},
+                headers=self.auth,
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertIn(b'"type": "artifact.ready"', response.data)
+
+        self.assertEqual(
+            chatlog.list_session_artifact_ids(session["id"]),
+            [artifact["artifact_id"]],
+        )
+
     def test_tool_schemas_and_delivery_detection_cover_all_formats(self):
         export_schema = next(
             schema
@@ -249,6 +517,53 @@ class TestDocumentDownloads(unittest.TestCase):
                     ),
                     expected,
                 )
+
+    def test_tool_and_stream_errors_redact_embedded_server_paths(self):
+        with patch.object(
+            realtime_server,
+            "dispatch_realtime_function",
+            side_effect=PermissionError(
+                "cannot write /Users/private/documents/report.md"
+            ),
+        ):
+            response = self.client.post(
+                "/execute-tool",
+                json={"name": "draft_document", "arguments": {}},
+                headers=self.auth,
+            )
+        self.assertEqual(response.status_code, 500)
+        self.assertNotIn("/Users/private", response.get_data(as_text=True))
+        self.assertIn("[server path redacted]", response.get_data(as_text=True))
+
+        session = chatlog.new_session(channel="web")
+
+        class FailingOrchestrator:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            def stream_turn(self, *_args, **_kwargs):
+                raise PermissionError(
+                    "cannot open /Users/private/documents/report.md"
+                )
+                yield
+
+        with (
+            patch.object(
+                realtime_server, "ResponsesOrchestrator", FailingOrchestrator
+            ),
+            patch.object(
+                realtime_server, "OPENAI_CLIENT_FACTORY", return_value=object()
+            ),
+        ):
+            streamed = self.client.post(
+                f"/responses/sessions/{session['id']}/turns",
+                json={"message": "Create a document"},
+                headers=self.auth,
+            )
+            rendered = streamed.get_data(as_text=True)
+        self.assertEqual(streamed.status_code, 200)
+        self.assertNotIn("/Users/private", rendered)
+        self.assertIn("[server path redacted]", rendered)
 
     def test_terminal_voice_tool_results_redact_server_paths(self):
         import voice

@@ -4,6 +4,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const workerSource = await readFile(new URL("../pj_realtime_backend_worker.js", import.meta.url), "utf8");
+const webClientSource = await readFile(new URL("../webrtc_client.html", import.meta.url), "utf8");
+const wranglerSource = await readFile(new URL("../wrangler.toml.example", import.meta.url), "utf8");
 const webUtilsSource = await readFile(new URL("../assets/pj_web_utils.js", import.meta.url), "utf8");
 const workerModule = await import(
   `data:text/javascript;base64,${Buffer.from(workerSource).toString("base64")}`
@@ -19,6 +21,7 @@ const {
   createSessionConfig,
   default: worker,
   deriveResponsesBridgeBaseUrl,
+  fetchTextWithTimeout,
   handleSession,
   handleResponsesProxy,
   isPublicRoute,
@@ -101,6 +104,23 @@ function assertionRequest(assertion) {
   });
 }
 
+test("deployment routes cover APIs without claiming frontend assets", () => {
+  for (const route of [
+    "pj-assistant.ai/health",
+    "pj-assistant.ai/session",
+    "pj-assistant.ai/token",
+    "pj-assistant.ai/tool-schemas",
+    "pj-assistant.ai/execute-tool",
+    "pj-assistant.ai/responses/*",
+  ]) {
+    assert.ok(wranglerSource.includes(`pattern = "${route}"`));
+  }
+  assert.doesNotMatch(wranglerSource, /pattern = "pj-assistant\.ai\/\*"/);
+  assert.match(wranglerSource, /PJ_TOOL_BRIDGE_URL = "https:\/\/replace-with-private-runtime\/execute-tool"/);
+  assert.match(webClientSource, /window\.location\.hostname === "www\.pj-assistant\.ai"/);
+  assert.match(webClientSource, /\? "https:\/\/pj-assistant\.ai"/);
+});
+
 test("only health and preflight are public", () => {
   assert.equal(isPublicRoute("GET", "/health"), true);
   assert.equal(isPublicRoute("OPTIONS", "/future-full-power"), true);
@@ -123,6 +143,10 @@ test("Full Power routes and bridge URL derivation are narrowly scoped", () => {
   assert.equal(isResponsesRoute("POST", "/responses/sessions/example_123/resume"), true);
   assert.equal(isResponsesRoute("POST", "/responses/sessions/example_123/turns"), true);
   assert.equal(
+    isResponsesRoute("GET", `/responses/artifacts/ART-${"a".repeat(32)}`),
+    true,
+  );
+  assert.equal(
     isResponsesRoute("GET", "/responses/sessions/example_123/artifacts"),
     true,
   );
@@ -132,6 +156,10 @@ test("Full Power routes and bridge URL derivation are narrowly scoped", () => {
       "/responses/artifacts/ART-0123456789abcdef0123456789abcdef",
     ),
     true,
+  );
+  assert.equal(
+    isResponsesRoute("GET", "/responses/artifacts/../../private"),
+    false,
   );
   assert.equal(
     isResponsesRoute(
@@ -346,6 +374,41 @@ test("Full Power proxy streams SSE with only allowlisted bridge headers", async 
   assert.match(await response.text(), /"type":"completion"/);
 });
 
+test("Full Power proxy preserves verified binary downloads with safe filenames", async () => {
+  const artifactId = `ART-${"a".repeat(32)}`;
+  let captured = null;
+  const response = await handleResponsesProxy(
+    new Request(`https://pj-assistant.ai/responses/artifacts/${artifactId}`),
+    {
+      PJ_TOOL_BRIDGE_URL: "https://tools.pj-assistant.ai/execute-tool",
+      PJ_TOOL_BRIDGE_TOKEN: "bridge-secret",
+    },
+    "https://pj-assistant.ai",
+    "request-artifact",
+    async (url, options) => {
+      captured = { url, options };
+      return new Response(new Uint8Array([1, 2, 3]), {
+        headers: {
+          "content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "content-disposition": 'attachment; filename="../../private/report.docx"',
+          etag: '"sha256-abc123"',
+          "content-length": "999",
+        },
+      });
+    },
+  );
+
+  assert.equal(
+    captured.url,
+    `https://tools.pj-assistant.ai/responses/artifacts/${artifactId}`,
+  );
+  assert.equal(captured.options.headers.accept, "application/octet-stream");
+  assert.equal(response.headers.get("content-disposition"), 'attachment; filename="report.docx"');
+  assert.equal(response.headers.get("etag"), '"sha256-abc123"');
+  assert.equal(response.headers.get("content-length"), null);
+  assert.deepEqual(new Uint8Array(await response.arrayBuffer()), new Uint8Array([1, 2, 3]));
+});
+
 test("Full Power proxy preserves binary artifacts and only safe download headers", async () => {
   let captured = null;
   const bytes = new Uint8Array([80, 75, 3, 4, 9, 8, 7]);
@@ -392,6 +455,15 @@ test("Full Power proxy preserves binary artifacts and only safe download headers
   assert.equal(response.headers.get("content-length"), null);
   assert.equal(response.headers.get("x-upstream-secret"), null);
   assert.deepEqual(new Uint8Array(await response.arrayBuffer()), bytes);
+});
+
+test("attachment filenames are rebuilt from safe basenames", () => {
+  assert.equal(
+    safeAttachmentDisposition('attachment; filename="C:\\private\\report.docx"'),
+    'attachment; filename="report.docx"',
+  );
+  assert.equal(safeAttachmentDisposition("inline; filename=report.docx"), null);
+  assert.equal(safeAttachmentDisposition('attachment; filename="bad\nname.docx"'), null);
 });
 
 test("artifact disposition is reconstructed from a validated basename", () => {
@@ -494,6 +566,70 @@ test("public health has security headers and future routes fail closed", async (
   assert.equal(futureRoute.status, 401);
 });
 
+test("public health warms tool schemas and reports n8n readiness", async () => {
+  const originalFetch = globalThis.fetch;
+  const requestedUrls = [];
+  const authorizationHeaders = [];
+  const tools = [
+    { type: "function", name: "list_n8n_capabilities", parameters: {} },
+    { type: "function", name: "get_n8n_corpus_status", parameters: {} },
+    { type: "function", name: "get_pj_capability_snapshot", parameters: {} },
+  ];
+  const instructions = "Authoritative PJ instructions for health warming.\n";
+  const digest = (value) => createHash("sha256").update(value).digest("hex");
+  const bridgePayload = {
+    contract_version: CONTRACT_VERSION,
+    tools,
+    tool_manifest_sha256: digest(stableJson(tools)),
+    instructions,
+    instructions_sha256: digest(instructions),
+    prompt_perfecting_version: "1.0",
+    tool_policy_sha256: "a".repeat(64),
+  };
+  globalThis.fetch = async (url, options = {}) => {
+    requestedUrls.push(String(url));
+    authorizationHeaders.push(options.headers.authorization);
+    return new Response(JSON.stringify(bridgePayload), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  const env = {
+    PJ_TOOL_BRIDGE_URL: "https://private-runtime.example/execute-tool",
+    PJ_TOOL_BRIDGE_TOKEN: "bridge-secret",
+  };
+  try {
+    // Force-populate the shared module-level schema cache with this test's
+    // own bridge payload first (other tests in this file also warm the
+    // same cache; forceRefresh keeps this test's assertions independent of
+    // suite ordering rather than reading a stale prior test's cache).
+    await resolveRealtimeTools(
+      env,
+      "warm-request",
+      "https://pj-assistant.ai/health",
+      true,
+    );
+    const health = await worker.fetch(
+      new Request("https://pj-assistant.ai/health"),
+      env,
+    );
+    assert.equal(health.status, 200);
+    const payload = await health.json();
+    assert.equal(payload.tool_schema_cache_source, "bridge");
+    assert.equal(payload.tool_schema_cache_count, 3);
+    assert.equal(payload.full_tooling_ready, true);
+    assert.equal(payload.n8n_corpus_tools_ready, true);
+    assert.deepEqual(requestedUrls, [
+      "https://private-runtime.example/tool-schemas",
+    ]);
+    assert.equal(authorizationHeaders.length, 1);
+    assert.equal(typeof authorizationHeaders[0], "string");
+    assert.ok(authorizationHeaders[0].endsWith("bridge-secret"));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("downstream bridge headers contain only the bridge credential", () => {
   const headers = bridgeHeaders({ PJ_TOOL_BRIDGE_TOKEN: "bridge-secret" }, "request-123");
   assert.equal(headers.authorization, "Bearer bridge-secret");
@@ -550,7 +686,7 @@ test("browser and Worker advertise the same contract version", async () => {
   assert.equal(match[1], CONTRACT_VERSION);
 });
 
-test("realtime upstream transport failures return typed results", async () => {
+test("realtime upstream transport and body-read failures return typed results", async () => {
   const failingFetch = async () => {
     throw new Error("upstream socket closed");
   };
@@ -559,8 +695,8 @@ test("realtime upstream transport failures return typed results", async () => {
     "gpt-realtime",
     { OPENAI_API_KEY: "test-key" },
     [],
-    "fast",
-    "Test instructions",
+    "full_power",
+    "Authoritative test instructions",
     failingFetch,
   );
   assert.equal(call.ok, false);
@@ -568,29 +704,57 @@ test("realtime upstream transport failures return typed results", async () => {
   assert.equal(call.transportError, true);
   assert.match(call.text, /upstream socket closed/);
 
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = failingFetch;
+  try {
+    const response = await handleSession(
+      new Request(
+        "https://pj-assistant.ai/session"
+          + "?session_id=session_transport_123&voice_mode=full_power",
+        {
+          method: "POST",
+          headers: { "content-type": "application/sdp" },
+          body: "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
+        },
+      ),
+      {
+        OPENAI_API_KEY: "test-key",
+        PJ_REALTIME_INSTRUCTIONS: "Authoritative test instructions",
+        PJ_REALTIME_TOOL_SCHEMAS_JSON: "[]",
+      },
+      "https://pj-assistant.ai",
+      "request-session-transport",
+    );
+    assert.equal(response.status, 502);
+    assert.match(response.headers.get("content-type"), /^application\/json/);
+    const payload = await response.json();
+    assert.equal(payload.error.code, "openai_realtime_unreachable");
+    assert.equal(payload.error.request_id, "request-session-transport");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const unreadableResponseFetch = async () => ({
+    ok: true,
+    status: 200,
+    async text() {
+      throw new Error("response body stream failed");
+    },
+  });
   const token = await requestRealtimeClientSecret(
     "gpt-realtime",
     { OPENAI_API_KEY: "test-key" },
     [],
     "fast",
-    "Test instructions",
-    failingFetch,
+    "Authoritative test instructions",
+    unreadableResponseFetch,
   );
   assert.equal(token.ok, false);
   assert.equal(token.status, 502);
   assert.equal(token.transportError, true);
-  assert.match(token.text, /upstream socket closed/);
-});
+  assert.match(token.text, /response body stream failed/);
 
-test("realtime upstream response-body read failures return typed 502 results", async () => {
-  const unreadableResponseFetch = async () => ({
-    ok: true,
-    status: 200,
-    async text() {
-      throw new Error("response stream interrupted");
-    },
-  });
-  const call = await requestRealtimeCall(
+  const unreadableCall = await requestRealtimeCall(
     "v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\n",
     "gpt-realtime",
     { OPENAI_API_KEY: "test-key" },
@@ -599,21 +763,24 @@ test("realtime upstream response-body read failures return typed 502 results", a
     null,
     unreadableResponseFetch,
   );
-  assert.equal(call.status, 502);
-  assert.equal(call.transportError, true);
-  assert.match(call.text, /response stream interrupted/);
+  assert.equal(unreadableCall.ok, false);
+  assert.equal(unreadableCall.status, 502);
+  assert.equal(unreadableCall.transportError, true);
+  assert.match(unreadableCall.text, /response body stream failed/);
 
-  const token = await requestRealtimeClientSecret(
-    "gpt-realtime",
-    { OPENAI_API_KEY: "test-key" },
-    [],
-    "fast",
-    null,
-    unreadableResponseFetch,
+  await assert.rejects(
+    fetchTextWithTimeout(
+      "https://api.openai.com/v1/realtime/calls",
+      {},
+      10,
+      async () => ({
+        async text() {
+          return new Promise(() => {});
+        },
+      }),
+    ),
+    /timeout/,
   );
-  assert.equal(token.status, 502);
-  assert.equal(token.transportError, true);
-  assert.match(token.text, /response stream interrupted/);
 });
 
 test("HTML infrastructure errors are summarized without leaking markup", () => {
@@ -621,6 +788,36 @@ test("HTML infrastructure errors are summarized without leaking markup", () => {
     "<!DOCTYPE html><html><head><title>Internal Server Error</title></head><body>failure</body></html>",
   );
   assert.equal(detail, "Server returned an HTML error page (Internal Server Error)");
+  assert.doesNotMatch(detail, /<!DOCTYPE|<html|<body/i);
+  assert.equal(
+    parseErrorBody("<html><body>no title</body></html>"),
+    "Server returned an HTML error page",
+  );
+  assert.equal(
+    parseErrorBody(JSON.stringify({
+      error: {
+        message: "Realtime signaling failed.",
+        detail: "sdp_length=42; <!DOCTYPE html><html><head>"
+          + "<title>Bad Gateway</title></head><body>failure</body></html>",
+      },
+    })),
+    "Server returned an HTML error page (Bad Gateway)",
+  );
+});
+
+test("HTML error page titles are bounded to a safe length", () => {
+  const longTitle = "Upstream Gateway Failure ".repeat(20).trim();
+  const detail = parseErrorBody(
+    `<!DOCTYPE html><html><head><title>${longTitle}</title></head>`
+      + "<body>failure</body></html>",
+  );
+  assert.match(detail, /^Server returned an HTML error page \(/);
+  const shownTitle = detail.slice(
+    "Server returned an HTML error page (".length,
+    -1,
+  );
+  assert.ok(shownTitle.length <= 163, `title was ${shownTitle.length} chars`);
+  assert.match(shownTitle, /\.\.\.$/);
   assert.doesNotMatch(detail, /<!DOCTYPE|<html|<body/i);
 });
 
@@ -731,13 +928,17 @@ test("browser module initializes with Full Power helpers in shared scope", async
   assert.ok(hooks);
   assert.equal(hooks.shouldUseEphemeralSignalingFallback(500, ""), true);
   assert.equal(hooks.shouldUseEphemeralSignalingFallback(503, "gateway unavailable"), true);
+  assert.equal(hooks.shouldUseEphemeralSignalingFallback(599, "upstream failure"), true);
   assert.equal(hooks.shouldUseEphemeralSignalingFallback(599, "<html>failure</html>"), true);
   assert.equal(hooks.shouldUseEphemeralSignalingFallback(400, "invalid_offer"), true);
   assert.equal(hooks.shouldUseEphemeralSignalingFallback(400, "invalid model"), false);
+  assert.equal(hooks.shouldUseEphemeralSignalingFallback(429, "rate limited"), false);
   assert.equal(typeof listeners.get("startBtn:click"), "function");
   assert.equal(typeof listeners.get("fullPowerModeBtn:click"), "function");
   assert.equal(typeof listeners.get("fullPowerVoiceModeBtn:click"), "function");
   assert.equal(typeof listeners.get("refreshSessionsBtn:click"), "function");
+  assert.match(moduleSource, /event\.type === "artifact\.ready"/);
+  assert.match(moduleSource, /className = "artifact-download"/);
   assert.match(html, /className = "artifact-card"/);
   assert.match(html, /fullPowerToolRows: new Map\(\)/);
   assert.match(html, /realtimeItems: new Map\(\)/);
@@ -856,11 +1057,22 @@ test("browser module initializes with Full Power helpers in shared scope", async
     hooks.state.realtimeItems.get("assistant-item-2").status,
     "interrupted",
   );
+  hooks.handleRealtimeEvent({
+    event_id: "output-done-after-interruption",
+    type: "response.output_audio_transcript.done",
+    item_id: "assistant-item-2",
+    response_id: "response-2",
+    transcript: "This will be interrupted",
+  });
+  assert.equal(
+    hooks.state.realtimeItems.get("assistant-item-2").status,
+    "interrupted",
+  );
   const interruptedDone = {
     type: "response.done",
     response: {
       id: "response-2",
-      status: "cancelled",
+      status: "completed",
       output: [{ id: "assistant-item-2" }],
     },
   };

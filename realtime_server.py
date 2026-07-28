@@ -7,11 +7,13 @@ Provides:
   POST /execute-tool - executes local PJ tools for browser function calls
   POST /webhook    - SIP webhook for inbound phone calls
 """
-import hmac
 import hashlib
+import hmac
+import ipaddress
 import json
 import os
 import re
+import secrets
 from pathlib import Path
 from uuid import uuid4
 
@@ -22,6 +24,7 @@ from flask import (
     Response,
     send_file,
     send_from_directory,
+    session,
     stream_with_context,
 )
 from flask_cors import CORS
@@ -50,6 +53,7 @@ MAX_ERROR_DETAIL_LENGTH = 320
 MAX_SESSION_TITLE_LENGTH = 120
 MAX_MESSAGE_LENGTH = 20000
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+ARTIFACT_ID_PATTERN = re.compile(r"^ART-[a-f0-9]{32}$")
 SCHEMA_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 ARTIFACT_ID_PATTERN = re.compile(r"^ART-[a-f0-9]{32}$")
 OPENAI_CLIENT_FACTORY = OpenAI
@@ -60,6 +64,17 @@ class DurableExecutionOutcomeUnknown(RuntimeError):
 
 
 app = Flask(__name__, static_folder=str(BASE_DIR / "assets"), static_url_path="/assets")
+app.secret_key = (
+    os.getenv("PJ_LOCAL_WEB_SESSION_SECRET") or secrets.token_hex(32)
+)
+app.config.update(
+    LOCAL_WEB_OWNER_SESSION_ENABLED=(
+        os.getenv("PJ_LOCAL_WEB_OWNER_SESSION_ENABLED") == "1"
+    ),
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_NAME="pj_local_web_session",
+    SESSION_COOKIE_SAMESITE="Strict",
+)
 CORS(app)  # allow local browser origins when running on localhost
 
 
@@ -110,7 +125,38 @@ def _error_response(code, message, status, req_id, detail=None):
     )
 
 
+def _is_loopback_request():
+    try:
+        return ipaddress.ip_address(request.remote_addr or "").is_loopback
+    except ValueError:
+        return False
+
+
+def _same_origin_browser_request():
+    expected_origin = request.host_url.rstrip("/")
+    origin = (request.headers.get("Origin") or "").rstrip("/")
+    if origin:
+        return hmac.compare_digest(origin, expected_origin)
+    referer = request.headers.get("Referer") or ""
+    return referer == expected_origin or referer.startswith(
+        f"{expected_origin}/"
+    )
+
+
+def _local_web_session_authorized():
+    return (
+        app.config["LOCAL_WEB_OWNER_SESSION_ENABLED"]
+        and _is_loopback_request()
+        and session.get("local_owner") is True
+        and _same_origin_browser_request()
+    )
+
+
 def _check_bridge_auth(req_id, *, required=False):
+    # `required` is accepted for call-site compatibility; the local loopback
+    # owner session bypass below applies uniformly regardless of the flag.
+    if _local_web_session_authorized():
+        return None
     expected = (os.getenv("PJ_TOOL_BRIDGE_TOKEN") or "").strip()
     if not expected:
         return _error_response(
@@ -395,7 +441,21 @@ def _sse(event):
 @app.route("/", methods=["GET"])
 def web_client():
     """Serve the PJ web client."""
-    return send_from_directory(BASE_DIR, "webrtc_client.html")
+    if (
+        not app.config["LOCAL_WEB_OWNER_SESSION_ENABLED"]
+        or not _is_loopback_request()
+    ):
+        return _error_response(
+            "local_web_only",
+            "The built-in web client is available only from the local host.",
+            403,
+            _request_id(),
+        )
+    session.clear()
+    session["local_owner"] = True
+    response = send_from_directory(BASE_DIR, "webrtc_client.html")
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.route("/health", methods=["GET"])
@@ -423,6 +483,7 @@ def health():
                 "/responses/sessions/<id>/turns",
                 "/responses/sessions/<id>/realtime-messages",
                 "/responses/sessions/<id>/approvals/<id>",
+                "/responses/artifacts/<artifact-id>",
                 "/webhook",
                 "/health",
             ],
@@ -467,7 +528,7 @@ def tool_schemas():
 @app.route("/responses/capabilities", methods=["GET"])
 def responses_capabilities():
     req_id = _request_id()
-    auth_error = _check_bridge_auth(req_id, required=True)
+    auth_error = _check_bridge_auth(req_id)
     if auth_error:
         return auth_error
     return _json_response(
@@ -528,7 +589,7 @@ def prompt_perfect():
 @app.route("/responses/sessions", methods=["POST"])
 def create_responses_session():
     req_id = _request_id()
-    auth_error = _check_bridge_auth(req_id, required=True)
+    auth_error = _check_bridge_auth(req_id)
     if auth_error:
         return auth_error
     payload, error = _validated_json(
@@ -560,7 +621,7 @@ def create_responses_session():
 @app.route("/responses/sessions", methods=["GET"])
 def list_responses_sessions():
     req_id = _request_id()
-    auth_error = _check_bridge_auth(req_id, required=True)
+    auth_error = _check_bridge_auth(req_id)
     if auth_error:
         return auth_error
     limit, error = _validated_limit(req_id)
@@ -576,7 +637,7 @@ def list_responses_sessions():
 @app.route("/responses/sessions/search", methods=["GET"])
 def search_responses_sessions():
     req_id = _request_id()
-    auth_error = _check_bridge_auth(req_id, required=True)
+    auth_error = _check_bridge_auth(req_id)
     if auth_error:
         return auth_error
     extras = sorted(set(request.args) - {"q", "limit"})
@@ -603,7 +664,7 @@ def search_responses_sessions():
 @app.route("/responses/sessions/<session_id>/resume", methods=["POST"])
 def resume_responses_session(session_id):
     req_id = _request_id()
-    auth_error = _check_bridge_auth(req_id, required=True)
+    auth_error = _check_bridge_auth(req_id)
     if auth_error:
         return auth_error
     payload, error = _validated_json(req_id, allowed=set())
@@ -792,7 +853,7 @@ def download_responses_artifact(artifact_id):
 @app.route("/responses/sessions/<session_id>/turns", methods=["POST"])
 def stream_responses_turn(session_id):
     req_id = _request_id()
-    auth_error = _check_bridge_auth(req_id, required=True)
+    auth_error = _check_bridge_auth(req_id)
     if auth_error:
         return auth_error
     session, error = _validated_session(session_id, req_id)
@@ -1046,6 +1107,17 @@ def _stream_session_response(
                     })
                 yield _sse(public_event)
                 return
+            if public_event["type"] == "artifact.ready":
+                artifact = docops.resolve_export_artifact(
+                    public_event.get("artifact_id", "")
+                )
+                if artifact.get("status") != "ready":
+                    raise RuntimeError("Document artifact failed integrity validation")
+                if not chatlog.link_session_artifact(
+                    session["id"], artifact["artifact_id"]
+                ):
+                    raise RuntimeError("Document artifact could not be linked to chat")
+                public_event = {"type": "artifact.ready", **artifact}
             if public_event["type"] == "completion":
                 stored = chatlog.finish_session_turn(
                     session,
@@ -1113,7 +1185,7 @@ def _stream_session_response(
 )
 def resolve_responses_approval(session_id, approval_id):
     req_id = _request_id()
-    auth_error = _check_bridge_auth(req_id, required=True)
+    auth_error = _check_bridge_auth(req_id)
     if auth_error:
         return auth_error
     session, error = _validated_session(session_id, req_id)
@@ -1622,7 +1694,9 @@ def execute_tool():
                 500,
                 req_id,
             )
-    return _json_response(result, status=200, req_id=req_id)
+    return _json_response(
+        redact_server_paths(result), status=200, req_id=req_id
+    )
 
 
 @app.route("/webhook", methods=["POST"])
@@ -1680,4 +1754,11 @@ def sip_webhook():
 if __name__ == "__main__":
     if "OPENAI_API_KEY" not in os.environ:
         raise SystemExit("OPENAI_API_KEY not set — source ~/.env first")
-    app.run(host="0.0.0.0", port=3001)
+    bind_host = os.getenv("PJ_REALTIME_BIND_HOST", "127.0.0.1")
+    try:
+        app.config["LOCAL_WEB_OWNER_SESSION_ENABLED"] = (
+            ipaddress.ip_address(bind_host).is_loopback
+        )
+    except ValueError:
+        app.config["LOCAL_WEB_OWNER_SESSION_ENABLED"] = False
+    app.run(host=bind_host, port=3001)

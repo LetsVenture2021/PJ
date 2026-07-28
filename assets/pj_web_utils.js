@@ -16,7 +16,7 @@ export function shorten(value, max = 300) {
 
 export function parseErrorBody(rawText) {
   if (!rawText) return "";
-  if (/^\s*(?:<!doctype html|<html\b)/i.test(rawText)) {
+  if (/(?:<!doctype html|<html\b)/i.test(rawText)) {
     const title = rawText.match(/<title[^>]*>([^<]+)<\/title>/i)?.[1]
       ?.replace(/\s+/g, " ")
       .trim();

@@ -18,10 +18,11 @@ adapted from production document-pipeline practice:
                draft_document(finalize=True) produces a sealed FINAL in
                one pass when content is complete (same marker gate).
   PUBLISH    — export_document renders an audience-ready deliverable
-               (styled HTML or DOCX/RTF via textutil) with clean
-               typography and no internal metadata banner. Non-final
-               versions are watermarked DRAFT; finals render clean with
-               a discreet integrity footer.
+               (governed Markdown source, styled HTML/PDF, DOCX/RTF,
+               native PowerPoint, or Excel) with clean typography and no
+               internal metadata banner. Non-final versions are
+               watermarked DRAFT; finals render clean with discreet
+               integrity metadata.
   AUDIT      — registry + full version history in SQLite; files are
                never edited in place — revisions create new versions
                that supersede the old.
@@ -59,6 +60,8 @@ DOCS_DIR = _ROOT / "documents"
 DOCS_DIR.mkdir(exist_ok=True)
 EXPORTS_DIR = DOCS_DIR / "exports"
 EXPORTS_DIR.mkdir(exist_ok=True)
+ARTIFACTS_DIR = EXPORTS_DIR / ".artifacts"
+ARTIFACTS_DIR.mkdir(exist_ok=True)
 
 # Markers that block finalization (unresolved facts / legal checks).
 BLOCKING_MARKERS = ["[TBD", "[VERIFY CURRENT]", "{{", "TODO:"]
@@ -1763,6 +1766,132 @@ def _write_pdf_export(
     _atomic_binary_export(out_path, render)
 
 
+def _slide_chunks(value: str, limit: int = 1100) -> list[str]:
+    paragraphs = [part.strip() for part in value.splitlines() if part.strip()]
+    chunks = []
+    current = []
+    current_size = 0
+    for paragraph in paragraphs:
+        pieces = [
+            paragraph[index:index + limit]
+            for index in range(0, len(paragraph), limit)
+        ] or [""]
+        for piece in pieces:
+            if current and current_size + len(piece) + 1 > limit:
+                chunks.append("\n".join(current))
+                current = []
+                current_size = 0
+            current.append(piece)
+            current_size += len(piece) + 1
+    if current:
+        chunks.append("\n".join(current))
+    return chunks or [""]
+
+
+def _write_powerpoint_export(
+    out_path: Path, title: str, sections, metadata: dict
+) -> None:
+    from pptx import Presentation
+    from pptx.dml.color import RGBColor
+    from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
+    from pptx.util import Inches, Pt
+
+    primary = RGBColor.from_string(_BRAND["primary"].lstrip("#"))
+    accent = RGBColor.from_string(_BRAND["accent"].lstrip("#"))
+    ink = RGBColor.from_string(_BRAND["ink"].lstrip("#"))
+    muted = RGBColor.from_string(_BRAND["muted"].lstrip("#"))
+
+    def add_textbox(
+        slide, left, top, width, height, text, size, color,
+        *, bold=False, alignment=PP_ALIGN.LEFT
+    ):
+        shape = slide.shapes.add_textbox(left, top, width, height)
+        frame = shape.text_frame
+        frame.clear()
+        frame.word_wrap = True
+        frame.vertical_anchor = MSO_ANCHOR.MIDDLE
+        paragraph = frame.paragraphs[0]
+        paragraph.text = text
+        paragraph.alignment = alignment
+        paragraph.font.name = "Aptos"
+        paragraph.font.size = Pt(size)
+        paragraph.font.bold = bold
+        paragraph.font.color.rgb = color
+        return shape
+
+    def decorate(slide):
+        line = slide.shapes.add_shape(
+            1, Inches(0.55), Inches(0.38), Inches(12.2), Inches(0.04)
+        )
+        line.fill.solid()
+        line.fill.fore_color.rgb = primary
+        line.line.fill.background()
+        add_textbox(
+            slide, Inches(0.55), Inches(0.05), Inches(1.5), Inches(0.3),
+            "AIMHI", 9, ink, bold=True
+        )
+        add_textbox(
+            slide, Inches(9.5), Inches(0.05), Inches(3.25), Inches(0.3),
+            "PRYCELESS VENTURES", 7, muted, alignment=PP_ALIGN.RIGHT
+        )
+        add_textbox(
+            slide, Inches(0.55), Inches(7.05), Inches(7), Inches(0.25),
+            f"{metadata['doc_id']} v{metadata['version']} · "
+            f"integrity {metadata['sha256'][:12]}",
+            7, muted
+        )
+        if not metadata["is_final"]:
+            watermark = add_textbox(
+                slide, Inches(3.7), Inches(2.8), Inches(6), Inches(1),
+                "DRAFT", 48, RGBColor(225, 190, 205), bold=True,
+                alignment=PP_ALIGN.CENTER
+            )
+            watermark.rotation = -25
+
+    def render(path):
+        presentation = Presentation()
+        presentation.slide_width = Inches(13.333)
+        presentation.slide_height = Inches(7.5)
+        blank_layout = presentation.slide_layouts[6]
+
+        title_slide = presentation.slides.add_slide(blank_layout)
+        decorate(title_slide)
+        add_textbox(
+            title_slide, Inches(1.05), Inches(1.8), Inches(11.2), Inches(1.8),
+            title, 30, ink, bold=True, alignment=PP_ALIGN.CENTER
+        )
+        add_textbox(
+            title_slide, Inches(2.8), Inches(3.7), Inches(7.7), Inches(0.6),
+            f"{metadata['date']} · "
+            f"{'FINAL' if metadata['is_final'] else 'DRAFT'}",
+            13, muted, alignment=PP_ALIGN.CENTER
+        )
+        accent_line = title_slide.shapes.add_shape(
+            1, Inches(5.4), Inches(4.55), Inches(2.5), Inches(0.05)
+        )
+        accent_line.fill.solid()
+        accent_line.fill.fore_color.rgb = accent
+        accent_line.line.fill.background()
+
+        for heading, markdown_body in sections:
+            chunks = _slide_chunks(_plain_markdown(markdown_body))
+            for index, chunk in enumerate(chunks):
+                slide = presentation.slides.add_slide(blank_layout)
+                decorate(slide)
+                slide_heading = heading if index == 0 else f"{heading} (continued)"
+                add_textbox(
+                    slide, Inches(0.75), Inches(0.72), Inches(11.8), Inches(0.7),
+                    slide_heading, 24, primary, bold=True
+                )
+                add_textbox(
+                    slide, Inches(0.9), Inches(1.55), Inches(11.5), Inches(5.15),
+                    chunk, 18 if len(chunk) < 750 else 15, ink
+                )
+        presentation.save(str(path))
+
+    _atomic_binary_export(out_path, render)
+
+
 def _write_excel_export(
         out_path: Path,
         title: str,
@@ -2123,12 +2252,14 @@ def _attach_source_artifact(result: dict) -> dict:
 
 def resolve_export_artifact(artifact_id: str, *, include_path: bool = False) -> dict:
     """Resolve and integrity-check a registered artifact by opaque ID."""
+    if not re.fullmatch(r"ART-[a-f0-9]{32}", str(artifact_id or "")):
+        return {"error": "artifact not found", "status": "not_found"}
     with _db() as conn:
         row = conn.execute(
             "SELECT artifact_id, doc_id, version, format, filename, path, "
             "mime_type, byte_size, sha256, status, audience_ready, created_at "
             "FROM docops_artifacts WHERE artifact_id=?",
-            (str(artifact_id or "").strip(),),
+            (artifact_id,),
         ).fetchone()
     if not row:
         return {"error": "artifact not found", "status": "not_found"}
@@ -2333,8 +2464,9 @@ def export_document(doc_id: str, format: str = "html",
             return {
                 "status": "rejected",
                 "error": (
-                    "native PPTX requires a governed presentation specification; "
-                    "use draft_presentation or revise_presentation"
+                    "native PPTX requires a governed presentation "
+                    "specification; use draft_presentation or "
+                    "revise_presentation"
                 ),
             }
         if _hash(spec_row[1]) != spec_row[2]:
