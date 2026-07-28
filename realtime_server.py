@@ -21,6 +21,7 @@ from flask import (
     Flask,
     request,
     Response,
+    send_file,
     send_from_directory,
     session,
     stream_with_context,
@@ -31,12 +32,14 @@ from jsonschema.exceptions import SchemaError
 from openai import OpenAI
 
 import chatlog
+import docops
 import skills
 from realtime_config import realtime_session_config, realtime_tool_schemas
 from responses_runtime import (
     capability_manifest,
     dispatch_realtime_function,
     load_config,
+    redact_server_paths,
     ResponsesOrchestrator,
 )
 
@@ -46,6 +49,7 @@ MAX_ERROR_DETAIL_LENGTH = 320
 MAX_SESSION_TITLE_LENGTH = 120
 MAX_MESSAGE_LENGTH = 20000
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+ARTIFACT_ID_PATTERN = re.compile(r"^ART-[a-f0-9]{32}$")
 SCHEMA_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 OPENAI_CLIENT_FACTORY = OpenAI
 
@@ -71,7 +75,9 @@ def _request_id():
 def _trim_detail(detail):
     if detail is None:
         return None
-    compact = " ".join(str(detail).split()).strip()
+    compact = " ".join(
+        str(redact_server_paths(str(detail))).split()
+    ).strip()
     if not compact:
         return None
     if len(compact) <= MAX_ERROR_DETAIL_LENGTH:
@@ -337,6 +343,7 @@ def health():
                 "/responses/sessions/<id>/resume",
                 "/responses/sessions/<id>/turns",
                 "/responses/sessions/<id>/approvals/<id>",
+                "/responses/artifacts/<artifact-id>",
                 "/webhook",
                 "/health",
             ],
@@ -453,10 +460,14 @@ def resume_responses_session(session_id):
     session, error = _validated_session(session_id, req_id)
     if error:
         return error
-    return _json_response(
-        {"ok": True, "session": chatlog.session_detail(session["id"])},
-        req_id=req_id,
-    )
+    detail = chatlog.session_detail(session["id"])
+    artifacts = []
+    for artifact_id in detail.pop("artifact_ids", []):
+        artifact = docops.resolve_export_artifact(artifact_id)
+        if artifact.get("status") == "ready":
+            artifacts.append(artifact)
+    detail["artifacts"] = artifacts
+    return _json_response({"ok": True, "session": detail}, req_id=req_id)
 
 
 @app.route("/responses/sessions/<session_id>/turns", methods=["POST"])
@@ -592,6 +603,17 @@ def _stream_session_response(
                 })
                 yield _sse(public_event)
                 return
+            if public_event["type"] == "artifact.ready":
+                artifact = docops.resolve_export_artifact(
+                    public_event.get("artifact_id", "")
+                )
+                if artifact.get("status") != "ready":
+                    raise RuntimeError("Document artifact failed integrity validation")
+                if not chatlog.link_session_artifact(
+                    session["id"], artifact["artifact_id"]
+                ):
+                    raise RuntimeError("Document artifact could not be linked to chat")
+                public_event = {"type": "artifact.ready", **artifact}
             if public_event["type"] == "completion":
                 stored = chatlog.finish_session_turn(
                     session,
@@ -704,16 +726,35 @@ def resolve_responses_approval(session_id, approval_id):
             )
         else:
             result = {"error": "The owner rejected this tool call."}
+        artifact = (
+            docops.resolve_export_artifact(
+                (result.get("artifact") or {}).get("artifact_id", "")
+            )
+            if isinstance(result, dict)
+            else {"status": "not_found"}
+        )
+        if artifact.get("status") == "ready":
+            if not chatlog.link_session_artifact(
+                session["id"], artifact["artifact_id"]
+            ):
+                chatlog.release_session_turn(session["id"], turn_token)
+                return _error_response(
+                    "artifact_link_failed",
+                    "Document artifact could not be linked to chat.",
+                    500,
+                    req_id,
+                )
+            prelude.append({"type": "artifact.ready", **artifact})
         prelude.append({
             "type": "tool.result",
             "call_id": pending["provider_item_id"],
             "name": pending["name"],
-            "result": result,
+            "result": redact_server_paths(result),
         })
         continuation = [{
             "type": "function_call_output",
             "call_id": pending["provider_item_id"],
-            "output": json.dumps(result, default=str),
+            "output": json.dumps(redact_server_paths(result), default=str),
         }]
 
     response = Response(
@@ -733,6 +774,46 @@ def resolve_responses_approval(session_id, approval_id):
     response.headers["X-Accel-Buffering"] = "no"
     response.headers["x-request-id"] = req_id
     response.headers["x-pj-contract-version"] = CONTRACT_VERSION
+    return response
+
+
+@app.route("/responses/artifacts/<artifact_id>", methods=["GET"])
+def download_responses_artifact(artifact_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id)
+    if auth_error:
+        return auth_error
+    if request.args or not ARTIFACT_ID_PATTERN.fullmatch(artifact_id):
+        return _error_response(
+            "artifact_not_found", "Artifact was not found.", 404, req_id
+        )
+    artifact, snapshot = docops.open_export_artifact_snapshot(artifact_id)
+    if artifact.get("status") == "not_found":
+        return _error_response(
+            "artifact_not_found", "Artifact was not found.", 404, req_id
+        )
+    if artifact.get("status") != "ready":
+        return _error_response(
+            "artifact_unavailable",
+            "Artifact failed its integrity check.",
+            409,
+            req_id,
+        )
+    response = send_file(
+        snapshot,
+        mimetype=artifact["mime_type"].split(";", 1)[0],
+        as_attachment=True,
+        download_name=artifact["filename"],
+        conditional=False,
+        etag=False,
+        max_age=0,
+    )
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["ETag"] = f'"sha256-{artifact["sha256"]}"'
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["x-request-id"] = req_id
+    response.headers["x-pj-contract-version"] = CONTRACT_VERSION
+    response.call_on_close(snapshot.close)
     return response
 
 
@@ -983,7 +1064,9 @@ def execute_tool():
             detail=exc,
         )
 
-    return _json_response(result, status=200, req_id=req_id)
+    return _json_response(
+        redact_server_paths(result), status=200, req_id=req_id
+    )
 
 
 @app.route("/webhook", methods=["POST"])

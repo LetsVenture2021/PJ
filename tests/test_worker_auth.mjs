@@ -19,6 +19,7 @@ const {
   isResponsesRoute,
   normalizeFunctionTools,
   responseHeaders,
+  safeAttachmentDisposition,
   toolBridgeTimeoutMs,
   validateAccessIdentity,
 } = workerModule;
@@ -128,6 +129,14 @@ test("Full Power routes and bridge URL derivation are narrowly scoped", () => {
   assert.equal(isResponsesRoute("POST", "/responses/sessions/example_123/resume"), true);
   assert.equal(isResponsesRoute("POST", "/responses/sessions/example_123/turns"), true);
   assert.equal(
+    isResponsesRoute("GET", `/responses/artifacts/ART-${"a".repeat(32)}`),
+    true,
+  );
+  assert.equal(
+    isResponsesRoute("GET", "/responses/artifacts/../../private"),
+    false,
+  );
+  assert.equal(
     isResponsesRoute(
       "POST",
       "/responses/sessions/example_123/approvals/approval_123",
@@ -177,6 +186,50 @@ test("Full Power proxy streams SSE with only allowlisted bridge headers", async 
   assert.equal(captured.options.headers.accept, "text/event-stream");
   assert.equal(response.headers.get("content-type"), "text/event-stream");
   assert.match(await response.text(), /"type":"completion"/);
+});
+
+test("Full Power proxy preserves verified binary downloads with safe filenames", async () => {
+  const artifactId = `ART-${"a".repeat(32)}`;
+  let captured = null;
+  const response = await handleResponsesProxy(
+    new Request(`https://pj-assistant.ai/responses/artifacts/${artifactId}`),
+    {
+      PJ_TOOL_BRIDGE_URL: "https://tools.pj-assistant.ai/execute-tool",
+      PJ_TOOL_BRIDGE_TOKEN: "bridge-secret",
+    },
+    "https://pj-assistant.ai",
+    "request-artifact",
+    async (url, options) => {
+      captured = { url, options };
+      return new Response(new Uint8Array([1, 2, 3]), {
+        headers: {
+          "content-type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          "content-disposition": 'attachment; filename="../../private/report.docx"',
+          etag: '"sha256-abc123"',
+          "content-length": "999",
+        },
+      });
+    },
+  );
+
+  assert.equal(
+    captured.url,
+    `https://tools.pj-assistant.ai/responses/artifacts/${artifactId}`,
+  );
+  assert.equal(captured.options.headers.accept, "application/octet-stream");
+  assert.equal(response.headers.get("content-disposition"), 'attachment; filename="report.docx"');
+  assert.equal(response.headers.get("etag"), '"sha256-abc123"');
+  assert.equal(response.headers.get("content-length"), null);
+  assert.deepEqual(new Uint8Array(await response.arrayBuffer()), new Uint8Array([1, 2, 3]));
+});
+
+test("attachment filenames are rebuilt from safe basenames", () => {
+  assert.equal(
+    safeAttachmentDisposition('attachment; filename="C:\\private\\report.docx"'),
+    'attachment; filename="report.docx"',
+  );
+  assert.equal(safeAttachmentDisposition("inline; filename=report.docx"), null);
+  assert.equal(safeAttachmentDisposition('attachment; filename="bad\nname.docx"'), null);
 });
 
 test("Access configuration requires team domain, audience, and owner allowlist", () => {
@@ -424,5 +477,7 @@ test("browser module initializes with Full Power helpers in shared scope", async
   assert.equal(typeof listeners.get("startBtn:click"), "function");
   assert.equal(typeof listeners.get("fullPowerModeBtn:click"), "function");
   assert.equal(typeof listeners.get("refreshSessionsBtn:click"), "function");
+  assert.match(moduleSource, /event\.type === "artifact\.ready"/);
+  assert.match(moduleSource, /className = "artifact-download"/);
   await new Promise((resolve) => setImmediate(resolve));
 });

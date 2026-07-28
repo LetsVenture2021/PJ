@@ -36,7 +36,11 @@ from aiortc.mediastreams import AudioStreamTrack, MediaStreamError
 
 import skills
 from realtime_config import realtime_session_config
-from responses_runtime import dispatch_realtime_function, terminal_approval_handler
+from responses_runtime import (
+    dispatch_realtime_function,
+    redact_server_paths,
+    terminal_approval_handler,
+)
 
 REALTIME_CALLS_URL = "https://api.openai.com/v1/realtime/calls"
 SAMPLE_RATE = 48_000  # WebRTC/Opus native rate
@@ -334,8 +338,9 @@ def _run_tool_call(
             result = dispatch_realtime_function(name, args)
     except Exception as e:
         result = {"error": str(e)}
-    print(f"   ✅ {json.dumps(result)}", flush=True)
-    return json.dumps(result)
+    public_result = redact_server_paths(result)
+    print(f"   ✅ {json.dumps(public_result)}", flush=True)
+    return json.dumps(public_result)
 
 
 class EventHandler:

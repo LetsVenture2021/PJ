@@ -418,6 +418,86 @@ def _native_tool_result(item):
     return result
 
 
+_SERVER_PATH_FIELDS = {
+    "html_fallback",
+    "local_path",
+    "output_path",
+    "path",
+    "source_path",
+    "workspace_path",
+}
+_SERVER_PATH_PATTERN = re.compile(
+    r"""(?<![A-Za-z0-9:])
+    (?:
+        file://(?:/[^\s"'<>}\]]+)+
+        |(?:[A-Za-z]:[\\/]|\\\\)[^\s"'<>}\]]+
+        |/(?:[^/\s"'<>}\]]+/)+[^/\s"'<>}\]]+
+    )""",
+    re.X,
+)
+_URI_PATTERN = re.compile(r"\bhttps?://[^\s\"'<>}\]]+")
+_ARTIFACT_DOWNLOAD_PATTERN = re.compile(
+    r"^/responses/artifacts/ART-[a-f0-9]{32}$"
+)
+
+
+def redact_server_paths(value):
+    """Remove server filesystem paths from events sent to browser clients."""
+    if isinstance(value, dict):
+        cleaned = {}
+        for key, item in value.items():
+            normalized_key = str(key).casefold()
+            if (
+                normalized_key in _SERVER_PATH_FIELDS
+                or normalized_key.endswith(("_path", "_paths"))
+            ):
+                if isinstance(item, str) and not (
+                    item.startswith("/")
+                    or re.match(r"^[A-Za-z]:[\\/]", item)
+                    or item.startswith("\\\\")
+                    or item.startswith("file://")
+                ):
+                    cleaned[key] = redact_server_paths(item)
+                continue
+            cleaned[key] = redact_server_paths(item)
+        return cleaned
+    if isinstance(value, (list, tuple)):
+        return [redact_server_paths(item) for item in value]
+    if isinstance(value, str):
+        if _ARTIFACT_DOWNLOAD_PATTERN.fullmatch(value):
+            return value
+        uris = {}
+
+        def preserve_uri(match):
+            placeholder = f"\x00PJ_URI_{len(uris)}\x00"
+            uris[placeholder] = match.group(0)
+            return placeholder
+
+        redacted = _SERVER_PATH_PATTERN.sub(
+            "[server path redacted]",
+            _URI_PATTERN.sub(preserve_uri, value),
+        )
+        for placeholder, uri in uris.items():
+            redacted = redacted.replace(placeholder, uri)
+        return redacted
+    return value
+
+
+def _verified_artifact_from_result(result):
+    if not isinstance(result, dict):
+        return None
+    candidate = result.get("artifact")
+    if not isinstance(candidate, dict) or candidate.get("status") != "ready":
+        return None
+    artifact_id = candidate.get("artifact_id")
+    if not isinstance(artifact_id, str):
+        return None
+    import docops
+
+    verified = docops.resolve_export_artifact(artifact_id)
+    return verified if verified.get("status") == "ready" else None
+
+
 def _stream_error(event):
     error = _get(event, "error")
     return (
@@ -465,6 +545,7 @@ class ResponsesOrchestrator:
         complete_text = []
         all_citations = []
         all_sources = []
+        ready_artifacts = {}
 
         while True:
             kwargs = self._request_kwargs(
@@ -605,6 +686,7 @@ class ResponsesOrchestrator:
                     "text": output_text,
                     "citations": all_citations,
                     "sources": all_sources,
+                    "artifacts": list(ready_artifacts.values()),
                     "_response_id": response_id,
                 }
                 if text_format:
@@ -650,6 +732,11 @@ class ResponsesOrchestrator:
                     )
                 else:
                     result = {"error": "The owner rejected this tool call."}
+                public_result = redact_server_paths(result)
+                artifact = _verified_artifact_from_result(result)
+                if artifact and artifact["artifact_id"] not in ready_artifacts:
+                    ready_artifacts[artifact["artifact_id"]] = artifact
+                    yield {"type": "artifact.ready", **artifact}
                 yield {
                     "type": "approval.resolved",
                     "approval_kind": "local_function",
@@ -660,7 +747,7 @@ class ResponsesOrchestrator:
                     "type": "tool.result",
                     "call_id": call["call_id"],
                     "name": call["name"],
-                    "result": result,
+                    "result": public_result,
                 }
                 round_number += 1
                 if round_number > MAX_LOCAL_TOOL_ROUNDS:
@@ -668,7 +755,7 @@ class ResponsesOrchestrator:
                 input_value = [{
                     "type": "function_call_output",
                     "call_id": call["call_id"],
-                    "output": json.dumps(result, default=str),
+                    "output": json.dumps(public_result, default=str),
                 }]
                 previous_response_id = response_id
                 first = False
@@ -687,16 +774,21 @@ class ResponsesOrchestrator:
                     "tool_type": "function_call",
                 }
                 result = self.dispatcher(call["name"], call["arguments"])
+                public_result = redact_server_paths(result)
+                artifact = _verified_artifact_from_result(result)
+                if artifact and artifact["artifact_id"] not in ready_artifacts:
+                    ready_artifacts[artifact["artifact_id"]] = artifact
+                    yield {"type": "artifact.ready", **artifact}
                 yield {
                     "type": "tool.result",
                     "call_id": call["call_id"],
                     "name": call["name"],
-                    "result": result,
+                    "result": public_result,
                 }
                 tool_outputs.append({
                     "type": "function_call_output",
                     "call_id": call["call_id"],
-                    "output": json.dumps(result, default=str),
+                    "output": json.dumps(public_result, default=str),
                 })
             input_value = tool_outputs
             previous_response_id = response_id

@@ -80,6 +80,16 @@ def _db():
             "CREATE INDEX IF NOT EXISTS idx_chat_pending_approvals_session "
             "ON chat_pending_approvals(session_id, status, expires_at)"
         )
+        conn.execute("""CREATE TABLE IF NOT EXISTS chat_session_artifacts (
+            session_id TEXT NOT NULL,
+            artifact_id TEXT NOT NULL,
+            linked_at TEXT NOT NULL,
+            PRIMARY KEY (session_id, artifact_id)
+        )""")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_chat_session_artifacts_session "
+            "ON chat_session_artifacts(session_id, linked_at)"
+        )
         yield conn
         conn.commit()
     finally:
@@ -193,7 +203,35 @@ def session_detail(sid: str, message_limit: int = 50) -> dict:
     public.pop("last_response_id", None)
     public["history"] = history(sid, message_limit)
     public["pending_approvals"] = list_pending_approvals(sid)
+    public["artifact_ids"] = list_session_artifact_ids(sid)
     return public
+
+
+def link_session_artifact(sid: str, artifact_id: str) -> bool:
+    """Persist an artifact relationship only for an existing chat session."""
+    with _db() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM chat_sessions WHERE id=?", (sid,)
+        ).fetchone()
+        if not exists:
+            return False
+        conn.execute(
+            "INSERT INTO chat_session_artifacts "
+            "(session_id, artifact_id, linked_at) VALUES (?,?,?) "
+            "ON CONFLICT(session_id, artifact_id) DO NOTHING",
+            (sid, artifact_id, _now()),
+        )
+    return True
+
+
+def list_session_artifact_ids(sid: str) -> list[str]:
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT artifact_id FROM chat_session_artifacts "
+            "WHERE session_id=? ORDER BY linked_at",
+            (sid,),
+        ).fetchall()
+    return [row[0] for row in rows]
 
 
 def _expire_pending_approvals(conn, sid: str = None):

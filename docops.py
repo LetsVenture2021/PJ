@@ -18,10 +18,10 @@ adapted from production document-pipeline practice:
                draft_document(finalize=True) produces a sealed FINAL in
                one pass when content is complete (same marker gate).
   PUBLISH    — export_document renders an audience-ready deliverable
-               (styled HTML or DOCX/RTF via textutil) with clean
-               typography and no internal metadata banner. Non-final
-               versions are watermarked DRAFT; finals render clean with
-               a discreet integrity footer.
+               (styled HTML/PDF, DOCX/RTF, PowerPoint, or Excel) with
+               clean typography and no internal metadata banner.
+               Non-final versions are marked DRAFT; finals render clean
+               with discreet integrity metadata.
   AUDIT      — registry + full version history in SQLite; files are
                never edited in place — revisions create new versions
                that supersede the old.
@@ -32,13 +32,20 @@ artifacts, the human distributes them.
 import hashlib
 import html as _html
 import json
+import mimetypes
+import os
 import re
+import shutil
 import sqlite3
+import stat
 import subprocess
+import tempfile
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+import fcntl
 
 try:
     import markdown as _markdown
@@ -51,6 +58,8 @@ DOCS_DIR = _ROOT / "documents"
 DOCS_DIR.mkdir(exist_ok=True)
 EXPORTS_DIR = DOCS_DIR / "exports"
 EXPORTS_DIR.mkdir(exist_ok=True)
+ARTIFACTS_DIR = EXPORTS_DIR / ".artifacts"
+ARTIFACTS_DIR.mkdir(exist_ok=True)
 
 # Markers that block finalization (unresolved facts / legal checks).
 BLOCKING_MARKERS = ["[TBD", "[VERIFY CURRENT]", "{{", "TODO:"]
@@ -95,6 +104,34 @@ def _normalize_alias_key(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", (value or "").lower()).strip("-")
 
 
+def _hash_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _atomic_copy(source: Path, destination: Path):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as handle:
+        temporary = Path(handle.name)
+    try:
+        with Path(source).open("rb") as source_handle, temporary.open("wb") as target:
+            shutil.copyfileobj(source_handle, target, length=1024 * 1024)
+            target.flush()
+            os.fsync(target.fileno())
+        temporary.chmod(0o600)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 @contextmanager
 def _db():
     conn = sqlite3.connect(_DB_PATH)
@@ -132,6 +169,24 @@ def _db():
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP
         )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_artifacts (
+            artifact_id TEXT PRIMARY KEY,
+            doc_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            format TEXT NOT NULL,
+            filename TEXT NOT NULL,
+            path TEXT NOT NULL,
+            mime_type TEXT NOT NULL,
+            byte_size INTEGER NOT NULL,
+            sha256 TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ready',
+            audience_ready INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_docops_artifacts_document "
+            "ON docops_artifacts(doc_id, version, format, created_at)"
+        )
         # Seed starter templates once.
         have = {r[0] for r in conn.execute(
             "SELECT name FROM docops_templates").fetchall()}
@@ -888,7 +943,7 @@ def draft_document(template: str, title: str, sections_json: str,
     elif finalize:
         result["next"] = ("finalize was requested but unresolved markers "
                           "remain; resolve via revise_document first")
-    return result
+    return _attach_source_artifact(result)
 
 
 def revise_document(doc_id: str, sections_json: str,
@@ -928,9 +983,10 @@ def revise_document(doc_id: str, sections_json: str,
         conn.execute(
             "UPDATE docops_documents SET status='superseded' "
             "WHERE doc_id=? AND version=?", (doc_id, version))
-        return _write_version(conn, doc_id, version + 1, title, template,
-                              tpl_version, current, tags,
-                              change_note or "revision")
+        result = _write_version(conn, doc_id, version + 1, title, template,
+                                tpl_version, current, tags,
+                                change_note or "revision")
+    return _attach_source_artifact(result)
 
 
 def finalize_document(doc_id: str) -> dict:
@@ -939,6 +995,7 @@ def finalize_document(doc_id: str) -> dict:
     Blocks if unresolved [TBD]/[VERIFY CURRENT]/{{placeholder}}/TODO
     markers remain, or if the file was modified outside DocOps.
     """
+    already_final = None
     with _db() as conn:
         row = conn.execute(
             "SELECT version, path, sha256, status FROM docops_documents "
@@ -948,30 +1005,45 @@ def finalize_document(doc_id: str) -> dict:
             return {"error": f"unknown doc_id '{doc_id}'"}
         version, path, sha, status = row
         if status == "final":
-            return {"doc_id": doc_id, "version": version,
-                    "status": "already_final"}
-        p = Path(path)
-        if not p.exists():
-            return {"error": f"file missing: {path}"}
-        content = p.read_text()
-        if _hash(content) != sha:
-            return {"status": "blocked",
-                    "reason": "file was modified outside DocOps; "
-                              "use revise_document to issue a new version"}
-        markers = sorted({m for m in BLOCKING_MARKERS if m in content})
-        if markers:
-            return {"status": "blocked", "unresolved_markers": markers,
-                    "reason": "resolve markers via revise_document first"}
-        content = content.replace("**Status:** DRAFT",
-                                  "**Status:** FINAL", 1)
-        p.write_text(content)
-        new_sha = _hash(content)
-        conn.execute(
-            "UPDATE docops_documents SET status='final', sha256=?, "
-            "finalized_at=? WHERE doc_id=? AND version=?",
-            (new_sha, _now(), doc_id, version))
-    return {"doc_id": doc_id, "version": version, "status": "final",
-            "sha256": new_sha, "path": path}
+            already_final = {
+                "doc_id": doc_id,
+                "version": version,
+                "status": "already_final",
+                "sha256": sha,
+                "path": path,
+            }
+        if already_final is not None:
+            pass
+        else:
+            p = Path(path)
+            if not p.exists():
+                return {"error": f"file missing: {path}"}
+            content = p.read_text()
+            if _hash(content) != sha:
+                return {"status": "blocked",
+                        "reason": "file was modified outside DocOps; "
+                                  "use revise_document to issue a new version"}
+            markers = sorted({m for m in BLOCKING_MARKERS if m in content})
+            if markers:
+                return {"status": "blocked", "unresolved_markers": markers,
+                        "reason": "resolve markers via revise_document first"}
+            content = content.replace("**Status:** DRAFT",
+                                      "**Status:** FINAL", 1)
+            p.write_text(content)
+            new_sha = _hash(content)
+            conn.execute(
+                "UPDATE docops_documents SET status='final', sha256=?, "
+                "finalized_at=? WHERE doc_id=? AND version=?",
+                (new_sha, _now(), doc_id, version))
+    if already_final is not None:
+        return _attach_source_artifact(already_final)
+    return _attach_source_artifact({
+        "doc_id": doc_id,
+        "version": version,
+        "status": "final",
+        "sha256": new_sha,
+        "path": path,
+    })
 
 
 def list_documents(status: str = "all", query: str = "") -> dict:
@@ -1081,17 +1153,667 @@ def _brand_header() -> str:
             f'<div class="tagline">PRYCELESS VENTURES</div></header>')
 
 
+_EXPORT_MIME_TYPES = {
+    "md": "text/markdown; charset=utf-8",
+    "html": "text/html; charset=utf-8",
+    "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "rtf": "application/rtf",
+    "pptx": (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    ),
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+
+
+def _export_sections(source: str) -> list[tuple[str, str]]:
+    return [
+        (match.group(1).strip(), match.group(2).strip())
+        for match in re.finditer(
+            r"^## (.+?)\s*\n(.*?)(?=^## |\Z)", source, re.S | re.M
+        )
+    ]
+
+
+def _plain_markdown(value: str) -> str:
+    rendered = _markdown.markdown(
+        value, extensions=["tables", "fenced_code"]
+    )
+    rendered = re.sub(r"<li(?:\s[^>]*)?>", "\n- ", rendered, flags=re.I)
+    rendered = re.sub(
+        r"</(?:p|div|li|h[1-6]|tr|blockquote|pre)>",
+        "\n",
+        rendered,
+        flags=re.I,
+    )
+    rendered = re.sub(r"<br\s*/?>", "\n", rendered, flags=re.I)
+    rendered = re.sub(r"<[^>]+>", " ", rendered)
+    lines = [
+        re.sub(r"[ \t]+", " ", _html.unescape(line)).strip()
+        for line in rendered.splitlines()
+    ]
+    return "\n".join(line for line in lines if line).strip()
+
+
+def _atomic_binary_export(out_path: Path, writer) -> None:
+    with tempfile.NamedTemporaryFile(
+        dir=EXPORTS_DIR,
+        prefix=f".{out_path.stem}.",
+        suffix=f"{out_path.suffix}.tmp",
+        delete=False,
+    ) as handle:
+        temporary_output = Path(handle.name)
+    try:
+        writer(temporary_output)
+        if not temporary_output.is_file() or temporary_output.stat().st_size == 0:
+            raise OSError(f"{out_path.suffix} renderer produced no output")
+        temporary_output.chmod(0o600)
+        temporary_output.replace(out_path)
+    finally:
+        temporary_output.unlink(missing_ok=True)
+
+
+def _write_pdf_export(out_path: Path, title: str, sections, metadata: dict) -> None:
+    from reportlab.lib import colors
+    from reportlab.lib.enums import TA_CENTER
+    from reportlab.lib.pagesizes import LETTER
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import inch
+    from reportlab.pdfgen import canvas as pdf_canvas
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
+
+    primary = colors.HexColor(_BRAND["primary"])
+    ink = colors.HexColor(_BRAND["ink"])
+    muted = colors.HexColor(_BRAND["muted"])
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle(
+        "PJTitle",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=23,
+        leading=28,
+        textColor=ink,
+        alignment=TA_CENTER,
+        spaceAfter=8,
+    )
+    meta_style = ParagraphStyle(
+        "PJMeta",
+        parent=styles["Normal"],
+        fontName="Helvetica",
+        fontSize=9,
+        leading=12,
+        textColor=muted,
+        alignment=TA_CENTER,
+        spaceAfter=24,
+    )
+    heading_style = ParagraphStyle(
+        "PJHeading",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=14,
+        leading=18,
+        textColor=primary,
+        spaceBefore=13,
+        spaceAfter=7,
+    )
+    body_style = ParagraphStyle(
+        "PJBody",
+        parent=styles["BodyText"],
+        fontName="Helvetica",
+        fontSize=10.5,
+        leading=15,
+        textColor=ink,
+        spaceAfter=9,
+    )
+
+    def decorate_page(canvas, document):
+        canvas.saveState()
+        width, height = LETTER
+        canvas.setStrokeColor(primary)
+        canvas.setLineWidth(2)
+        canvas.line(0.72 * inch, height - 0.55 * inch,
+                    width - 0.72 * inch, height - 0.55 * inch)
+        canvas.setFillColor(ink)
+        canvas.setFont("Helvetica-Bold", 9)
+        canvas.drawString(0.72 * inch, height - 0.42 * inch, "AIMHI")
+        canvas.setFillColor(muted)
+        canvas.setFont("Helvetica", 7)
+        canvas.drawRightString(
+            width - 0.72 * inch, height - 0.42 * inch, "PRYCELESS VENTURES"
+        )
+        canvas.drawString(
+            0.72 * inch,
+            0.42 * inch,
+            f"{metadata['doc_id']} v{metadata['version']} · "
+            f"{'Final' if metadata['is_final'] else 'Working draft'}",
+        )
+        canvas.drawRightString(
+            width - 0.72 * inch,
+            0.42 * inch,
+            f"Page {document.page} · integrity {metadata['sha256'][:12]}",
+        )
+        if not metadata["is_final"]:
+            canvas.setFillColor(colors.Color(0.88, 0.1, 0.4, alpha=0.08))
+            canvas.setFont("Helvetica-Bold", 68)
+            canvas.translate(width / 2, height / 2)
+            canvas.rotate(28)
+            canvas.drawCentredString(0, 0, "DRAFT")
+        canvas.restoreState()
+
+    class InvariantCanvas(pdf_canvas.Canvas):
+        def __init__(self, *args, **kwargs):
+            kwargs["invariant"] = 1
+            super().__init__(*args, **kwargs)
+
+    def render(path):
+        document = SimpleDocTemplate(
+            str(path),
+            pagesize=LETTER,
+            title=title,
+            author="PJ",
+            leftMargin=0.82 * inch,
+            rightMargin=0.82 * inch,
+            topMargin=0.82 * inch,
+            bottomMargin=0.72 * inch,
+        )
+        story = [
+            Paragraph(_html.escape(title), title_style),
+            Paragraph(
+                f"{metadata['date']} · "
+                f"{'FINAL' if metadata['is_final'] else 'DRAFT'}",
+                meta_style,
+            ),
+        ]
+        for heading, markdown_body in sections:
+            story.append(Paragraph(_html.escape(heading), heading_style))
+            plain = _plain_markdown(markdown_body)
+            for paragraph in re.split(r"\n{2,}", plain):
+                if paragraph.strip():
+                    story.append(
+                        Paragraph(
+                            _html.escape(paragraph).replace("\n", "<br/>"),
+                            body_style,
+                        )
+                    )
+            story.append(Spacer(1, 3))
+        document.build(
+            story,
+            onFirstPage=decorate_page,
+            onLaterPages=decorate_page,
+            canvasmaker=InvariantCanvas,
+        )
+
+    _atomic_binary_export(out_path, render)
+
+
+def _slide_chunks(value: str, limit: int = 1100) -> list[str]:
+    paragraphs = [part.strip() for part in value.splitlines() if part.strip()]
+    chunks = []
+    current = []
+    current_size = 0
+    for paragraph in paragraphs:
+        pieces = [
+            paragraph[index:index + limit]
+            for index in range(0, len(paragraph), limit)
+        ] or [""]
+        for piece in pieces:
+            if current and current_size + len(piece) + 1 > limit:
+                chunks.append("\n".join(current))
+                current = []
+                current_size = 0
+            current.append(piece)
+            current_size += len(piece) + 1
+    if current:
+        chunks.append("\n".join(current))
+    return chunks or [""]
+
+
+def _write_powerpoint_export(
+    out_path: Path, title: str, sections, metadata: dict
+) -> None:
+    from pptx import Presentation
+    from pptx.dml.color import RGBColor
+    from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
+    from pptx.util import Inches, Pt
+
+    primary = RGBColor.from_string(_BRAND["primary"].lstrip("#"))
+    accent = RGBColor.from_string(_BRAND["accent"].lstrip("#"))
+    ink = RGBColor.from_string(_BRAND["ink"].lstrip("#"))
+    muted = RGBColor.from_string(_BRAND["muted"].lstrip("#"))
+
+    def add_textbox(
+        slide, left, top, width, height, text, size, color,
+        *, bold=False, alignment=PP_ALIGN.LEFT
+    ):
+        shape = slide.shapes.add_textbox(left, top, width, height)
+        frame = shape.text_frame
+        frame.clear()
+        frame.word_wrap = True
+        frame.vertical_anchor = MSO_ANCHOR.MIDDLE
+        paragraph = frame.paragraphs[0]
+        paragraph.text = text
+        paragraph.alignment = alignment
+        paragraph.font.name = "Aptos"
+        paragraph.font.size = Pt(size)
+        paragraph.font.bold = bold
+        paragraph.font.color.rgb = color
+        return shape
+
+    def decorate(slide):
+        line = slide.shapes.add_shape(
+            1, Inches(0.55), Inches(0.38), Inches(12.2), Inches(0.04)
+        )
+        line.fill.solid()
+        line.fill.fore_color.rgb = primary
+        line.line.fill.background()
+        add_textbox(
+            slide, Inches(0.55), Inches(0.05), Inches(1.5), Inches(0.3),
+            "AIMHI", 9, ink, bold=True
+        )
+        add_textbox(
+            slide, Inches(9.5), Inches(0.05), Inches(3.25), Inches(0.3),
+            "PRYCELESS VENTURES", 7, muted, alignment=PP_ALIGN.RIGHT
+        )
+        add_textbox(
+            slide, Inches(0.55), Inches(7.05), Inches(7), Inches(0.25),
+            f"{metadata['doc_id']} v{metadata['version']} · "
+            f"integrity {metadata['sha256'][:12]}",
+            7, muted
+        )
+        if not metadata["is_final"]:
+            watermark = add_textbox(
+                slide, Inches(3.7), Inches(2.8), Inches(6), Inches(1),
+                "DRAFT", 48, RGBColor(225, 190, 205), bold=True,
+                alignment=PP_ALIGN.CENTER
+            )
+            watermark.rotation = -25
+
+    def render(path):
+        presentation = Presentation()
+        presentation.slide_width = Inches(13.333)
+        presentation.slide_height = Inches(7.5)
+        blank_layout = presentation.slide_layouts[6]
+
+        title_slide = presentation.slides.add_slide(blank_layout)
+        decorate(title_slide)
+        add_textbox(
+            title_slide, Inches(1.05), Inches(1.8), Inches(11.2), Inches(1.8),
+            title, 30, ink, bold=True, alignment=PP_ALIGN.CENTER
+        )
+        add_textbox(
+            title_slide, Inches(2.8), Inches(3.7), Inches(7.7), Inches(0.6),
+            f"{metadata['date']} · "
+            f"{'FINAL' if metadata['is_final'] else 'DRAFT'}",
+            13, muted, alignment=PP_ALIGN.CENTER
+        )
+        accent_line = title_slide.shapes.add_shape(
+            1, Inches(5.4), Inches(4.55), Inches(2.5), Inches(0.05)
+        )
+        accent_line.fill.solid()
+        accent_line.fill.fore_color.rgb = accent
+        accent_line.line.fill.background()
+
+        for heading, markdown_body in sections:
+            chunks = _slide_chunks(_plain_markdown(markdown_body))
+            for index, chunk in enumerate(chunks):
+                slide = presentation.slides.add_slide(blank_layout)
+                decorate(slide)
+                slide_heading = heading if index == 0 else f"{heading} (continued)"
+                add_textbox(
+                    slide, Inches(0.75), Inches(0.72), Inches(11.8), Inches(0.7),
+                    slide_heading, 24, primary, bold=True
+                )
+                add_textbox(
+                    slide, Inches(0.9), Inches(1.55), Inches(11.5), Inches(5.15),
+                    chunk, 18 if len(chunk) < 750 else 15, ink
+                )
+        presentation.save(str(path))
+
+    _atomic_binary_export(out_path, render)
+
+
+def _write_excel_export(
+    out_path: Path, title: str, sections, metadata: dict
+) -> None:
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.utils import get_column_letter
+
+    primary = _BRAND["primary"].lstrip("#")
+    ink = _BRAND["ink"].lstrip("#")
+    muted = _BRAND["muted"].lstrip("#")
+    paper = _BRAND["paper"].lstrip("#")
+    line = _BRAND["line"].lstrip("#")
+
+    def string_cell(sheet, row, column, value):
+        cell = sheet.cell(row=row, column=column)
+        cell.value = str(value)
+        cell.data_type = "s"
+        return cell
+
+    def render(path):
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Document"
+        sheet.sheet_view.showGridLines = False
+        sheet.merge_cells("A1:B1")
+        title_cell = string_cell(sheet, 1, 1, title)
+        title_cell.font = Font(name="Aptos Display", size=20, bold=True, color=ink)
+        title_cell.alignment = Alignment(vertical="center")
+        sheet.row_dimensions[1].height = 34
+
+        metadata_rows = [
+            ("Document", f"{metadata['doc_id']} v{metadata['version']}"),
+            ("Status", "FINAL" if metadata["is_final"] else "DRAFT"),
+            ("Integrity", metadata["sha256"]),
+            ("Exported", metadata["date"]),
+        ]
+        for row_index, (label, value) in enumerate(metadata_rows, start=2):
+            label_cell = string_cell(sheet, row_index, 1, label)
+            label_cell.font = Font(name="Aptos", bold=True, color=muted)
+            value_cell = string_cell(sheet, row_index, 2, value)
+            value_cell.font = Font(
+                name="Aptos",
+                color=ink if metadata["is_final"] else "E21A66",
+            )
+
+        header_row = 7
+        for column, value in enumerate(("Section", "Content"), start=1):
+            cell = string_cell(sheet, header_row, column, value)
+            cell.font = Font(name="Aptos", bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor=primary)
+            cell.alignment = Alignment(vertical="center")
+
+        thin = Side(style="thin", color=line)
+        for row_index, (heading, markdown_body) in enumerate(
+            sections, start=header_row + 1
+        ):
+            heading_cell = string_cell(sheet, row_index, 1, heading)
+            body_cell = string_cell(
+                sheet, row_index, 2, _plain_markdown(markdown_body)
+            )
+            for cell in (heading_cell, body_cell):
+                cell.font = Font(name="Aptos", color=ink)
+                cell.fill = PatternFill(
+                    "solid",
+                    fgColor=paper if row_index % 2 == 0 else "FFFFFF",
+                )
+                cell.border = Border(bottom=thin)
+                cell.alignment = Alignment(
+                    vertical="top", wrap_text=True
+                )
+            heading_cell.font = Font(name="Aptos", bold=True, color=primary)
+            sheet.row_dimensions[row_index].height = 60
+
+        sheet.column_dimensions[get_column_letter(1)].width = 28
+        sheet.column_dimensions[get_column_letter(2)].width = 95
+        sheet.freeze_panes = f"A{header_row + 1}"
+        sheet.auto_filter.ref = f"A{header_row}:B{header_row + len(sections)}"
+        sheet.print_title_rows = f"1:{header_row}"
+        sheet.sheet_properties.pageSetUpPr.fitToPage = True
+        sheet.page_setup.fitToWidth = 1
+        sheet.page_setup.fitToHeight = 0
+        sheet.page_margins.left = 0.35
+        sheet.page_margins.right = 0.35
+        workbook.properties.title = title
+        workbook.properties.creator = "PJ"
+        workbook.save(str(path))
+
+    _atomic_binary_export(out_path, render)
+
+
+@contextmanager
+def _export_lock(doc_id: str, version: int, format: str):
+    lock_dir = EXPORTS_DIR / ".locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / (
+        f"{_slug(doc_id)}-{int(version)}-{_slug(format)}.lock"
+    )
+    with lock_path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _verified_export_path(path_value: str | Path) -> Path:
+    root = EXPORTS_DIR.resolve()
+    lexical_root = EXPORTS_DIR.absolute()
+    raw = Path(path_value).absolute()
+    try:
+        lexical_parts = raw.relative_to(lexical_root).parts
+        lexical = lexical_root
+    except ValueError:
+        try:
+            lexical_parts = raw.relative_to(root).parts
+            lexical = root
+        except ValueError as exc:
+            raise ValueError("artifact path is outside the export root") from exc
+    for part in lexical_parts:
+        lexical /= part
+        if lexical.is_symlink():
+            raise ValueError("artifact path may not contain symlinks")
+    resolved = raw.resolve(strict=True)
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("artifact path is outside the export root") from exc
+    if not resolved.is_file():
+        raise ValueError("artifact target is not a file")
+    return resolved
+
+
+def _register_export(doc_id: str, version: int, format: str, path: Path,
+                     audience_ready: bool) -> dict:
+    resolved = _verified_export_path(path)
+    byte_size = resolved.stat().st_size
+    sha = _hash_file(resolved)
+    mime_type = _EXPORT_MIME_TYPES.get(
+        format, mimetypes.guess_type(resolved.name)[0] or "application/octet-stream"
+    )
+    identity = "\0".join((
+        doc_id,
+        str(version),
+        format,
+        resolved.name,
+        sha,
+        "1" if audience_ready else "0",
+    ))
+    artifact_id = "ART-" + hashlib.sha256(identity.encode()).hexdigest()[:32]
+    immutable_path = ARTIFACTS_DIR / artifact_id / resolved.name
+    if (
+        not immutable_path.exists()
+        or immutable_path.stat().st_size != byte_size
+        or _hash_file(immutable_path) != sha
+    ):
+        _atomic_copy(resolved, immutable_path)
+    immutable = _verified_export_path(immutable_path)
+    if immutable.stat().st_size != byte_size or _hash_file(immutable) != sha:
+        raise ValueError("immutable artifact copy failed integrity validation")
+    with _db() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO docops_artifacts "
+            "(artifact_id, doc_id, version, format, filename, path, mime_type, "
+            "byte_size, sha256, status, audience_ready) "
+            "VALUES (?,?,?,?,?,?,?,?,?,'ready',?)",
+            (
+                artifact_id,
+                doc_id,
+                version,
+                format,
+                resolved.name,
+                str(immutable),
+                mime_type,
+                byte_size,
+                sha,
+                int(audience_ready),
+            ),
+        )
+        stored = conn.execute(
+            "SELECT doc_id, version, format, filename, path, mime_type, "
+            "byte_size, sha256, status, audience_ready "
+            "FROM docops_artifacts WHERE artifact_id=?",
+            (artifact_id,),
+        ).fetchone()
+    expected = (
+        doc_id,
+        version,
+        format,
+        resolved.name,
+        str(immutable),
+        mime_type,
+        byte_size,
+        sha,
+        "ready",
+        int(audience_ready),
+    )
+    if stored != expected:
+        raise ValueError("artifact identity collision")
+    return {
+        "artifact_id": artifact_id,
+        "doc_id": doc_id,
+        "version": version,
+        "format": format,
+        "filename": resolved.name,
+        "mime_type": mime_type,
+        "byte_size": byte_size,
+        "sha256": sha,
+        "status": "ready",
+        "audience_ready": bool(audience_ready),
+        "download_url": f"/responses/artifacts/{artifact_id}",
+    }
+
+
+def _attach_source_artifact(result: dict) -> dict:
+    if (
+        not isinstance(result, dict)
+        or result.get("status") not in {"draft", "final", "already_final"}
+        or not result.get("path")
+    ):
+        return result
+    source = Path(result["path"])
+    if not source.is_file():
+        return result
+    doc_id = result["doc_id"]
+    version = int(result["version"])
+    audience_ready = result["status"] in {"final", "already_final"}
+    try:
+        with _export_lock(doc_id, version, "md"):
+            expected_sha = result.get("sha256")
+            if not expected_sha or _hash(source.read_text()) != expected_sha:
+                raise ValueError(
+                    "source document does not match its governed SHA-256"
+                )
+            staging = EXPORTS_DIR / "sources" / source.name
+            _atomic_copy(source, staging)
+            artifact = _register_export(
+                doc_id,
+                version,
+                "md",
+                staging,
+                audience_ready=audience_ready,
+            )
+            if artifact["sha256"] != expected_sha:
+                raise ValueError(
+                    "source artifact bytes do not match the governed SHA-256"
+                )
+            result["artifact"] = artifact
+    except (OSError, ValueError) as exc:
+        result["artifact_error"] = f"source artifact registration failed: {exc}"
+    return result
+
+
+def resolve_export_artifact(artifact_id: str, *, include_path: bool = False) -> dict:
+    """Resolve and integrity-check a registered artifact by opaque ID."""
+    if not re.fullmatch(r"ART-[a-f0-9]{32}", str(artifact_id or "")):
+        return {"error": "artifact not found", "status": "not_found"}
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT artifact_id, doc_id, version, format, filename, path, "
+            "mime_type, byte_size, sha256, status, audience_ready, created_at "
+            "FROM docops_artifacts WHERE artifact_id=?",
+            (artifact_id,),
+        ).fetchone()
+    if not row:
+        return {"error": "artifact not found", "status": "not_found"}
+    try:
+        path = _verified_export_path(row[5])
+    except (OSError, ValueError) as exc:
+        return {"error": str(exc), "status": "blocked"}
+    actual_size = path.stat().st_size
+    actual_sha = _hash_file(path)
+    if actual_size != row[7] or actual_sha != row[8] or row[9] != "ready":
+        return {"error": "artifact integrity mismatch", "status": "blocked"}
+    result = {
+        "artifact_id": row[0],
+        "doc_id": row[1],
+        "version": row[2],
+        "format": row[3],
+        "filename": row[4],
+        "mime_type": row[6],
+        "byte_size": row[7],
+        "sha256": row[8],
+        "status": row[9],
+        "audience_ready": bool(row[10]),
+        "created_at": row[11],
+        "download_url": f"/responses/artifacts/{row[0]}",
+    }
+    if include_path:
+        result["path"] = str(path)
+    return result
+
+
+def open_export_artifact_snapshot(artifact_id: str):
+    """Open, hash, and rewind the exact immutable bytes that will be served."""
+    artifact = resolve_export_artifact(artifact_id, include_path=True)
+    if artifact.get("status") != "ready":
+        return artifact, None
+    path = Path(artifact.pop("path"))
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+        source = os.fdopen(descriptor, "rb")
+    except OSError as exc:
+        return {"status": "blocked", "error": str(exc)}, None
+    snapshot = tempfile.SpooledTemporaryFile(
+        max_size=8 * 1024 * 1024,
+        mode="w+b",
+    )
+    try:
+        opened = os.fstat(source.fileno())
+        if not stat.S_ISREG(opened.st_mode):
+            raise ValueError("artifact snapshot is not a regular file")
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+            snapshot.write(chunk)
+        if opened.st_size != artifact["byte_size"] or digest.hexdigest() != artifact["sha256"]:
+            raise ValueError("artifact snapshot integrity mismatch")
+        snapshot.seek(0)
+        source.close()
+        return artifact, snapshot
+    except (OSError, ValueError) as exc:
+        source.close()
+        snapshot.close()
+        return {"status": "blocked", "error": str(exc)}, None
+
+
 def export_document(doc_id: str, format: str = "html",
                     version: int = 0) -> dict:
     """Render an audience-ready deliverable of a document.
 
-    Formats: html (styled, print-to-PDF ready), docx, rtf. The internal
-    metadata banner is removed; finals get a discreet integrity footer,
-    non-final versions get a DRAFT watermark so a rough cut can never be
-    mistaken for the finished piece.
+    Formats: html, pdf, docx, rtf, pptx, xlsx. The internal metadata banner
+    is removed; finals get discreet integrity metadata, while non-final
+    versions are visibly marked DRAFT.
     """
-    if format not in ("html", "docx", "rtf"):
-        return {"error": "format must be one of: html, docx, rtf"}
+    supported_formats = ("html", "pdf", "docx", "rtf", "pptx", "xlsx")
+    if format not in supported_formats:
+        return {
+            "error": "format must be one of: " + ", ".join(supported_formats)
+        }
     if _markdown is None:
         return {"error": "python 'markdown' package not installed in venv"}
     with _db() as conn:
@@ -1115,6 +1837,7 @@ def export_document(doc_id: str, format: str = "html",
     # Strip internal metadata banner and title (re-rendered cleanly).
     body_md = re.sub(r"^# .*?\n+> \*\*Doc:\*\*.*?\n+", "", text, count=1,
                      flags=re.S)
+    sections = _export_sections(text)
     body_html = _markdown.markdown(body_md,
                                    extensions=["tables", "fenced_code"])
     date = datetime.now(timezone.utc).strftime("%B %d, %Y")
@@ -1132,26 +1855,101 @@ def export_document(doc_id: str, format: str = "html",
             f"</body></html>")
 
     stem = f"{doc_id}-{_slug(title)}-v{ver}" + ("" if is_final else "-DRAFT")
-    html_path = EXPORTS_DIR / f"{stem}.html"
-    html_path.write_text(page)
-    out_path = html_path
-    if format in ("docx", "rtf"):
-        out_path = EXPORTS_DIR / f"{stem}.{format}"
-        conv = subprocess.run(
-            ["textutil", "-convert", format, str(html_path),
-             "-output", str(out_path)],
-            capture_output=True, text=True, timeout=60)
-        if conv.returncode != 0 or not out_path.exists():
-            return {"error": "textutil conversion failed",
-                    "detail": conv.stderr.strip()[:300],
-                    "html_fallback": str(html_path)}
-    return {"doc_id": doc_id, "version": ver, "format": format,
-            "audience_ready": is_final,
-            "watermarked_draft": not is_final,
-            "path": str(out_path),
-            "note": ("clean final export" if is_final else
-                     "non-final version exported with DRAFT watermark; "
-                     "finalize_document first for a clean deliverable")}
+    with _export_lock(doc_id, ver, format):
+        html_path = EXPORTS_DIR / f"{stem}.html"
+        with tempfile.NamedTemporaryFile(
+            dir=EXPORTS_DIR,
+            prefix=f".{stem}.",
+            suffix=".html.tmp",
+            delete=False,
+            mode="w",
+            encoding="utf-8",
+        ) as handle:
+            temporary_html = Path(handle.name)
+            handle.write(page)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            temporary_html.chmod(0o600)
+            temporary_html.replace(html_path)
+        finally:
+            temporary_html.unlink(missing_ok=True)
+
+        out_path = html_path
+        if format in ("docx", "rtf"):
+            out_path = EXPORTS_DIR / f"{stem}.{format}"
+            with tempfile.NamedTemporaryFile(
+                dir=EXPORTS_DIR,
+                prefix=f".{stem}.",
+                suffix=f".{format}.tmp",
+                delete=False,
+            ) as handle:
+                temporary_output = Path(handle.name)
+            temporary_output.unlink(missing_ok=True)
+            try:
+                conv = subprocess.run(
+                    ["textutil", "-convert", format, str(html_path),
+                     "-output", str(temporary_output)],
+                    capture_output=True, text=True, timeout=60)
+                if conv.returncode != 0 or not temporary_output.exists():
+                    return {
+                        "error": "textutil conversion failed",
+                        "detail": conv.stderr.strip()[:300],
+                    }
+                temporary_output.chmod(0o600)
+                temporary_output.replace(out_path)
+            finally:
+                temporary_output.unlink(missing_ok=True)
+        elif format in ("pdf", "pptx", "xlsx"):
+            out_path = EXPORTS_DIR / f"{stem}.{format}"
+            metadata = {
+                "doc_id": doc_id,
+                "version": ver,
+                "sha256": sha,
+                "date": date,
+                "is_final": is_final,
+            }
+            try:
+                if format == "pdf":
+                    _write_pdf_export(
+                        out_path, title, sections, metadata
+                    )
+                elif format == "pptx":
+                    _write_powerpoint_export(
+                        out_path, title, sections, metadata
+                    )
+                else:
+                    _write_excel_export(
+                        out_path, title, sections, metadata
+                    )
+            except ImportError:
+                return {
+                    "error": f"{format} export dependency is not installed"
+                }
+
+        try:
+            artifact = _register_export(
+                doc_id,
+                ver,
+                format,
+                out_path,
+                audience_ready=is_final,
+            )
+        except (OSError, ValueError) as exc:
+            return {"error": "artifact registration failed", "detail": str(exc)}
+    return {
+        "doc_id": doc_id,
+        "version": ver,
+        "format": format,
+        "audience_ready": is_final,
+        "watermarked_draft": not is_final,
+        "artifact": artifact,
+        "note": (
+            "clean final export" if is_final else
+            "non-final version exported with DRAFT watermark; "
+            "finalize_document first for a clean deliverable"
+        ),
+    }
 
 
 # ------------------------------------------------------------ tool schemas
@@ -1182,7 +1980,7 @@ DOCOPS_SCHEMAS = [
                      "finalize=true to produce a sealed FINAL in one pass "
                      "when the user wants an audience-ready document and "
                      "all content is complete. Returns a versioned, hashed "
-                     "file."),
+                     "file and a downloadable artifact."),
      "parameters": {"type": "object", "properties": {
          "template": {"type": "string", "description": "Template name"},
          "title": {"type": "string", "description": "Document title"},
@@ -1213,13 +2011,14 @@ DOCOPS_SCHEMAS = [
          "doc_id": {"type": "string"}}, "required": ["doc_id"]}},
     {"type": "function", "name": "export_document",
      "description": ("Render an audience-ready deliverable of a document: "
-                     "professionally styled HTML (print-to-PDF ready), DOCX "
-                     "or RTF. Finals export clean; non-final versions get a "
-                     "DRAFT watermark. Use after finalize_document to hand "
-                     "the user a shareable file."),
+                     "professionally styled HTML, PDF, DOCX, RTF, PowerPoint, "
+                     "or Excel. Finals export clean; non-final versions are "
+                     "marked DRAFT. Use after finalize_document to hand the "
+                     "user a shareable file."),
      "parameters": {"type": "object", "properties": {
          "doc_id": {"type": "string"},
-         "format": {"type": "string", "enum": ["html", "docx", "rtf"],
+         "format": {"type": "string",
+                    "enum": ["html", "pdf", "docx", "rtf", "pptx", "xlsx"],
                     "description": "Output format (default html)"},
          "version": {"type": "integer",
                      "description": "Specific version (default latest)"}},
