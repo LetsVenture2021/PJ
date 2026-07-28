@@ -498,7 +498,10 @@
   <script type="module">
     import {
       CONTRACT_VERSION,
+      PROTOCOL_VERSION,
+      assertProtocolResponse,
       createRequestId,
+      protocolMessage,
       shorten,
       parseErrorBody,
       fetchWithTimeout,
@@ -601,6 +604,7 @@
         Accept: "application/json",
         "x-pj-client-request-id": requestId,
         "x-pj-contract-version": CONTRACT_VERSION,
+        "x-pj-protocol-version": String(PROTOCOL_VERSION),
       };
       if (contentType) headers["Content-Type"] = contentType;
       return headers;
@@ -893,6 +897,7 @@
       } catch (_) {
         parsed = {};
       }
+      assertProtocolResponse(response, parsed);
       if (!parsed.ok) {
         throw new Error("Backend health endpoint did not return ok=true.");
       }
@@ -938,6 +943,7 @@
       } catch (_) {
         parsed = {};
       }
+      assertProtocolResponse(response, parsed);
       const tools = Array.isArray(parsed.tools) ? parsed.tools : [];
       return {
         count: typeof parsed.count === "number" ? parsed.count : tools.length,
@@ -959,6 +965,7 @@
       } catch (_) {
         throw new Error("Response payload was not valid JSON.");
       }
+      assertProtocolResponse(response, parsed);
       if (!response.ok) {
         const detail = parseErrorBody(body);
         throw new Error(`Request failed (${response.status})${detail ? `: ${detail}` : ""}`);
@@ -974,7 +981,7 @@
       const parsed = await fetchJson(`${apiBase()}/responses/sessions`, {
         method: "POST",
         headers: requestHeaders(createRequestId(), "application/json"),
-        body: JSON.stringify({ title: "", channel }),
+        body: JSON.stringify(protocolMessage({ title: "", channel })),
       });
       const sessionId = parsed.session?.id;
       if (!sessionId) throw new Error("Session response did not include an ID.");
@@ -1038,7 +1045,7 @@
         {
           method: "POST",
           headers: requestHeaders(createRequestId(), "application/json"),
-          body: JSON.stringify({
+          body: JSON.stringify(protocolMessage({
             external_id: externalId,
             role,
             content,
@@ -1047,7 +1054,7 @@
             status,
             playback_ms: playbackMs,
             metadata,
-          }),
+          })),
         },
       );
     }
@@ -1058,7 +1065,7 @@
         {
           method: "POST",
           headers: requestHeaders(createRequestId(), "application/json"),
-          body: "{}",
+          body: JSON.stringify(protocolMessage()),
         },
       );
       const session = parsed.session;
@@ -1225,13 +1232,14 @@
           "Content-Type": "application/json",
           "x-pj-client-request-id": requestId,
           "x-pj-contract-version": CONTRACT_VERSION,
+          "x-pj-protocol-version": String(PROTOCOL_VERSION),
         },
-        body: JSON.stringify({
+        body: JSON.stringify(protocolMessage({
           session_id: state.activeSessionId,
           voice_mode: state.mode === MODE.FULL_POWER_VOICE
             ? "full_power"
             : "fast",
-        }),
+        })),
         credentials: "include",
       }, 15000);
 
@@ -1247,6 +1255,7 @@
       } catch (_) {
         throw new Error("Token minting response was not valid JSON.");
       }
+      assertProtocolResponse(response, parsed);
 
       const tokenValue =
         (parsed.client_secret && parsed.client_secret.value) ||
@@ -1386,12 +1395,14 @@
             "Content-Type": "application/sdp",
             "x-pj-client-request-id": requestId,
             "x-pj-contract-version": CONTRACT_VERSION,
+            "x-pj-protocol-version": String(PROTOCOL_VERSION),
           },
           body: localSdp,
           credentials: "include",
         }, 35000);
 
         let answerSdp = await response.text();
+        assertProtocolResponse(response);
         if (!response.ok) {
           const detail = parseErrorBody(answerSdp);
           if (shouldUseEphemeralSignalingFallback(response.status, detail)) {
@@ -1558,7 +1569,7 @@
           const parsed = await fetchJson(`${base}/responses/sessions`, {
             method: "POST",
             headers: requestHeaders(createRequestId(), "application/json"),
-            body: JSON.stringify({ title: "" }),
+            body: JSON.stringify(protocolMessage({ title: "" })),
           });
           state.fullPowerSessionId = parsed.session?.id || null;
           if (!state.fullPowerSessionId) throw new Error("Session response did not include an ID.");
@@ -1610,7 +1621,7 @@
             {
               method: "POST",
               headers: requestHeaders(createRequestId(), "application/json"),
-              body: "{}",
+              body: JSON.stringify(protocolMessage()),
             },
           );
           const session = parsed.session;
@@ -1851,6 +1862,7 @@
       }
 
       async function consumeFullPowerStream(response) {
+        assertProtocolResponse(response);
         if (!response.ok) {
           const raw = await response.text();
           throw new Error(`Request failed (${response.status})${parseErrorBody(raw) ? `: ${parseErrorBody(raw)}` : ""}`);
@@ -1892,10 +1904,10 @@
             credentials: "include",
             signal: controller.signal,
             headers: requestHeaders(createRequestId(), "application/json"),
-            body: JSON.stringify({
+            body: JSON.stringify(protocolMessage({
               message,
               ...(structuredOutput ? { structured_output: structuredOutput } : {}),
-            }),
+            })),
           },
         );
         await consumeFullPowerStream(response);
@@ -1906,7 +1918,7 @@
           method: "POST",
           credentials: "include",
           headers: requestHeaders(createRequestId(), "application/json"),
-          body: JSON.stringify({ prompt, surface }),
+          body: JSON.stringify(protocolMessage({ prompt, surface })),
         });
         const refined = parsed.prompt?.refined_prompt;
         if (typeof refined !== "string" || !refined.trim()) {
@@ -1930,7 +1942,7 @@
               credentials: "include",
               signal: controller.signal,
               headers: requestHeaders(createRequestId(), "application/json"),
-              body: JSON.stringify({ approve }),
+              body: JSON.stringify(protocolMessage({ approve })),
             },
           );
           await consumeFullPowerStream(response);
@@ -2361,14 +2373,20 @@
             "Content-Type": "application/json",
             "x-pj-client-request-id": requestId,
             "x-pj-contract-version": CONTRACT_VERSION,
+            "x-pj-protocol-version": String(PROTOCOL_VERSION),
           },
-          body: JSON.stringify({
+          body: JSON.stringify(protocolMessage({
             name,
             arguments: args,
             session_id: state.fullPowerSessionId || undefined,
-          }),
+          })),
         }, name === "delegate_advanced_task" ? 290000 : 90000);
         const raw = await resp.text();
+        let protocolPayload = null;
+        try {
+          protocolPayload = raw ? JSON.parse(raw) : null;
+        } catch (_) {}
+        assertProtocolResponse(resp, protocolPayload);
         if (!resp.ok) {
           output = JSON.stringify({
             error: `Tool call failed (${resp.status})`,

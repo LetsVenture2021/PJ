@@ -36,3 +36,6 @@ control as enabled.
 
 GitHub's API reported secret scanning, push protection, and Dependabot security
 updates as enabled when this checklist was last verified.
+
+Dependency audit results and remediation decisions are recorded in
+[`dependency-audit-2026-07-28.md`](dependency-audit-2026-07-28.md).

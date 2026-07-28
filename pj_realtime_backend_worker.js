@@ -1,4 +1,5 @@
 const CONTRACT_VERSION = "2026-07-28.6";
+const PROTOCOL_VERSION = 1;
 const DEFAULT_REALTIME_MODEL = "gpt-realtime-2.1";
 const FALLBACK_REALTIME_MODEL = "gpt-realtime";
 const REALTIME_VOICE = "marin";
@@ -101,9 +102,9 @@ function corsHeaders(corsOrigin) {
     "access-control-allow-origin": corsOrigin,
     "access-control-allow-methods": "GET,POST,OPTIONS",
     "access-control-allow-headers":
-      "content-type,authorization,x-pj-client-request-id,x-pj-contract-version",
+      "content-type,authorization,x-pj-client-request-id,x-pj-contract-version,x-pj-protocol-version",
     "access-control-expose-headers":
-      "x-request-id,x-pj-contract-version,content-disposition,content-length,etag",
+      "x-request-id,x-pj-contract-version,x-pj-protocol-version,content-disposition,content-length,etag",
   };
 }
 
@@ -119,6 +120,7 @@ function responseHeaders(corsOrigin, requestId, contentType = "application/json"
     "x-frame-options": "DENY",
     "x-request-id": requestId,
     "x-pj-contract-version": CONTRACT_VERSION,
+    "x-pj-protocol-version": String(PROTOCOL_VERSION),
     vary: "Origin",
     ...corsHeaders(corsOrigin),
   };
@@ -175,10 +177,38 @@ function errorPayload(code, message, requestId, detail = null) {
 }
 
 function jsonResponse(payload, status, corsOrigin, requestId) {
-  return new Response(JSON.stringify(payload), {
+  return new Response(JSON.stringify({ ...payload, version: PROTOCOL_VERSION }), {
     status,
     headers: responseHeaders(corsOrigin, requestId, "application/json"),
   });
+}
+
+async function validateProtocolRequest(request) {
+  const received = [];
+  const headerVersion = request.headers.get("x-pj-protocol-version");
+  if (headerVersion !== null) {
+    received.push({ source: "header", version: headerVersion });
+  }
+  const contentType = request.headers.get("content-type") || "";
+  if (request.method === "POST" && contentType.includes("application/json")) {
+    try {
+      const payload = await request.clone().json();
+      if (
+        payload &&
+        typeof payload === "object" &&
+        !Array.isArray(payload) &&
+        Object.hasOwn(payload, "version")
+      ) {
+        received.push({ source: "message", version: payload.version });
+      }
+    } catch {
+      // Endpoint handlers return the more specific invalid_json response.
+    }
+  }
+  const unsupported = received.filter(
+    ({ version }) => String(version) !== String(PROTOCOL_VERSION),
+  );
+  return unsupported.length ? unsupported : null;
 }
 
 function logEvent(requestId, event, data = {}) {
@@ -532,13 +562,19 @@ function toolBridgeTimeoutMs(toolName) {
   return toolName === "delegate_advanced_task" ? 280000 : 85000;
 }
 
-function parseToolSchemaPayload(rawText, maxTools) {
-  let parsed = null;
-  try {
-    parsed = rawText ? JSON.parse(rawText) : null;
-  } catch {
-    parsed = null;
+function parseJsonOrNull(rawText) {
+  if (!rawText) {
+    return null;
   }
+  try {
+    return JSON.parse(rawText);
+  } catch {
+    return null;
+  }
+}
+
+function parseToolSchemaPayload(rawText, maxTools) {
+  const parsed = parseJsonOrNull(rawText);
   if (Array.isArray(parsed)) {
     return normalizeFunctionTools(parsed, maxTools);
   }
@@ -576,6 +612,7 @@ function bridgeHeaders(env, requestId) {
     "content-type": "application/json",
     "x-pj-client-request-id": requestId,
     "x-pj-contract-version": CONTRACT_VERSION,
+    "x-pj-protocol-version": String(PROTOCOL_VERSION),
   };
   if (env.PJ_TOOL_BRIDGE_TOKEN) {
     headers.authorization = `Bearer ${env.PJ_TOOL_BRIDGE_TOKEN}`;
@@ -1067,12 +1104,7 @@ async function requestRealtimeClientSecret(
 }
 
 function extractClientSecretPayload(rawText) {
-  let parsed = null;
-  try {
-    parsed = rawText ? JSON.parse(rawText) : null;
-  } catch {
-    parsed = null;
-  }
+  const parsed = parseJsonOrNull(rawText);
   const value = parsed?.client_secret?.value || parsed?.value || null;
   return {
     parsed,
@@ -1283,7 +1315,9 @@ async function handleToken(request, env, corsOrigin, requestId) {
       requestId,
     );
   }
-  const extras = Object.keys(payload).filter((key) => !["session_id", "voice_mode"].includes(key));
+  const extras = Object.keys(payload).filter(
+    (key) => !["version", "session_id", "voice_mode"].includes(key),
+  );
   const sessionId = payload.session_id || "";
   const voiceMode = payload.voice_mode || "fast";
   if (
@@ -1410,7 +1444,7 @@ async function handleToolSchemas(request, env, corsOrigin, requestId) {
 }
 
 async function handleExecuteTool(request, env, corsOrigin, requestId) {
-  let payload = {};
+  let payload;
   try {
     payload = await request.json();
   } catch {
@@ -1421,6 +1455,8 @@ async function handleExecuteTool(request, env, corsOrigin, requestId) {
       requestId,
     );
   }
+  const messageVersion = payload.version;
+  delete payload.version;
 
   const bridgeUrl = (env.PJ_TOOL_BRIDGE_URL || "").trim();
   if (!bridgeUrl) {
@@ -1487,7 +1523,7 @@ async function handleExecuteTool(request, env, corsOrigin, requestId) {
       {
         method: "POST",
         headers: bridgeHeaders(env, requestId),
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ version: messageVersion ?? PROTOCOL_VERSION, ...payload }),
       },
       toolBridgeTimeoutMs(payload?.name),
     );
@@ -1531,6 +1567,7 @@ async function handleExecuteTool(request, env, corsOrigin, requestId) {
 
 export {
   CONTRACT_VERSION,
+  PROTOCOL_VERSION,
   bridgeHeaders,
   buildAccessConfig,
   createSessionConfig,
@@ -1550,6 +1587,7 @@ export {
   stableJson,
   validateAccessClaims,
   validateAccessIdentity,
+  validateProtocolRequest,
 };
 
 export default {
@@ -1575,6 +1613,24 @@ export default {
       });
     }
 
+    const unsupportedVersions = await validateProtocolRequest(request);
+    if (unsupportedVersions) {
+      return jsonResponse(
+        errorPayload(
+          "unsupported_protocol_version",
+          "The PJ realtime protocol version is not supported.",
+          requestId,
+          JSON.stringify({
+            received: unsupportedVersions,
+            supported: [PROTOCOL_VERSION],
+          }),
+        ),
+        426,
+        corsOrigin,
+        requestId,
+      );
+    }
+
     if (request.method === "GET" && url.pathname === "/health") {
       const bridgeConfigured = Boolean((env.PJ_TOOL_BRIDGE_URL || "").trim());
       const bridgeAuthConfigured = Boolean((env.PJ_TOOL_BRIDGE_TOKEN || "").trim());
@@ -1590,6 +1646,7 @@ export default {
           ok: true,
           worker: "pj-realtime-backend",
           contract_version: CONTRACT_VERSION,
+          protocol_version: PROTOCOL_VERSION,
           realtime_model: env.REALTIME_MODEL || DEFAULT_REALTIME_MODEL,
           tool_bridge_configured: bridgeConfigured,
           tool_bridge_auth_configured: bridgeAuthConfigured,

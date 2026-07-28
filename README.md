@@ -75,7 +75,7 @@ interface and use the OpenAI adapter in `ops/shared/providers`.
 - Python **3.11** (the version exercised by CI) and `pip`.
 - An OpenAI API key for assistant, voice, provider image, and remote ingestion
   flows. Local deterministic tools and most tests mock provider calls.
-- Node.js 20+ with the built-in `node:test` runner for Worker tests.
+- Node.js 20.19+ with the built-in `node:test` runner for Worker tests.
 - A microphone, speakers, and PortAudio-compatible audio devices for terminal
   voice.
 - A Cloudflare account, an existing DNS zone, Wrangler, and Cloudflare Access
@@ -295,12 +295,15 @@ The pull-request quality gate targets `master` and also runs after pushes to
 
 ```bash
 python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m pip_audit --requirement requirements.txt
+python -m pip_audit --requirement requirements-dev.txt
 python -m ruff check .
 python -m mypy
 python -m unittest discover tests -v
 npm ci
 npm run lint
 npm test
+npm audit --audit-level=high
 ```
 
 CI also runs `ruff format --check` against every Python file changed by the push
@@ -311,6 +314,9 @@ The Python suite uses temporary databases and mocked provider calls. On macOS,
 one CodeOps sandbox test can run with `/usr/bin/sandbox-exec`; where that
 executable is absent the test explicitly skips. The Node suite imports the
 Worker directly and does not require a Cloudflare account.
+
+The July 28, 2026 dependency audit and remediation summary is tracked in
+`docs/dependency-audit-2026-07-28.md`.
 
 ### Repository settings checklist
 

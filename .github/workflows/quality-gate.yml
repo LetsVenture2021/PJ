@@ -35,6 +35,12 @@ jobs:
       - name: Install quality tools
         run: python -m pip install --requirement requirements-dev.txt
 
+      - name: Audit Python runtime dependencies
+        run: python -m pip_audit --requirement requirements.txt
+
+      - name: Audit Python development dependencies
+        run: python -m pip_audit --requirement requirements-dev.txt
+
       - name: Lint Python
         run: python -m ruff check .
 
@@ -57,6 +63,9 @@ jobs:
 
       - name: Type check Python
         run: python -m mypy
+
+      - name: Audit Python dependencies
+        run: python -m pip_audit --requirement requirements.txt
 
   python-tests:
     name: Python tests
@@ -87,14 +96,20 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "20.19.0"
           cache: npm
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Audit Worker dependencies
+        run: npm audit --audit-level=high
 
       - name: Lint Worker
         run: npm run lint
 
       - name: Test Worker
         run: npm test
+
+      - name: Audit Worker dependencies
+        run: npm audit --audit-level=high

@@ -146,7 +146,7 @@ class TestRealtimeSessionLifecycle(unittest.TestCase):
         self.assertEqual(response.headers["x-request-id"], request_id)
         self.assertEqual(
             set(response.get_json()),
-            {"ok", "error"},
+            {"ok", "error", "version"},
         )
         error = response.get_json()["error"]
         self.assertFalse(response.get_json()["ok"])
@@ -157,6 +157,43 @@ class TestRealtimeSessionLifecycle(unittest.TestCase):
         self.assertEqual(error["code"], code)
         self.assertEqual(error["request_id"], request_id)
         return error
+
+    def test_rejects_unsupported_protocol_versions(self):
+        response = self.client.post(
+            "/responses/sessions",
+            json={"version": 999, "title": "", "channel": "realtime"},
+            headers={
+                **self.auth,
+                "x-pj-client-request-id": "version-request",
+                "x-pj-protocol-version": "999",
+            },
+        )
+
+        error = self.assert_structured_error(
+            response,
+            status=426,
+            code="unsupported_protocol_version",
+            request_id="version-request",
+        )
+        self.assertIn('"supported": [1]', error["detail"])
+        self.assertEqual(response.get_json()["version"], realtime_server.PROTOCOL_VERSION)
+
+    def test_accepts_versioned_message_envelopes(self):
+        response = self.client.post(
+            "/responses/sessions",
+            json={
+                "version": realtime_server.PROTOCOL_VERSION,
+                "title": "Versioned",
+                "channel": "realtime",
+            },
+            headers={
+                **self.auth,
+                "x-pj-protocol-version": str(realtime_server.PROTOCOL_VERSION),
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.get_json()["version"], realtime_server.PROTOCOL_VERSION)
 
     def test_connect_start_stream_and_resume_success(self):
         session_id = self.create_realtime_session()

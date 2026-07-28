@@ -24,6 +24,7 @@ const {
   bridgeHeaders,
   buildAccessConfig,
   CONTRACT_VERSION,
+  PROTOCOL_VERSION,
   createSessionConfig,
   default: worker,
   deriveResponsesBridgeBaseUrl,
@@ -41,6 +42,7 @@ const {
   stableJson,
   toolBridgeTimeoutMs,
   validateAccessIdentity,
+  validateProtocolRequest,
 } = workerModule;
 const { parseErrorBody } = webUtilsModule;
 
@@ -641,6 +643,51 @@ test("browser and Worker advertise the same contract version", async () => {
   assert.equal(match[1], CONTRACT_VERSION);
 });
 
+test("realtime protocol envelopes reject unsupported versions", async () => {
+  assert.equal(PROTOCOL_VERSION, 1);
+  const supported = await validateProtocolRequest(
+    new Request("https://pj-assistant.ai/token", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-pj-protocol-version": String(PROTOCOL_VERSION),
+      },
+      body: JSON.stringify({ version: PROTOCOL_VERSION }),
+    }),
+  );
+  assert.equal(supported, null);
+
+  const unsupported = await validateProtocolRequest(
+    new Request("https://pj-assistant.ai/token", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-pj-protocol-version": "99",
+      },
+      body: JSON.stringify({ version: 99 }),
+    }),
+  );
+  assert.deepEqual(unsupported, [
+    { source: "header", version: "99" },
+    { source: "message", version: 99 },
+  ]);
+
+  const response = await worker.fetch(
+    new Request("https://pj-assistant.ai/token", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-pj-client-request-id": "unsupported-version",
+        "x-pj-protocol-version": "99",
+      },
+      body: JSON.stringify({ version: 99 }),
+    }),
+    env,
+  );
+  assert.equal(response.status, 426);
+  assert.equal((await response.json()).error.code, "unsupported_protocol_version");
+});
+
 test("realtime upstream transport and body-read failures return typed results", async () => {
   const failingFetch = async () => {
     throw new Error("upstream socket closed");
@@ -777,14 +824,22 @@ test("browser module initializes with Full Power helpers in shared scope", async
   const moduleSource = moduleMatch[1].replace(
     /import\s*\{[\s\S]*?\}\s*from\s*"\/assets\/pj_web_utils\.js";/,
     `const CONTRACT_VERSION = "test";
+     const PROTOCOL_VERSION = 1;
+     const protocolMessage = (payload = {}) => ({ version: PROTOCOL_VERSION, ...payload });
+     const assertProtocolResponse = (response, payload = null) => {
+       const version = payload?.version ?? response.headers.get("x-pj-protocol-version");
+       if (String(version) !== String(PROTOCOL_VERSION)) throw new Error("unsupported protocol");
+     };
      const createRequestId = () => "request-test";
      const shorten = (value) => String(value);
      const parseErrorBody = () => "";
      const fetchWithTimeout = async (url, options = {}) => {
        window.__testFetches.push({ url, options });
        const payload = url.endsWith("/execute-tool")
-         ? window.__directToolOutput
-         : (url.endsWith("/health") ? { ok: true } : { tools: [] });
+         ? { ...window.__directToolOutput, version: PROTOCOL_VERSION }
+         : (url.endsWith("/health")
+             ? { ok: true, version: PROTOCOL_VERSION }
+             : { tools: [], version: PROTOCOL_VERSION });
        return new Response(
          JSON.stringify(payload),
          { status: 200, headers: { "content-type": "application/json" } },

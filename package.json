@@ -1,6 +1,9 @@
 {
   "name": "pj-worker-quality",
   "private": true,
+  "engines": {
+    "node": ">=20.19.0"
+  },
   "prettier": {
     "printWidth": 100
   },
@@ -10,9 +13,9 @@
     "test": "node --test tests/test_worker_auth.mjs"
   },
   "devDependencies": {
-    "@eslint/js": "9.39.5",
-    "eslint": "9.39.5",
+    "@eslint/js": "10.0.1",
+    "eslint": "10.8.0",
     "globals": "17.8.0",
-    "prettier": "3.6.2"
+    "prettier": "3.9.6"
   }
 }
