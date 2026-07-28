@@ -826,11 +826,19 @@ def delegate_advanced_task(prompt, *, client=None, cfg=None):
         _delegation_active.reset(token)
 
 
-def dispatch_realtime_function(name, arguments, *, client=None, cfg=None):
+def dispatch_realtime_function(
+        name,
+        arguments,
+        *,
+        client=None,
+        cfg=None,
+        approval_granted=False):
     if name == ADVANCED_DELEGATION_TOOL["name"]:
         return delegate_advanced_task(
             arguments.get("prompt") if isinstance(arguments, dict) else None,
             client=client,
             cfg=cfg,
         )
+    if approval_granted:
+        return dispatch_approved_local_function(name, arguments)
     return dispatch_local_function(name, arguments)
