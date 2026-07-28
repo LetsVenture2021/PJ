@@ -1,5 +1,7 @@
 # Deployment template for the pj-assistant.ai Worker. GET /health and OPTIONS
 # are public; all other current and future routes require Cloudflare Access.
+# POST /webhook is intentionally not deployed: the legacy Flask handler does
+# not verify OpenAI webhook signatures and Access would block OpenAI delivery.
 #
 # Configure the Access application on pj-assistant.ai/* with an owner-only
 # Allow policy. The Worker independently verifies the injected assertion.

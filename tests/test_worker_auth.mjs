@@ -124,6 +124,8 @@ test("deployment routes cover APIs without claiming frontend assets", () => {
     assert.ok(wranglerSource.includes(`pattern = "${route}"`));
   }
   assert.doesNotMatch(wranglerSource, /pattern = "pj-assistant\.ai\/\*"/);
+  assert.doesNotMatch(wranglerSource, /pattern = "pj-assistant\.ai\/webhook"/);
+  assert.match(wranglerSource, /POST \/webhook is intentionally not deployed/);
   assert.match(
     wranglerSource,
     /PJ_TOOL_BRIDGE_URL = "https:\/\/replace-with-private-runtime\/execute-tool"/,

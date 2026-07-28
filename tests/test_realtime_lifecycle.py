@@ -158,6 +158,12 @@ class TestRealtimeSessionLifecycle(unittest.TestCase):
         self.assertEqual(error["request_id"], request_id)
         return error
 
+    def test_health_does_not_advertise_unsupported_webhook(self):
+        response = self.client.get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("/webhook", response.get_json()["endpoints"])
+
     def test_rejects_unsupported_protocol_versions(self):
         response = self.client.post(
             "/responses/sessions",

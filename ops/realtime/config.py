@@ -3,7 +3,7 @@
 realtime_config.py — shared OpenAI Realtime session configuration for PJ.
 
 Used by both voice front-ends:
-  - realtime_server.py  (browser WebRTC signaling + SIP webhook)
+  - realtime_server.py  (browser WebRTC signaling)
   - voice.py            (terminal voice mode, `pj voice`)
 
 Both configure the same realtime session: PJ's model, instructions, voice,
