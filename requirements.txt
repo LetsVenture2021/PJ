@@ -30,7 +30,7 @@ jsonschema-specifications==2025.9.1
 lxml==6.1.1
 Markdown==3.10.2
 MarkupSafe==3.0.3
-openai==2.48.0
+openai==2.49.0
 openpyxl==3.1.5
 packaging==26.2
 pillow==12.3.0
@@ -47,7 +47,7 @@ requests==2.34.2
 rpds-py==2026.6.3
 sniffio==1.3.1
 sounddevice==0.5.5
-tqdm==4.69.1
+tqdm==4.70.0
 typing-inspection==0.4.2
 typing_extensions==4.16.0
 urllib3==2.7.0
