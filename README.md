@@ -87,8 +87,8 @@ interface and use the OpenAI adapter in `ops/shared/providers`.
 - Node.js 20.19+ with the built-in `node:test` runner for Worker tests.
 - A microphone, speakers, and PortAudio-compatible audio devices for terminal
   voice.
-- A Cloudflare account, an existing DNS zone, Wrangler, and Cloudflare Access
-  only when deploying the Worker.
+- A Cloudflare account, an existing DNS zone, Wrangler v4.115.0, and Cloudflare
+  Access only when deploying the Worker.
 
 The `./pj` launcher is a zsh script that specifically expects `venv/bin/python`
 and `~/.env`, so use that virtual-environment name:
@@ -352,7 +352,7 @@ It deploys API routes only; it does **not** deploy `webrtc_client.html` or
 1. Install and authenticate Wrangler:
 
    ```bash
-   npm install --global wrangler
+   npm install --global wrangler@4.115.0
    wrangler login
    cp wrangler.toml.example wrangler.toml
    ```
