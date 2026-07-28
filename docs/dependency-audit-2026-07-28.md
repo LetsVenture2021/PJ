@@ -4,7 +4,12 @@
 
 - Python runtime dependencies in `requirements.txt`
 - Python development dependencies in `requirements-dev.txt`
-- JavaScript Worker/client dependencies from `package.json` and `package-lock.json`
+- Worker and client JavaScript dependencies in `package.json` and `package-lock.json`
+
+Every Python requirement and direct npm dependency is pinned to an explicit
+version. The npm lockfile pins the complete transitive JavaScript dependency
+graph. The Worker and browser client do not import third-party npm packages at
+runtime; the declared npm packages are development-only quality tools.
 
 ## Results
 

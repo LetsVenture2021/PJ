@@ -1,6 +1,9 @@
 {
   "name": "pj-worker-quality",
   "private": true,
+  "engines": {
+    "node": ">=20.19.0"
+  },
   "prettier": {
     "printWidth": 100
   },
