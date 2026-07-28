@@ -39,7 +39,7 @@ import chatlog
 import docops
 import promptops
 import skills
-from pj_contract import CONTRACT_VERSION
+from pj_contract import CONTRACT_VERSION, PROTOCOL_VERSION
 from ops.shared.logging import (
     bind_log_context,
     clear_log_context,
@@ -105,6 +105,7 @@ def _start_request_logging():
         "http.request.started",
         extra={"http_method": request.method, "http_path": request.path},
     )
+    return _validate_protocol_request(req_id)
 
 
 @app.after_request
@@ -158,10 +159,11 @@ def _trim_detail(detail):
 
 def _json_response(payload, status=200, req_id=None):
     req_id = req_id or _request_id()
-    body = json.dumps(payload)
+    body = json.dumps({**payload, "version": PROTOCOL_VERSION})
     resp = Response(body, status=status, mimetype="application/json")
     resp.headers["x-request-id"] = req_id
     resp.headers["x-pj-contract-version"] = CONTRACT_VERSION
+    resp.headers["x-pj-protocol-version"] = str(PROTOCOL_VERSION)
     return resp
 
 
@@ -178,6 +180,48 @@ def _error_response(code, message, status, req_id, detail=None):
         },
         status=status,
         req_id=req_id,
+    )
+
+
+def _uses_pj_protocol():
+    return request.path in {
+        "/health",
+        "/session",
+        "/token",
+        "/execute-tool",
+        "/tool-schemas",
+    } or request.path.startswith("/responses/")
+
+
+def _validate_protocol_request(req_id):
+    if not _uses_pj_protocol():
+        return None
+    received = []
+    header_version = request.headers.get("x-pj-protocol-version")
+    if header_version is not None:
+        received.append(("header", header_version))
+    if request.is_json:
+        payload = request.get_json(silent=True)
+        if isinstance(payload, dict) and "version" in payload:
+            received.append(("message", payload["version"]))
+    unsupported = [
+        {"source": source, "version": version}
+        for source, version in received
+        if str(version) != str(PROTOCOL_VERSION)
+    ]
+    if not unsupported:
+        return None
+    return _error_response(
+        "unsupported_protocol_version",
+        "The PJ realtime protocol version is not supported.",
+        426,
+        req_id,
+        detail=json.dumps(
+            {
+                "received": unsupported,
+                "supported": [PROTOCOL_VERSION],
+            }
+        ),
     )
 
 
@@ -262,6 +306,8 @@ def _validated_json(req_id, *, allowed, required=()):
             400,
             req_id,
         )
+    payload = dict(payload)
+    payload.pop("version", None)
     extras = sorted(set(payload) - set(allowed))
     missing = sorted(set(required) - set(payload))
     if extras or missing:
@@ -529,8 +575,9 @@ def _validated_structured_output(value, req_id):
 
 
 def _sse(event):
-    event_type = event.get("type", "message")
-    return f"event: {event_type}\ndata: {json.dumps(event, default=str)}\n\n"
+    message = {**event, "version": PROTOCOL_VERSION}
+    event_type = message.get("type", "message")
+    return f"event: {event_type}\ndata: {json.dumps(message, default=str)}\n\n"
 
 
 @app.route("/", methods=["GET"])
@@ -558,6 +605,7 @@ def health():
             "ok": True,
             "service": "pj-realtime-server",
             "contract_version": CONTRACT_VERSION,
+            "protocol_version": PROTOCOL_VERSION,
             "tool_count": len(_function_tool_schemas()),
             "prompt_perfecting_version": promptops.PROMPT_PERFECTING_VERSION,
             "tool_policy_sha256": _tool_policy_sha256(),
@@ -922,6 +970,7 @@ def download_responses_artifact(artifact_id):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["x-request-id"] = req_id
     response.headers["x-pj-contract-version"] = CONTRACT_VERSION
+    response.headers["x-pj-protocol-version"] = str(PROTOCOL_VERSION)
     response.call_on_close(snapshot.close)
     return response
 
@@ -1030,6 +1079,7 @@ def stream_responses_turn(session_id):
     response.headers["X-Accel-Buffering"] = "no"
     response.headers["x-request-id"] = req_id
     response.headers["x-pj-contract-version"] = CONTRACT_VERSION
+    response.headers["x-pj-protocol-version"] = str(PROTOCOL_VERSION)
     return response
 
 
@@ -1439,6 +1489,7 @@ def resolve_responses_approval(session_id, approval_id):
     response.headers["X-Accel-Buffering"] = "no"
     response.headers["x-request-id"] = req_id
     response.headers["x-pj-contract-version"] = CONTRACT_VERSION
+    response.headers["x-pj-protocol-version"] = str(PROTOCOL_VERSION)
     return response
 
 
@@ -1539,6 +1590,7 @@ def webrtc_session():
     sdp_response = Response(resp.text, status=resp.status_code, mimetype="application/sdp")
     sdp_response.headers["x-request-id"] = req_id
     sdp_response.headers["x-pj-contract-version"] = CONTRACT_VERSION
+    sdp_response.headers["x-pj-protocol-version"] = str(PROTOCOL_VERSION)
     if session_id:
         sdp_response.headers["x-pj-session-id"] = session_id
     return sdp_response
@@ -1566,6 +1618,8 @@ def mint_realtime_token():
             400,
             req_id,
         )
+    payload = dict(payload)
+    payload.pop("version", None)
     extras = sorted(set(payload) - {"session_id", "voice_mode"})
     session_id = payload.get("session_id", "")
     voice_mode = payload.get("voice_mode", "fast")
@@ -1687,6 +1741,15 @@ def execute_tool():
             400,
             req_id,
         )
+    if not isinstance(payload, dict):
+        return _error_response(
+            "invalid_json",
+            "Expected a JSON object for /execute-tool.",
+            400,
+            req_id,
+        )
+    payload = dict(payload)
+    payload.pop("version", None)
 
     name = payload.get("name")
     if not isinstance(name, str) or not name.strip():
