@@ -18,11 +18,13 @@ class CodeOpsTestCase(unittest.TestCase):
         self.root = Path(self.temp.name) / "repo"
         self.root.mkdir()
         self.db = Path(self.temp.name) / "codeops.sqlite3"
+        self.old_db = codeops._DB_PATH
         codeops._DB_PATH = self.db
         self.old_roots = os.environ.get("PJ_CODEOPS_ALLOWED_ROOTS")
         os.environ["PJ_CODEOPS_ALLOWED_ROOTS"] = str(self.root)
 
     def tearDown(self):
+        codeops._DB_PATH = self.old_db
         if self.old_roots is None:
             os.environ.pop("PJ_CODEOPS_ALLOWED_ROOTS", None)
         else:

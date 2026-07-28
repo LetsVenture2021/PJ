@@ -29,6 +29,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from contextlib import contextmanager
@@ -47,11 +48,19 @@ _SYNC_LOCK_PATH = Path(
     or Path.home() / "Library" / "Application Support" / "PJ"
     / "vector-store-sync.lock"
 )
+_VECTOR_SOURCE_CACHE_DIR = Path(
+    os.getenv("PJ_VECTOR_SOURCE_CACHE_DIR")
+    or Path.home() / "Library" / "Application Support" / "PJ"
+    / "vector-source-cache"
+)
 
 DEFAULT_MAX_CHARS_PER_FILE = 5_000_000
 MAX_MAX_CHARS_PER_FILE = 25_000_000
 DEFAULT_REQUEST_RETRIES = 4
 DEFAULT_RETRY_BACKOFF_SECONDS = 0.5
+DOWNLOADABLE_FILE_PURPOSES = {
+    "assistants_output", "batch_output", "fine-tune-results"
+}
 
 # Names that can never be overridden by generated skills.
 RESERVED_NAMES = {
@@ -187,7 +196,10 @@ def _db():
             "run_type": "TEXT DEFAULT 'learn'",
             "force": "INTEGER DEFAULT 0",
             "files_skipped_unchanged": "INTEGER DEFAULT 0",
+            "files_skipped_unavailable": "INTEGER DEFAULT 0",
+            "files_skipped_unsupported": "INTEGER DEFAULT 0",
             "files_failed": "INTEGER DEFAULT 0",
+            "guidance_records_imported": "INTEGER DEFAULT 0",
         }.items():
             if column not in existing_run_columns:
                 conn.execute(
@@ -359,6 +371,169 @@ def _get_openai_file_metadata(file_id: str, api_key: str) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def _list_openai_file_metadata(api_key: str, file_ids: set[str]) -> dict:
+    """Bulk-resolve File metadata so large stores avoid one request per file."""
+    remaining = {str(file_id) for file_id in file_ids if file_id}
+    metadata = {}
+    after = None
+    seen_cursors = set()
+    while remaining:
+        params = {"limit": 10_000, "order": "desc"}
+        if after:
+            params["after"] = after
+        response = _request_with_retry(
+            "https://api.openai.com/v1/files",
+            headers=_openai_headers(api_key),
+            params=params,
+            timeout=60,
+        )
+        try:
+            payload = response.json()
+        finally:
+            response.close()
+        data = payload.get("data", [])
+        for item in data:
+            file_id = str(item.get("id") or "")
+            if file_id in remaining:
+                metadata[file_id] = item
+                remaining.remove(file_id)
+        if not payload.get("has_more") or not data:
+            break
+        cursor = payload.get("last_id") or data[-1].get("id")
+        if not cursor or cursor in seen_cursors:
+            break
+        seen_cursors.add(cursor)
+        after = cursor
+
+    for file_id in remaining:
+        metadata[file_id] = _get_openai_file_metadata(file_id, api_key)
+    return metadata
+
+
+def _file_content_is_downloadable(metadata: dict) -> bool:
+    purpose = str(metadata.get("purpose") or "").strip().lower()
+    return not purpose or purpose in DOWNLOADABLE_FILE_PURPOSES
+
+
+def _safe_file_id(file_id: str) -> str:
+    value = str(file_id or "")
+    if (
+        not value.startswith("file-")
+        or len(value) > 128
+        or any(not (char.isalnum() or char in "-_") for char in value)
+    ):
+        raise ValueError("invalid OpenAI file ID")
+    return value
+
+
+def cache_vector_source(file_id: str, content: bytes, *,
+                        filename: str = "", source_sha256: str = "") -> dict:
+    """Securely cache source text that OpenAI's input File API cannot return."""
+    file_id = _safe_file_id(file_id)
+    if not isinstance(content, bytes):
+        raise ValueError("content must be bytes")
+    if len(content) > MAX_MAX_CHARS_PER_FILE:
+        raise ValueError(
+            f"source exceeds cache limit ({MAX_MAX_CHARS_PER_FILE} bytes)"
+        )
+    content.decode("utf-8")
+    actual_sha256 = hashlib.sha256(content).hexdigest()
+    if source_sha256 and source_sha256 != actual_sha256:
+        raise ValueError("source_sha256 does not match content")
+
+    if (
+        _VECTOR_SOURCE_CACHE_DIR.exists()
+        and _VECTOR_SOURCE_CACHE_DIR.is_symlink()
+    ):
+        raise RuntimeError("vector source cache directory must not be a symlink")
+    _VECTOR_SOURCE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    os.chmod(_VECTOR_SOURCE_CACHE_DIR, 0o700)
+    content_path = _VECTOR_SOURCE_CACHE_DIR / f"{file_id}.content"
+    manifest_path = _VECTOR_SOURCE_CACHE_DIR / f"{file_id}.json"
+    manifest = {
+        "file_id": file_id,
+        "filename": str(filename or ""),
+        "bytes": len(content),
+        "source_sha256": actual_sha256,
+        "cached_at": datetime.now(timezone.utc).isoformat(),
+    }
+    temporary_paths = []
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=_VECTOR_SOURCE_CACHE_DIR,
+            prefix=f".{file_id}.",
+            delete=False,
+        ) as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+            temporary_content = Path(handle.name)
+            temporary_paths.append(temporary_content)
+        temporary_manifest = (
+            _VECTOR_SOURCE_CACHE_DIR / f".{file_id}.{uuid.uuid4().hex}.json"
+        )
+        temporary_manifest.write_text(
+            json.dumps(manifest, sort_keys=True),
+            encoding="utf-8",
+        )
+        temporary_paths.append(temporary_manifest)
+        os.chmod(temporary_content, 0o600)
+        os.chmod(temporary_manifest, 0o600)
+        os.replace(temporary_content, content_path)
+        os.replace(temporary_manifest, manifest_path)
+    finally:
+        for path in temporary_paths:
+            path.unlink(missing_ok=True)
+    return {
+        "status": "cached",
+        "file_id": file_id,
+        "filename": manifest["filename"],
+        "bytes": manifest["bytes"],
+        "source_sha256": actual_sha256,
+    }
+
+
+def _read_cached_vector_source(file_id: str, metadata: dict, entry: dict,
+                               max_chars_per_file: int) -> str | None:
+    file_id = _safe_file_id(file_id)
+    if (
+        _VECTOR_SOURCE_CACHE_DIR.exists()
+        and _VECTOR_SOURCE_CACHE_DIR.is_symlink()
+    ):
+        raise RuntimeError("vector source cache directory must not be a symlink")
+    content_path = _VECTOR_SOURCE_CACHE_DIR / f"{file_id}.content"
+    manifest_path = _VECTOR_SOURCE_CACHE_DIR / f"{file_id}.json"
+    if not content_path.exists() and not manifest_path.exists():
+        return None
+    if (
+        not content_path.is_file()
+        or content_path.is_symlink()
+        or not manifest_path.is_file()
+        or manifest_path.is_symlink()
+    ):
+        raise RuntimeError(f"cached source for {file_id} is incomplete or unsafe")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    content = content_path.read_bytes()
+    actual_sha256 = hashlib.sha256(content).hexdigest()
+    expected_sha256 = str(
+        (entry.get("attributes") or {}).get("source_sha256")
+        or manifest.get("source_sha256")
+        or ""
+    )
+    if expected_sha256 and actual_sha256 != expected_sha256:
+        raise RuntimeError(f"cached source hash mismatch for {file_id}")
+    expected_bytes = int(metadata.get("bytes") or manifest.get("bytes") or 0)
+    if expected_bytes and len(content) != expected_bytes:
+        raise RuntimeError(f"cached source byte count mismatch for {file_id}")
+    text = content.decode("utf-8")
+    if max_chars_per_file > 0 and len(text) > max_chars_per_file:
+        raise ValueError(
+            f"file {file_id} exceeds max_chars_per_file "
+            f"({max_chars_per_file}); no partial content was processed"
+        )
+    return text
+
+
 def _read_openai_file_content(file_id: str, api_key: str,
                               max_chars_per_file: int,
                               expected_bytes: int = 0) -> tuple[str, bool]:
@@ -453,6 +628,7 @@ def learn_from_vector_store(
     totals = {
         "files_seen": 0,
         "files_processed": 0,
+        "files_skipped_unavailable": 0,
         "templates_created": 0,
         "templates_updated": 0,
         "aliases_registered": 0,
@@ -472,6 +648,13 @@ def learn_from_vector_store(
 
         files = _list_vector_store_files(vector_store_id, api_key, max_files)
         totals["files_seen"] = len(files)
+        metadata_by_id = _list_openai_file_metadata(
+            api_key,
+            {
+                str(entry.get("file_id") or entry.get("id") or "")
+                for entry in files
+            },
+        )
 
         import docops
 
@@ -479,9 +662,40 @@ def learn_from_vector_store(
             content_file_id = entry.get("file_id") or entry.get("id")
             if not content_file_id:
                 continue
-            text, truncated = _read_openai_file_content(
-                content_file_id, api_key, max_chars_per_file
+            metadata = metadata_by_id.get(str(content_file_id), {})
+            filename = str(
+                metadata.get("filename")
+                or entry.get("filename")
+                or content_file_id
             )
+            cached_text = _read_cached_vector_source(
+                str(content_file_id),
+                metadata,
+                entry,
+                max_chars_per_file,
+            )
+            if (
+                cached_text is None
+                and not _file_content_is_downloadable(metadata)
+            ):
+                totals["files_skipped_unavailable"] += 1
+                file_reports.append({
+                    "file_id": content_file_id,
+                    "vector_store_file_id": entry.get("id"),
+                    "filename": filename,
+                    "purpose": metadata.get("purpose"),
+                    "status": "skipped_content_unavailable",
+                })
+                continue
+            if cached_text is not None:
+                text, truncated = cached_text, False
+            else:
+                text, truncated = _read_openai_file_content(
+                    content_file_id,
+                    api_key,
+                    max_chars_per_file,
+                    expected_bytes=metadata.get("bytes") or 0,
+                )
             totals["files_processed"] += 1
             imported = docops.import_doc_templates_from_knowledge_pack_text(
                 text,
@@ -503,7 +717,8 @@ def learn_from_vector_store(
             file_reports.append({
                 "file_id": content_file_id,
                 "vector_store_file_id": entry.get("id"),
-                "filename": entry.get("filename"),
+                "filename": filename,
+                "purpose": metadata.get("purpose"),
                 "truncated": truncated,
                 "items_total": imported.get("items_total", 0),
                 "templates_created": imported.get("templates_created", 0),
@@ -558,6 +773,7 @@ def learn_from_vector_store(
             "dry_run": bool(dry_run),
             "files_seen": totals["files_seen"],
             "files_processed": totals["files_processed"],
+            "files_skipped_unavailable": totals["files_skipped_unavailable"],
             "templates_created": totals["templates_created"],
             "templates_updated": totals["templates_updated"],
             "aliases_registered": totals["aliases_registered"],
@@ -739,6 +955,45 @@ def _record_sync_success(vector_store_id: str, source_file_id: str,
         )
 
 
+def _record_sync_handled(vector_store_id: str, source_file_id: str,
+                         vector_store_file_id: str, filename: str,
+                         version_hash: str, sync_policy_hash: str,
+                         run_id: str, status: str, detail: str = ""):
+    """Persist a version that was safely classified without importing content."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO skillops_vector_sync_files "
+            "(vector_store_id, source_file_id, vector_store_file_id, filename, "
+            "success_version_hash, sync_policy_hash, content_sha256, "
+            "content_chars, synchronized_at, "
+            "last_attempt_run_id, last_attempt_status, last_attempt_error, "
+            "last_attempt_at) VALUES (?,?,?,?,?,?,NULL,0,NULL,?,?,?,?) "
+            "ON CONFLICT(vector_store_id, source_file_id) DO UPDATE SET "
+            "vector_store_file_id=excluded.vector_store_file_id, "
+            "filename=excluded.filename, "
+            "success_version_hash=excluded.success_version_hash, "
+            "sync_policy_hash=excluded.sync_policy_hash, "
+            "content_sha256=NULL, content_chars=0, synchronized_at=NULL, "
+            "last_attempt_run_id=excluded.last_attempt_run_id, "
+            "last_attempt_status=excluded.last_attempt_status, "
+            "last_attempt_error=excluded.last_attempt_error, "
+            "last_attempt_at=excluded.last_attempt_at",
+            (
+                vector_store_id,
+                source_file_id,
+                vector_store_file_id,
+                filename,
+                version_hash,
+                sync_policy_hash,
+                run_id,
+                status,
+                (detail or "")[:1000] or None,
+                now,
+            ),
+        )
+
+
 def _content_was_synchronized(vector_store_id: str,
                               content_sha256: str,
                               sync_policy_hash: str) -> bool:
@@ -788,7 +1043,9 @@ def _finish_sync_run(run_id: str, status: str, totals: dict,
         conn.execute(
             "UPDATE skillops_learning_runs SET "
             "files_seen=?, files_processed=?, files_skipped_unchanged=?, "
+            "files_skipped_unavailable=?, files_skipped_unsupported=?, "
             "files_failed=?, templates_created=?, templates_updated=?, "
+            "guidance_records_imported=?, "
             "aliases_registered=?, items_skipped_provisional=?, "
             "items_skipped_invalid=?, status=?, error=?, details_json=?, "
             "finished_at=? WHERE run_id=?",
@@ -796,9 +1053,12 @@ def _finish_sync_run(run_id: str, status: str, totals: dict,
                 totals["files_seen"],
                 totals["files_processed"],
                 totals["files_skipped_unchanged"],
+                totals["files_skipped_unavailable"],
+                totals["files_skipped_unsupported"],
                 totals["files_failed"],
                 totals["templates_created"],
                 totals["templates_updated"],
+                totals["guidance_records_imported"],
                 totals["aliases_registered"],
                 totals["items_skipped_provisional"],
                 totals["items_skipped_invalid"],
@@ -818,7 +1078,7 @@ def sync_vector_store(
         include_provisional: bool = True,
         max_chars_per_file: int = DEFAULT_MAX_CHARS_PER_FILE,
         force: bool = False) -> dict:
-    """Idempotently synchronize changed vector-store files into DocOps."""
+    """Synchronize downloadable vector files into governed DocOps/CodeOps."""
     max_files = max(0, int(max_files or 0))
     max_chars_per_file = max(
         10_000,
@@ -832,9 +1092,12 @@ def sync_vector_store(
         "files_seen": 0,
         "files_processed": 0,
         "files_skipped_unchanged": 0,
+        "files_skipped_unavailable": 0,
+        "files_skipped_unsupported": 0,
         "files_failed": 0,
         "templates_created": 0,
         "templates_updated": 0,
+        "guidance_records_imported": 0,
         "aliases_registered": 0,
         "items_skipped_provisional": 0,
         "items_skipped_invalid": 0,
@@ -893,12 +1156,20 @@ def sync_vector_store(
             api_key = _require_openai_api_key()
             files = _list_vector_store_files(vector_store_id, api_key, max_files)
             totals["files_seen"] = len(files)
+            metadata_by_id = _list_openai_file_metadata(
+                api_key,
+                {
+                    str(entry.get("file_id") or entry.get("id") or "")
+                    for entry in files
+                },
+            )
             sync_policy_hash = _sync_policy_hash(
                 overwrite_existing,
                 include_provisional,
             )
 
             import docops
+            import codeops
 
             for entry in files:
                 source_file_id = str(entry.get("file_id") or entry.get("id") or "")
@@ -912,9 +1183,12 @@ def sync_vector_store(
                 try:
                     if not source_file_id:
                         raise ValueError("vector-store entry has no file identity")
-                    metadata = _get_openai_file_metadata(source_file_id, api_key)
+                    metadata = metadata_by_id.get(source_file_id) or (
+                        _get_openai_file_metadata(source_file_id, api_key)
+                    )
                     filename = str(metadata.get("filename") or filename)
                     report["filename"] = filename
+                    report["purpose"] = metadata.get("purpose")
                     version_hash = _sync_version_hash(
                         entry,
                         metadata,
@@ -939,12 +1213,51 @@ def sync_vector_store(
                         reports.append(report)
                         continue
 
-                    text, truncated = _read_openai_file_content(
+                    cached_text = _read_cached_vector_source(
                         source_file_id,
-                        api_key,
+                        metadata,
+                        entry,
                         max_chars_per_file,
-                        expected_bytes=metadata.get("bytes") or 0,
                     )
+                    if (
+                        cached_text is None
+                        and not _file_content_is_downloadable(metadata)
+                    ):
+                        totals["files_skipped_unavailable"] += 1
+                        purpose = str(metadata.get("purpose") or "unknown")
+                        report.update({
+                            "status": "skipped_content_unavailable",
+                            "reason": (
+                                f"OpenAI does not expose content downloads for "
+                                f"purpose={purpose}"
+                            ),
+                        })
+                        if not dry_run:
+                            _record_sync_handled(
+                                vector_store_id,
+                                source_file_id,
+                                vector_store_file_id,
+                                filename,
+                                version_hash,
+                                sync_policy_hash,
+                                run_id,
+                                "skipped_content_unavailable",
+                                report["reason"],
+                            )
+                        reports.append(report)
+                        continue
+
+                    if cached_text is not None:
+                        text, truncated = cached_text, False
+                        report["content_source"] = "verified_local_cache"
+                    else:
+                        text, truncated = _read_openai_file_content(
+                            source_file_id,
+                            api_key,
+                            max_chars_per_file,
+                            expected_bytes=metadata.get("bytes") or 0,
+                        )
+                        report["content_source"] = "openai_files_api"
                     if truncated:
                         raise RuntimeError(
                             "partial file reads are not eligible for synchronization"
@@ -979,51 +1292,141 @@ def sync_vector_store(
                         reports.append(report)
                         continue
 
-                    preflight = docops.import_doc_templates_from_knowledge_pack_text(
-                        text,
-                        overwrite_existing=overwrite_existing,
-                        include_provisional=include_provisional,
-                        dry_run=True,
+                    docops_preflight = (
+                        docops.import_doc_templates_from_knowledge_pack_text(
+                            text,
+                            overwrite_existing=overwrite_existing,
+                            include_provisional=include_provisional,
+                            dry_run=True,
+                        )
                     )
+                    docops_invalid = int(
+                        docops_preflight.get("items_skipped_invalid", 0)
+                    )
+                    docops_errors = docops_preflight.get("errors", [])
+                    imported = {}
+                    content_type = ""
+                    guidance_preflight = {}
+                    guidance_error = ""
+
+                    if (
+                        int(docops_preflight.get("items_total", 0)) > 0
+                        and not docops_invalid
+                        and not docops_errors
+                    ):
+                        content_type = "docops_knowledge_pack"
+                        imported = docops_preflight
+                        if not dry_run:
+                            imported = (
+                                docops.import_doc_templates_from_knowledge_pack_text(
+                                    text,
+                                    overwrite_existing=overwrite_existing,
+                                    include_provisional=include_provisional,
+                                    dry_run=False,
+                                )
+                            )
+                    else:
+                        try:
+                            guidance_preflight = codeops.import_codeops_guidance(
+                                text,
+                                source_label=filename,
+                                historical_context_acknowledged=True,
+                                dry_run=True,
+                            )
+                        except ValueError as exc:
+                            guidance_error = str(exc)
+                        if int(guidance_preflight.get("record_count", 0)) > 0:
+                            content_type = "codeops_guidance"
+                            imported = guidance_preflight
+                            if not dry_run:
+                                imported = codeops.import_codeops_guidance(
+                                    text,
+                                    source_label=filename,
+                                    historical_context_acknowledged=True,
+                                )
+                        elif "---ITEM_START:" not in text:
+                            totals["files_skipped_unsupported"] += 1
+                            report.update({
+                                "status": "skipped_unsupported_content",
+                                "content_sha256": content_sha256,
+                                "content_chars": len(text),
+                                "reason": (
+                                    "no supported DocOps or CodeOps ITEM blocks"
+                                ),
+                            })
+                            if not dry_run:
+                                _record_sync_handled(
+                                    vector_store_id,
+                                    source_file_id,
+                                    vector_store_file_id,
+                                    filename,
+                                    version_hash,
+                                    sync_policy_hash,
+                                    run_id,
+                                    "skipped_unsupported_content",
+                                    report["reason"],
+                                )
+                            reports.append(report)
+                            continue
+                        else:
+                            error_parts = [
+                                *[str(error) for error in docops_errors[:3]],
+                            ]
+                            if docops_invalid:
+                                error_parts.append(
+                                    f"{docops_invalid} invalid DocOps item(s)"
+                                )
+                            if guidance_error:
+                                error_parts.append(guidance_error)
+                            raise RuntimeError(
+                                "supported ITEM blocks were incomplete: "
+                                + "; ".join(error_parts)
+                            )
+
                     invalid_count = int(
-                        preflight.get("items_skipped_invalid", 0)
+                        imported.get("items_skipped_invalid", 0)
                     )
-                    import_errors = preflight.get("errors", [])
+                    import_errors = imported.get("errors", [])
                     if invalid_count or import_errors:
                         raise RuntimeError(
-                            f"DocOps import was incomplete: "
+                            f"import was incomplete: "
                             f"{invalid_count} invalid item(s); "
                             f"{'; '.join(import_errors[:3])}"
                         )
-                    imported = preflight
-                    if not dry_run:
-                        imported = (
-                            docops.import_doc_templates_from_knowledge_pack_text(
-                                text,
-                                overwrite_existing=overwrite_existing,
-                                include_provisional=include_provisional,
-                                dry_run=False,
-                            )
-                        )
 
                     totals["files_processed"] += 1
-                    for key in (
-                        "templates_created",
-                        "templates_updated",
-                        "aliases_registered",
-                        "items_skipped_provisional",
-                        "items_skipped_invalid",
-                    ):
-                        totals[key] += int(imported.get(key, 0))
+                    if content_type == "docops_knowledge_pack":
+                        for key in (
+                            "templates_created",
+                            "templates_updated",
+                            "aliases_registered",
+                            "items_skipped_provisional",
+                            "items_skipped_invalid",
+                        ):
+                            totals[key] += int(imported.get(key, 0))
+                    else:
+                        totals["guidance_records_imported"] += int(
+                            imported.get("record_count", 0)
+                        )
                     report.update({
                         "status": (
                             "would_synchronize" if dry_run else "synchronized"
                         ),
+                        "content_type": content_type,
                         "content_sha256": content_sha256,
                         "content_chars": len(text),
-                        "items_total": imported.get("items_total", 0),
-                        "templates_created": imported.get("templates_created", 0),
-                        "templates_updated": imported.get("templates_updated", 0),
+                        "items_total": imported.get(
+                            "items_total", imported.get("record_count", 0)
+                        ),
+                        "templates_created": imported.get(
+                            "templates_created", 0
+                        ),
+                        "templates_updated": imported.get(
+                            "templates_updated", 0
+                        ),
+                        "guidance_records_imported": imported.get(
+                            "record_count", 0
+                        ),
                     })
                     if not dry_run:
                         _record_sync_success(
@@ -1112,8 +1515,10 @@ def get_vector_sync_status(limit: int = 10) -> dict:
     with _db() as conn:
         run_rows = conn.execute(
             "SELECT run_id, vector_store_id, status, dry_run, force, "
-            "files_seen, files_processed, files_skipped_unchanged, files_failed, "
-            "templates_created, templates_updated, error, started_at, finished_at "
+            "files_seen, files_processed, files_skipped_unchanged, "
+            "files_skipped_unavailable, files_skipped_unsupported, files_failed, "
+            "templates_created, templates_updated, guidance_records_imported, "
+            "error, started_at, finished_at "
             "FROM skillops_learning_runs WHERE run_type='sync' "
             "ORDER BY started_at DESC LIMIT ?",
             (limit,),
@@ -1136,12 +1541,15 @@ def get_vector_sync_status(limit: int = 10) -> dict:
                 "files_seen": row[5],
                 "files_processed": row[6],
                 "files_skipped_unchanged": row[7],
-                "files_failed": row[8],
-                "templates_created": row[9],
-                "templates_updated": row[10],
-                "error": row[11],
-                "started_at": row[12],
-                "finished_at": row[13],
+                "files_skipped_unavailable": row[8],
+                "files_skipped_unsupported": row[9],
+                "files_failed": row[10],
+                "templates_created": row[11],
+                "templates_updated": row[12],
+                "guidance_records_imported": row[13],
+                "error": row[14],
+                "started_at": row[15],
+                "finished_at": row[16],
             }
             for row in run_rows
         ],
@@ -1553,12 +1961,14 @@ SKILLOPS_SCHEMAS = [
                                 "description": "Complete-file safety limit (default 5,000,000; files over the limit fail without partial import)"},
      }, "required": []}},
     {"type": "function", "name": "sync_vector_store",
-     "description": ("Idempotently synchronize new or changed vector-store "
-                    "files into DocOps using durable metadata/content "
-                    "deduplication, a cross-process lock, and run audit."),
+     "description": ("Idempotently synchronize hash-cached vector-store "
+                    "sources into DocOps templates or CodeOps guidance using "
+                    "durable deduplication, a cross-process lock, and run audit. "
+                    "Provider-hosted inputs without an approved local cache are "
+                    "classified as unavailable rather than partially imported."),
      "parameters": {"type": "object", "properties": {
         "dry_run": {"type": "boolean",
-                    "description": "Report changes without mutating DocOps or file sync state"},
+                    "description": "Report changes without mutating DocOps, CodeOps, or file sync state"},
         "max_files": {"type": "integer",
                       "description": "Optional file cap (0=all)"},
         "overwrite_existing": {"type": "boolean",

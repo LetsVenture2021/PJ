@@ -373,6 +373,7 @@ required_sections:
 class TestVectorStoreSync(unittest.TestCase):
     def setUp(self):
         self.lock_path = Path(tempfile.mkdtemp()) / "vector-sync.lock"
+        self.cache_path = self.lock_path.parent / "vector-source-cache"
         self.pack_text = """\
 ---ITEM_START: SYNC-ITEM-1---
 item_id: SYNC-ITEM-1
@@ -394,12 +395,15 @@ required_sections:
             "filename": "sync-pack.md",
             "bytes": len(self.pack_text),
             "created_at": 100,
-            "purpose": "assistants",
+            "purpose": "assistants_output",
         }
 
     def _run_sync(self, **kwargs):
         with (
             mock.patch.object(skillops, "_SYNC_LOCK_PATH", self.lock_path),
+            mock.patch.object(
+                skillops, "_VECTOR_SOURCE_CACHE_DIR", self.cache_path
+            ),
             mock.patch.object(
                 skillops, "_require_vector_store_id", return_value="vs-test"
             ),
@@ -413,8 +417,10 @@ required_sections:
             ),
             mock.patch.object(
                 skillops,
-                "_get_openai_file_metadata",
-                return_value=dict(self.metadata),
+                "_list_openai_file_metadata",
+                return_value={
+                    str(self.entry["file_id"]): dict(self.metadata)
+                },
             ),
             mock.patch.object(
                 skillops,
@@ -460,6 +466,9 @@ required_sections:
         with (
             mock.patch.object(skillops, "_SYNC_LOCK_PATH", self.lock_path),
             mock.patch.object(
+                skillops, "_VECTOR_SOURCE_CACHE_DIR", self.cache_path
+            ),
+            mock.patch.object(
                 skillops, "_require_vector_store_id", return_value="vs-test"
             ),
             mock.patch.object(
@@ -469,7 +478,9 @@ required_sections:
                 skillops, "_list_vector_store_files", return_value=[entry]
             ),
             mock.patch.object(
-                skillops, "_get_openai_file_metadata", return_value=metadata
+                skillops,
+                "_list_openai_file_metadata",
+                return_value={"file-sync-failure": metadata},
             ),
             mock.patch.object(
                 skillops,
@@ -487,6 +498,112 @@ required_sections:
         )
         self.assertIsNone(file_state["synchronized_at"])
         self.assertEqual(file_state["last_attempt_status"], "failed")
+
+    def test_non_downloadable_file_is_classified_without_repeated_failure(self):
+        self.metadata["purpose"] = "assistants"
+        first = self._run_sync()
+        self.assertEqual(first["status"], "completed")
+        self.assertEqual(first["files_processed"], 0)
+        self.assertEqual(first["files_skipped_unavailable"], 1)
+        self.assertEqual(first["files_failed"], 0)
+
+        status = skillops.get_vector_sync_status(limit=10)
+        file_state = next(
+            row for row in status["files"]
+            if row["file_id"] == "file-sync-1"
+        )
+        self.assertIsNone(file_state["synchronized_at"])
+        self.assertEqual(
+            file_state["last_attempt_status"],
+            "skipped_content_unavailable",
+        )
+
+        second = self._run_sync()
+        self.assertEqual(second["files_skipped_unchanged"], 1)
+        self.assertEqual(second["files_skipped_unavailable"], 0)
+
+    def test_verified_cache_makes_input_file_synchronizable(self):
+        self.metadata["purpose"] = "user_data"
+        with mock.patch.object(
+            skillops, "_VECTOR_SOURCE_CACHE_DIR", self.cache_path
+        ):
+            cached = skillops.cache_vector_source(
+                "file-sync-1",
+                self.pack_text.encode("utf-8"),
+                filename=self.metadata["filename"],
+            )
+        self.entry["attributes"]["source_sha256"] = cached["source_sha256"]
+        result = self._run_sync()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["files_processed"], 1)
+        self.assertEqual(
+            result["file_reports"][0]["content_source"],
+            "verified_local_cache",
+        )
+
+    def test_sync_imports_codeops_guidance_corpus(self):
+        self.entry = {
+            "id": "vs-file-codeops",
+            "file_id": "file-codeops",
+            "created_at": 300,
+        }
+        self.pack_text = """\
+---ITEM_START: DOC-SYNC---
+```yaml
+item_id: "DOC-SYNC"
+source_page_url: "https://example.test/codeops"
+canonical_title: "Synced CodeOps Guide"
+tool_family: "CodeOps"
+surface: "CLI"
+version_scope: "historical"
+corpus_status: "training_ready_current_docs_override"
+requires_current_docs_check: true
+content_sha256: "sync-hash"
+```
+**What this item teaches:** Safe synchronized coding guidance.
+#### Appropriate tasks
+- inspect code
+#### Recommended operating workflow
+1. Inspect.
+#### Safety and governance controls
+- Use least privilege.
+#### Prompt contract
+State the objective.
+#### Output contract
+Return evidence.
+#### Evaluation checklist
+- [ ] Evidence exists.
+#### Current authoritative sources
+- https://example.test/current
+---ITEM_END: DOC-SYNC---
+"""
+        self.metadata = {
+            "id": "file-codeops",
+            "filename": "codeops-corpus.md",
+            "bytes": len(self.pack_text.encode("utf-8")),
+            "created_at": 300,
+            "purpose": "user_data",
+        }
+        with mock.patch.object(
+            skillops, "_VECTOR_SOURCE_CACHE_DIR", self.cache_path
+        ):
+            cached = skillops.cache_vector_source(
+                "file-codeops",
+                self.pack_text.encode("utf-8"),
+                filename=self.metadata["filename"],
+            )
+        self.entry["attributes"] = {
+            "source_sha256": cached["source_sha256"]
+        }
+        result = self._run_sync()
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["files_processed"], 1)
+        self.assertEqual(result["guidance_records_imported"], 1)
+        guide_ids = {
+            guide["item_id"]
+            for guide in codeops.list_codeops_guides(limit=100)["guides"]
+        }
+        self.assertIn("DOC-SYNC", guide_ids)
 
     def test_complete_reader_rejects_oversized_file_without_returning_prefix(self):
         class FakeResponse:

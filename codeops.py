@@ -1243,6 +1243,7 @@ def import_codeops_guidance(
     source_label: str = "user_provided_corpus",
     current_docs_checked: bool = False,
     historical_context_acknowledged: bool = False,
+    dry_run: bool = False,
 ) -> dict:
     """Parse ITEM blocks into the local CodeOps guidance table."""
     if not isinstance(corpus_text, str) or not corpus_text.strip():
@@ -1299,6 +1300,16 @@ def import_codeops_guidance(
         records.append(record)
     if not records:
         raise ValueError("no valid ITEM_START/ITEM_END blocks found")
+    details = {
+        "source_label": source_label[:200],
+        "source_sha256": _hash(corpus_text),
+        "record_count": len(records),
+        "item_ids": [record["item_id"] for record in records],
+        "current_docs_checked": bool(current_docs_checked),
+        "historical_context_acknowledged": bool(historical_context_acknowledged),
+    }
+    if dry_run:
+        return {"status": "dry_run_complete", **details}
     with _db() as conn:
         for record in records:
             conn.execute(
@@ -1342,14 +1353,6 @@ def import_codeops_guidance(
                     record["raw_content"], _now(),
                 ),
             )
-    details = {
-        "source_label": source_label[:200],
-        "source_sha256": _hash(corpus_text),
-        "record_count": len(records),
-        "item_ids": [record["item_id"] for record in records],
-        "current_docs_checked": bool(current_docs_checked),
-        "historical_context_acknowledged": bool(historical_context_acknowledged),
-    }
     _audit("import_codeops_guidance", "import_guidance", True, details)
     return {"status": "imported", **details}
 
