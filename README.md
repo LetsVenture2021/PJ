@@ -385,6 +385,7 @@ It deploys API routes only; it does **not** deploy `webrtc_client.html` or
 5. Validate and deploy:
 
    ```bash
+   python scripts/validate_wrangler_config.py wrangler.toml.example
    node --test tests/test_worker_auth.mjs
    wrangler deploy
    curl https://YOUR_DOMAIN/health

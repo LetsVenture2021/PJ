@@ -16,6 +16,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  non-secret-config:
+    name: Non-secret config
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate Wrangler example
+        run: python scripts/validate_wrangler_config.py wrangler.toml.example
+
   python-quality:
     name: Python quality
     runs-on: ubuntu-latest
