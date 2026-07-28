@@ -897,7 +897,7 @@ async function resolveRealtimeTools(env, requestId, requestUrl, forceRefresh = f
     }
     const instructions =
       parsed && typeof parsed.instructions === "string"
-        ? parsed.instructions.trim()
+        ? parsed.instructions
         : "";
     const instructionsSha256 =
       parsed && typeof parsed.instructions_sha256 === "string"
@@ -907,7 +907,7 @@ async function resolveRealtimeTools(env, requestId, requestUrl, forceRefresh = f
       ? await sha256Hex(instructions)
       : "";
     if (
-      !instructions
+      !instructions.trim()
       || !/^[a-f0-9]{64}$/.test(instructionsSha256)
       || actualInstructionsSha256 !== instructionsSha256
     ) {

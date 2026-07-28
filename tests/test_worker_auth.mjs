@@ -182,7 +182,7 @@ test("Realtime bridge validates contract, tool manifest, and instructions", asyn
       additionalProperties: false,
     },
   }];
-  const instructions = "Authoritative PJ instructions";
+  const instructions = "Authoritative PJ instructions\n";
   const digest = (value) => createHash("sha256").update(value).digest("hex");
   const payload = {
     contract_version: CONTRACT_VERSION,
