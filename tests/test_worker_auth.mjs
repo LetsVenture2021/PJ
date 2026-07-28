@@ -482,6 +482,18 @@ test("realtime excludes long-running tools and aligns bridge timeouts", () => {
   assert.equal(toolBridgeTimeoutMs("delegate_advanced_task"), 280000);
 });
 
+test("browser and Worker advertise the same contract version", async () => {
+  const source = await readFile(
+    new URL("../assets/pj_web_utils.js", import.meta.url),
+    "utf8",
+  );
+  const match = source.match(
+    /export const CONTRACT_VERSION = "([^"]+)";/,
+  );
+  assert.ok(match, "browser contract version must be declared");
+  assert.equal(match[1], CONTRACT_VERSION);
+});
+
 test("browser module initializes with Full Power helpers in shared scope", async () => {
   const html = await readFile(
     new URL("../webrtc_client.html", import.meta.url),
