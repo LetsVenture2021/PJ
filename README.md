@@ -331,6 +331,9 @@ Workflow failures only block merging after branch protection is enabled:
 
 ## Deployment
 
+For production triage, recovery, and rollback, follow the
+[incident runbook](docs/runbook.md).
+
 ### Cloudflare Worker
 
 `wrangler.toml.example` is the repository's only complete deployment manifest.
