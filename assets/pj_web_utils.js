@@ -1,4 +1,19 @@
 export const CONTRACT_VERSION = "2026-07-28.6";
+export const PROTOCOL_VERSION = 1;
+
+export function protocolMessage(payload = {}) {
+  return { version: PROTOCOL_VERSION, ...payload };
+}
+
+export function assertProtocolResponse(response, payload = null) {
+  const version =
+    payload?.version ?? response.headers.get("x-pj-protocol-version");
+  if (String(version) !== String(PROTOCOL_VERSION)) {
+    throw new Error(
+      `Unsupported PJ protocol version ${version ?? "missing"}; expected ${PROTOCOL_VERSION}.`,
+    );
+  }
+}
 
 export function createRequestId() {
   if (window.crypto && typeof window.crypto.randomUUID === "function") {
