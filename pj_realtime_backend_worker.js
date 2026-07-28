@@ -533,7 +533,7 @@ function toolBridgeTimeoutMs(toolName) {
 }
 
 function parseToolSchemaPayload(rawText, maxTools) {
-  let parsed = null;
+  let parsed;
   try {
     parsed = rawText ? JSON.parse(rawText) : null;
   } catch {
@@ -1067,7 +1067,7 @@ async function requestRealtimeClientSecret(
 }
 
 function extractClientSecretPayload(rawText) {
-  let parsed = null;
+  let parsed;
   try {
     parsed = rawText ? JSON.parse(rawText) : null;
   } catch {
@@ -1410,7 +1410,7 @@ async function handleToolSchemas(request, env, corsOrigin, requestId) {
 }
 
 async function handleExecuteTool(request, env, corsOrigin, requestId) {
-  let payload = {};
+  let payload;
   try {
     payload = await request.json();
   } catch {
