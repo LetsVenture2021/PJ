@@ -9,6 +9,8 @@ from unittest.mock import patch
 import chatlog
 import docops
 import realtime_server
+from openpyxl import load_workbook
+from pptx import Presentation
 
 
 class TestDocumentDownloads(unittest.TestCase):
@@ -106,9 +108,26 @@ class TestDocumentDownloads(unittest.TestCase):
 
     def test_all_supported_exports_are_registered(self):
         drafted = self._draft(finalize=True)
-        formats = ["html"]
+        formats = ["html", "pdf", "pptx", "xlsx"]
         if shutil.which("textutil"):
             formats.extend(["docx", "rtf"])
+        expected_mime_types = {
+            "html": "text/html; charset=utf-8",
+            "pdf": "application/pdf",
+            "docx": (
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+            "rtf": "application/rtf",
+            "pptx": (
+                "application/vnd.openxmlformats-officedocument."
+                "presentationml.presentation"
+            ),
+            "xlsx": (
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+        }
         for format_name in formats:
             with self.subTest(format=format_name):
                 exported = docops.export_document(
@@ -119,12 +138,50 @@ class TestDocumentDownloads(unittest.TestCase):
                 self.assertEqual(artifact["format"], format_name)
                 self.assertTrue(artifact["audience_ready"])
                 self.assertGreater(artifact["byte_size"], 0)
-                self.assertEqual(
-                    docops.resolve_export_artifact(
-                        artifact["artifact_id"]
-                    )["status"],
-                    "ready",
+                self.assertEqual(artifact["mime_type"],
+                                 expected_mime_types[format_name])
+                internal = docops.resolve_export_artifact(
+                    artifact["artifact_id"], include_path=True
                 )
+                self.assertEqual(internal["status"], "ready")
+                content = Path(internal["path"]).read_bytes()
+                if format_name == "pdf":
+                    self.assertTrue(content.startswith(b"%PDF-"))
+                elif format_name in ("pptx", "xlsx"):
+                    self.assertTrue(content.startswith(b"PK"))
+
+                downloaded = self.client.get(
+                    artifact["download_url"], headers=self.auth
+                )
+                try:
+                    self.assertEqual(downloaded.status_code, 200)
+                    self.assertEqual(downloaded.data, content)
+                    self.assertEqual(
+                        downloaded.headers["Content-Type"],
+                        expected_mime_types[format_name],
+                    )
+                finally:
+                    downloaded.close()
+
+                if format_name == "pptx":
+                    presentation = Presentation(internal["path"])
+                    self.assertGreaterEqual(len(presentation.slides), 2)
+                    self.assertEqual(
+                        presentation.slides[0].shapes[4].text,
+                        "Download Validation",
+                    )
+                elif format_name == "xlsx":
+                    workbook = load_workbook(
+                        internal["path"], read_only=True
+                    )
+                    try:
+                        sheet = workbook["Document"]
+                        self.assertEqual(
+                            sheet["A1"].value, "Download Validation"
+                        )
+                        self.assertEqual(sheet["A8"].value, "Attendees")
+                    finally:
+                        workbook.close()
 
     def test_tampered_immutable_artifact_is_rejected(self):
         artifact = self._draft()["artifact"]
