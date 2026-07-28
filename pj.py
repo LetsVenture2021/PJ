@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """PJ terminal client backed by the shared Responses runtime."""
+
 import argparse
 import json
 import sys
@@ -107,6 +108,7 @@ def main():
     args = sys.argv[1:]
     if args and args[0] in ("voice", "--voice"):
         import voice
+
         voice.run(gate_enabled="--no-gate" not in args[1:], args=args[1:])
         return
     if args and args[0] == "image":
@@ -170,10 +172,7 @@ def main():
     session = chatlog.latest_session() or chatlog.new_session()
     bind_log_context(session_id=session["id"])
     if session.get("title"):
-        print(
-            f"(Continuing: {session['title'][:60]} — /new for a fresh chat, "
-            "/chats for others)\n"
-        )
+        print(f"(Continuing: {session['title'][:60]} — /new for a fresh chat, /chats for others)\n")
     state["previous_response_id"] = session.get("last_response_id")
     chatlog.setup_readline(skills.TOOL_SCHEMAS)
 
@@ -183,16 +182,12 @@ def main():
             if not message:
                 continue
             bind_log_context(request_id=new_correlation_id())
-            handled, switched = chatlog.handle_command(
-                message, session, skills.TOOL_SCHEMAS, cfg
-            )
+            handled, switched = chatlog.handle_command(message, session, skills.TOOL_SCHEMAS, cfg)
             if handled:
                 if switched:
                     session = switched
                     bind_log_context(session_id=session["id"])
-                    state["previous_response_id"] = session.get(
-                        "last_response_id"
-                    )
+                    state["previous_response_id"] = session.get("last_response_id")
                     save_state(state)
                 continue
             chatlog.record_turn(session, "user", message)
@@ -200,9 +195,7 @@ def main():
             if perfected is None:
                 continue
             print(f"\n{cfg['name']}: ", end="", flush=True)
-            reply = send_message(
-                client, cfg, state, perfected["refined_prompt"]
-            )
+            reply = send_message(client, cfg, state, perfected["refined_prompt"])
             chatlog.record_turn(
                 session,
                 "assistant",

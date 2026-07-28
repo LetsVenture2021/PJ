@@ -72,17 +72,19 @@ class OpsSharedTestCase(unittest.TestCase):
         self.assertNotIn("nested-secret", stream.getvalue())
 
     def test_sensitive_redaction_covers_nested_values_and_token_strings(self):
-        redacted = redact_sensitive({
-            "safe": "visible",
-            "client_secret": "top-secret",
-            "nested": {
-                "password": "hunter2",
-                "message": "Authorization: Bearer abc.def",
-                "provider_key": "sk-abcdefghijk12345",
-                "repr": "{'refresh_token': 'message-value'}",
-                "quoted": "password='multi word value'",
-            },
-        })
+        redacted = redact_sensitive(
+            {
+                "safe": "visible",
+                "client_secret": "top-secret",
+                "nested": {
+                    "password": "hunter2",
+                    "message": "Authorization: Bearer abc.def",
+                    "provider_key": "sk-abcdefghijk12345",
+                    "repr": "{'refresh_token': 'message-value'}",
+                    "quoted": "password='multi word value'",
+                },
+            }
+        )
 
         self.assertEqual(redacted["safe"], "visible")
         self.assertEqual(redacted["client_secret"], "[REDACTED]")
@@ -141,11 +143,13 @@ class OpsSharedTestCase(unittest.TestCase):
         class Provider:
             def create_response(self, **_kwargs):
                 return {
-                    "output_text": json.dumps({
-                        "refined_prompt": "Prepare the report.",
-                        "intent_summary": "Prepare a report.",
-                        "constraints_preserved": [],
-                    })
+                    "output_text": json.dumps(
+                        {
+                            "refined_prompt": "Prepare the report.",
+                            "intent_summary": "Prepare a report.",
+                            "constraints_preserved": [],
+                        }
+                    )
                 }
 
         result = promptops.perfect_prompt(

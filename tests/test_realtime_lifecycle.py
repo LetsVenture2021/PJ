@@ -115,9 +115,7 @@ class TestRealtimeSessionLifecycle(unittest.TestCase):
         realtime_server.app.config.update(TESTING=True)
         self.client = realtime_server.app.test_client()
         self.auth = {
-            "Authorization": (
-                f"Bearer {os.environ['PJ_TOOL_BRIDGE_TOKEN']}"
-            ),
+            "Authorization": (f"Bearer {os.environ['PJ_TOOL_BRIDGE_TOKEN']}"),
         }
 
     def tearDown(self):
@@ -160,10 +158,7 @@ class TestRealtimeSessionLifecycle(unittest.TestCase):
             return_value=FakeSignalingResponse(),
         ) as signaling:
             connected = self.client.post(
-                (
-                    f"/session?session_id={session_id}"
-                    "&voice_mode=full_power"
-                ),
+                (f"/session?session_id={session_id}&voice_mode=full_power"),
                 data="v=0\r\no=browser 1 1 IN IP4 127.0.0.1\r\n",
                 content_type="application/sdp",
                 headers={"x-pj-client-request-id": "connect-request"},
@@ -195,9 +190,7 @@ class TestRealtimeSessionLifecycle(unittest.TestCase):
         )
         self.assertEqual(session_config["type"], "realtime")
         self.assertFalse(
-            session_config["audio"]["input"]["turn_detection"][
-                "create_response"
-            ],
+            session_config["audio"]["input"]["turn_detection"]["create_response"],
         )
 
         runtime_client = FakeOpenAIClient(
@@ -265,10 +258,7 @@ class TestRealtimeSessionLifecycle(unittest.TestCase):
             logger.removeHandler(handler)
 
         self.assertEqual(response.status_code, 200)
-        entries = [
-            json.loads(line)
-            for line in stream.getvalue().splitlines()
-        ]
+        entries = [json.loads(line) for line in stream.getvalue().splitlines()]
         lifecycle = {
             entry["message"]: entry
             for entry in entries
@@ -390,20 +380,19 @@ class TestRealtimeSessionLifecycle(unittest.TestCase):
         self.assertEqual(len(runtime_client.responses.calls), 2)
 
     def test_webrtc_client_contract_bounds_retry_and_closes_resources(self):
-        source = (
-            Path(__file__).resolve().parents[1] / "webrtc_client.html"
-        ).read_text(encoding="utf-8")
+        source = (Path(__file__).resolve().parents[1] / "webrtc_client.html").read_text(
+            encoding="utf-8"
+        )
         start = source[
-            source.index("async function startSession()"):
-            source.index("function stopSession(")
+            source.index("async function startSession()") : source.index("function stopSession(")
         ]
         stop = source[
-            source.index("function stopSession("):
-            source.index("async function sendTextMessage()")
+            source.index("function stopSession(") : source.index("async function sendTextMessage()")
         ]
         send = source[
-            source.index("async function sendTextMessage()"):
-            source.index("async function refreshFullPowerSessions()")
+            source.index("async function sendTextMessage()") : source.index(
+                "async function refreshFullPowerSessions()"
+            )
         ]
 
         self.assertIn(
