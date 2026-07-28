@@ -23,3 +23,6 @@ jobs:
 
       - name: Run smoke tests
         run: python -m unittest discover tests -v
+
+      - name: Run Worker authentication tests
+        run: node --test tests/test_worker_auth.mjs

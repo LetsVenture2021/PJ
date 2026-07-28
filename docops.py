@@ -242,6 +242,97 @@ def _item_value(item: dict, *keys):
     return ""
 
 
+_QUOTE_TRANSLATION = str.maketrans({
+    "\u201c": '"',
+    "\u201d": '"',
+    "\u2018": "'",
+    "\u2019": "'",
+})
+
+
+def _parse_scalar(value: str):
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    normalized = raw.translate(_QUOTE_TRANSLATION)
+    if normalized[:1] in {"[", "{"}:
+        try:
+            return json.loads(normalized)
+        except json.JSONDecodeError:
+            pass
+    if len(normalized) >= 2 and normalized[0] == normalized[-1] == '"':
+        try:
+            return json.loads(normalized)
+        except json.JSONDecodeError:
+            return normalized[1:-1]
+    if len(normalized) >= 2 and normalized[0] == normalized[-1] == "'":
+        return normalized[1:-1].replace("''", "'")
+    lowered = normalized.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+    if lowered in {"null", "none", "~"}:
+        return None
+    return normalized
+
+
+def _parse_key_value_text(text: str) -> dict:
+    item = {}
+    current_key = ""
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("```"):
+            continue
+        match = re.match(r"^([A-Za-z][A-Za-z0-9 _-]*):(?:\s*(.*))?$", line)
+        if match and not line.startswith("- "):
+            key = re.sub(r"[^a-z0-9]+", "_", match.group(1).lower()).strip("_")
+            value = (match.group(2) or "").strip()
+            if value:
+                item[key] = _parse_scalar(value)
+            else:
+                item[key] = []
+            current_key = key
+            continue
+        if line.startswith("- ") and current_key:
+            current_val = item.get(current_key)
+            if not isinstance(current_val, list):
+                current_val = _as_list(current_val)
+            current_val.append(_parse_scalar(line[2:].strip()))
+            item[current_key] = current_val
+    return item
+
+
+def _extract_markdown_field(text: str, label: str) -> str:
+    match = re.search(
+        rf"^\s*\*\*{re.escape(label)}:\*\*\s*(.*?)"
+        rf"(?=^\s*\*\*[^*\r\n]+(?::)?\*\*|^\s*#{{1,6}}\s|\Z)",
+        text or "",
+        flags=re.M | re.S | re.I,
+    )
+    if not match:
+        return ""
+    return " ".join(part.strip() for part in match.group(1).splitlines()
+                    if part.strip())
+
+
+def _extract_ordered_markdown_list(text: str, label: str) -> list:
+    section = re.search(
+        rf"^\s*\*\*{re.escape(label)}(?::)?\*\*\s*$"
+        rf"(.*?)(?=^\s*\*\*[^*\r\n]+(?::)?\*\*|^\s*#{{1,6}}\s|\Z)",
+        text or "",
+        flags=re.M | re.S | re.I,
+    )
+    if not section:
+        return []
+    return _dedupe_nonempty(
+        match.group(1)
+        for match in re.finditer(
+            r"^\s*\d+[.)]\s+(.+?)\s*$",
+            section.group(1),
+            flags=re.M,
+        )
+    )
+
+
 def _parse_knowledge_pack_block(block: str) -> dict:
     text = (block or "").strip()
     if not text:
@@ -255,9 +346,16 @@ def _parse_knowledge_pack_block(block: str) -> dict:
     except Exception:
         pass
 
-    # 2) fenced JSON block
+    # 2) leading fenced YAML metadata takes precedence over examples in content.
+    yaml_fence = re.match(r"\s*```ya?ml\s*(.*?)\s*```", text, re.S | re.I)
+    if yaml_fence:
+        item = _parse_key_value_text(yaml_fence.group(1))
+    else:
+        item = {}
+
+    # 3) fenced JSON object (used when no YAML metadata is present).
     fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S | re.I)
-    if fenced:
+    if fenced and not item:
         try:
             parsed = json.loads(fenced.group(1))
             if isinstance(parsed, dict):
@@ -265,40 +363,50 @@ def _parse_knowledge_pack_block(block: str) -> dict:
         except Exception:
             pass
 
-    # 3) simple key-value parser with list support
-    item = {}
-    current_key = ""
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or line.startswith("```"):
-            continue
-        if ":" in line and not line.startswith("- "):
-            k, v = line.split(":", 1)
-            key = re.sub(r"[^a-z0-9]+", "_", k.lower()).strip("_")
-            value = v.strip()
-            if value:
-                item[key] = value
-                current_key = key
-            else:
-                item[key] = []
-                current_key = key
-            continue
-        if line.startswith("- ") and current_key:
-            current_val = item.get(current_key)
-            if not isinstance(current_val, list):
-                current_val = _as_list(current_val)
-            current_val.append(line[2:].strip())
-            item[current_key] = current_val
+    # 4) simple key/value format (also fills fields omitted from YAML).
+    for key, value in _parse_key_value_text(text).items():
+        item.setdefault(key, value)
+
+    purpose = _extract_markdown_field(text, "Purpose")
+    if purpose:
+        item["purpose"] = purpose
+    recommended = _extract_ordered_markdown_list(text, "Recommended structure")
+    if recommended:
+        item["recommended_structure"] = recommended
+    if not _item_value(item, "canonical_title", "title"):
+        heading = re.search(r"^\s*###\s+(.+?)\s*$", text, re.M)
+        if heading:
+            item["canonical_title"] = heading.group(1).strip()
     return item
 
 
 def _extract_item_blocks(knowledge_pack_text: str) -> list:
-    matches = re.findall(
-        r"---ITEM_START\b(.*?)---ITEM_END",
+    matches = re.finditer(
+        r"^---ITEM_START(?P<marker>[^\r\n]*)\r?\n"
+        r"(?P<body>.*?)"
+        r"^---ITEM_END(?P<end_marker>[^\r\n]*)$",
         knowledge_pack_text or "",
-        flags=re.S | re.I,
+        flags=re.S | re.M | re.I,
     )
-    return [m.strip() for m in matches if m.strip()]
+    blocks = []
+    for match in matches:
+        marker = _normalize_item_marker(match.group("marker"))
+        end_marker = _normalize_item_marker(match.group("end_marker"))
+        body = match.group("body").strip()
+        if body:
+            blocks.append({
+                "marker_id": marker,
+                "end_marker_id": end_marker,
+                "content": body,
+            })
+    return blocks
+
+
+def _normalize_item_marker(marker: str) -> str:
+    normalized = str(marker or "").strip()
+    if normalized.startswith(":"):
+        normalized = normalized[1:].strip()
+    return re.sub(r"---\s*$", "", normalized).strip()
 
 
 def _register_template_alias(conn, alias_raw: str, template_name: str,
@@ -467,7 +575,52 @@ def import_doc_templates_from_knowledge_pack_text(
     optional sections. Imported aliases let draft_document resolve a template
     by canonical template name, item_id, or canonical title.
     """
-    blocks = _extract_item_blocks(knowledge_pack_text or "")
+    knowledge_pack_text = knowledge_pack_text or ""
+    blocks = _extract_item_blocks(knowledge_pack_text)
+    start_count = len(re.findall(
+        r"^---ITEM_START(?:[^\r\n]*)$",
+        knowledge_pack_text,
+        flags=re.M | re.I,
+    ))
+    end_count = len(re.findall(
+        r"^---ITEM_END(?:[^\r\n]*)$",
+        knowledge_pack_text,
+        flags=re.M | re.I,
+    ))
+    framing_invalid = 0
+    framing_errors = []
+    if start_count != end_count or len(blocks) != start_count:
+        unmatched = max(start_count, end_count) - len(blocks)
+        framing_invalid += max(1, unmatched)
+        framing_errors.append(
+            "knowledge pack has incomplete or unmatched ITEM markers "
+            f"(starts={start_count}, ends={end_count}, complete={len(blocks)})"
+        )
+    mismatched_markers = [
+        (block["marker_id"], block["end_marker_id"])
+        for block in blocks
+        if block["marker_id"] != block["end_marker_id"]
+    ]
+    if mismatched_markers:
+        framing_invalid += len(mismatched_markers)
+        for start_marker, end_marker in mismatched_markers[:10]:
+            framing_errors.append(
+                "ITEM marker IDs do not match "
+                f"(start={start_marker!r}, end={end_marker!r})"
+            )
+    declared_count_match = re.search(
+        r"^\s*source_record_count:\s*(\d+)\s*$",
+        knowledge_pack_text,
+        flags=re.M | re.I,
+    )
+    if declared_count_match:
+        declared_count = int(declared_count_match.group(1))
+        if declared_count != len(blocks):
+            framing_invalid += abs(declared_count - len(blocks))
+            framing_errors.append(
+                "knowledge pack item count does not match source_record_count "
+                f"(declared={declared_count}, complete={len(blocks)})"
+            )
     if not blocks:
         return {
             "status": "no_items_found",
@@ -475,18 +628,24 @@ def import_doc_templates_from_knowledge_pack_text(
             "templates_created": 0,
             "templates_updated": 0,
             "aliases_registered": 0,
-            "errors": [],
+            "items_skipped_provisional": 0,
+            "items_skipped_invalid": framing_invalid,
+            "errors": framing_errors,
         }
 
     created = updated = alias_count = 0
-    skipped_existing = skipped_provisional = skipped_invalid = 0
+    skipped_existing = skipped_provisional = 0
+    skipped_invalid = framing_invalid
     imported = []
-    errors = []
+    errors = list(framing_errors)
     with _db() as conn:
-        for idx, block in enumerate(blocks, start=1):
+        for idx, extracted in enumerate(blocks, start=1):
+            block = extracted["content"]
+            marker_id = extracted["marker_id"]
             item = _parse_knowledge_pack_block(block)
             item_id = str(_item_value(
-                item, "item_id", "id", "spec_id", "template_id", "item")).strip()
+                item, "item_id", "id", "spec_id", "template_id", "item")
+                or marker_id).strip()
             title = str(_item_value(
                 item, "canonical_title", "title", "template_title", "name")).strip()
             explicit_template = str(_item_value(
@@ -495,7 +654,8 @@ def import_doc_templates_from_knowledge_pack_text(
                 item, "description", "summary", "purpose")).strip()
 
             required = _as_list(_item_value(
-                item, "required_sections", "sections", "required", "required_section_names"))
+                item, "required_sections", "sections", "required",
+                "required_section_names", "recommended_structure"))
             optional = _as_list(_item_value(
                 item, "optional_sections", "optional", "optional_section_names"))
             if not required:
@@ -505,10 +665,25 @@ def import_doc_templates_from_knowledge_pack_text(
                 )
             optional = [s for s in _dedupe_nonempty(optional)
                         if s not in set(required)]
-            provisional = _is_truthy(_item_value(item, "provisional", "is_provisional")) \
-                or str(_item_value(item, "status", "stage")).strip().lower() in {
-                    "provisional", "draft", "experimental", "wip"
-                }
+            lifecycle_values = [
+                str(_item_value(item, key)).strip().lower()
+                for key in (
+                    "corpus_status", "status", "stage", "approval_state",
+                    "source_status",
+                )
+            ]
+            provisional = (
+                _is_truthy(_item_value(item, "provisional", "is_provisional"))
+                or any(
+                    value in {
+                        "provisional", "provisional_instructional_spec",
+                        "draft", "experimental", "wip",
+                    }
+                    or "provisional" in value
+                    for value in lifecycle_values
+                    if value
+                )
+            )
             if provisional and not include_provisional:
                 skipped_provisional += 1
                 continue
@@ -559,7 +734,7 @@ def import_doc_templates_from_knowledge_pack_text(
                     updated += 1
 
             aliases = _dedupe_nonempty(
-                [template_name, item_id, title] +
+                [template_name, item_id, marker_id, title] +
                 _as_list(_item_value(item, "aliases", "alias", "template_aliases"))
             )
             for alias in aliases:

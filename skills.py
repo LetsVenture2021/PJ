@@ -16,7 +16,7 @@ import sqlite3
 import subprocess
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -299,6 +299,62 @@ import codeops as _codeops
 TOOL_SCHEMAS.extend(_codeops.CODEOPS_SCHEMAS)
 DISPATCH_TABLE.update(_codeops.CODEOPS_DISPATCH)
 
+
+def get_pj_capability_snapshot() -> dict:
+    """Return bounded local registry and synchronization state."""
+    coding = _skillops.list_coding_capabilities(limit=100)
+    n8n = _skillops.get_n8n_corpus_status(include_census=False)
+    sync = _skillops.get_vector_sync_status(limit=1)
+    latest_sync = sync.get("runs", [{}])[0] if sync.get("runs") else None
+    return {
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "verification_scope": "local_durable_registry",
+        "coding_capabilities": coding.get("count", 0),
+        "n8n_capabilities": {
+            "count": n8n.get("capability_count", 0),
+            "registry_version": n8n.get("registry_version", 0),
+            "status": n8n.get("status", "blocked"),
+            "production_ready": bool(n8n.get("production_ready")),
+            "blocked_reasons": n8n.get("blocked_reasons", []),
+            "release_gates": n8n.get("release_gates", {}),
+        },
+        "vector_sync": (
+            {
+                key: latest_sync.get(key)
+                for key in (
+                    "run_id",
+                    "status",
+                    "files_seen",
+                    "files_processed",
+                    "files_skipped_unchanged",
+                    "files_failed",
+                    "started_at",
+                    "finished_at",
+                )
+            }
+            if latest_sync
+            else {"status": "no_recorded_sync"}
+        ),
+        "secret_values_included": False,
+    }
+
+
+TOOL_SCHEMAS.append({
+    "type": "function",
+    "name": "get_pj_capability_snapshot",
+    "description": (
+        "Return bounded, secret-safe coding, n8n corpus, and vector "
+        "synchronization state from PJ's durable local registry."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False,
+    },
+})
+DISPATCH_TABLE["get_pj_capability_snapshot"] = get_pj_capability_snapshot
+
 _gen_schemas, _gen_dispatch = _skillops.load_generated_skills()
 TOOL_SCHEMAS.extend(_gen_schemas)
 DISPATCH_TABLE.update(_gen_dispatch)
@@ -306,7 +362,9 @@ DISPATCH_TABLE.update(_gen_dispatch)
 _POLICY_MODES = {"allow", "deny", "approval"}
 _BUILTIN_APPROVAL_TOOLS = {
     "approve_codeops_task",
+    "learn_from_vector_store",
     "run_codeops_validation",
+    "sync_vector_store",
 }
 
 
@@ -350,21 +408,41 @@ def _tool_policy_mode(tool_name: str) -> str:
     return mode if mode in _POLICY_MODES else "allow"
 
 
-def dispatch(name: str, arguments: dict):
+def tool_policy_mode(tool_name: str) -> str:
+    return _tool_policy_mode(tool_name)
+
+
+def dispatch(name: str, arguments: dict, *, approval_granted: bool = False):
     fn = DISPATCH_TABLE.get(name)
     if fn is None:
         return {"error": f"Unknown skill: {name}"}
     if not isinstance(arguments, dict):
         return {"error": f"Invalid arguments for skill '{name}': expected object"}
     args = dict(arguments)
-    approval_granted = bool(args.pop("_approved", False))
+    untrusted_approval = bool(args.pop("_approved", False))
+    if untrusted_approval:
+        _skillops.record_invocation(
+            name, False, 0, "blocked_untrusted_approval_argument"
+        )
+        return {
+            "error": (
+                "Tool approval cannot be supplied through model or HTTP "
+                "arguments; a trusted server-side approval is required."
+            )
+        }
+    approval_granted = bool(approval_granted)
     policy_mode = _tool_policy_mode(name)
     if policy_mode == "deny":
         _skillops.record_invocation(name, False, 0, "blocked_by_policy_deny")
         return {"error": f"Tool '{name}' is blocked by policy (deny)."}
     if policy_mode == "approval" and not approval_granted:
         _skillops.record_invocation(name, False, 0, "blocked_by_policy_approval")
-        return {"error": f"Tool '{name}' requires explicit approval (_approved=true)."}
+        return {
+            "error": (
+                f"Tool '{name}' requires explicit approval from a trusted "
+                "server-side or local human flow."
+            )
+        }
     start = _time.monotonic()
     try:
         result = fn(**args)

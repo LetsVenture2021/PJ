@@ -1,0 +1,24 @@
+# Deployment template for the pj-assistant.ai Worker. GET /health and OPTIONS
+# are public; all other current and future routes require Cloudflare Access.
+#
+# Configure the Access application on pj-assistant.ai/* with an owner-only
+# Allow policy. The Worker independently verifies the injected assertion.
+
+name = "pj-realtime-backend"
+main = "pj_realtime_backend_worker.js"
+compatibility_date = "2026-07-28"
+
+[vars]
+PJ_ALLOWED_ORIGINS = "https://pj-assistant.ai,https://www.pj-assistant.ai"
+CF_ACCESS_TEAM_DOMAIN = "aimhi.cloudflareaccess.com"
+CF_ACCESS_AUD = "replace-with-access-application-aud"
+
+# Store these with `wrangler secret put`; never commit their values:
+# OPENAI_API_KEY
+# PJ_OWNER_EMAILS
+# PJ_TOOL_BRIDGE_TOKEN
+#
+# PJ_TOOL_BRIDGE_URL and PJ_TOOL_SCHEMAS_URL must target the private runtime.
+# PJ_RESPONSES_BRIDGE_URL may optionally override the runtime base URL used for
+# Full Power routes; it is derived from PJ_TOOL_BRIDGE_URL when omitted.
+# CF_ACCESS_CERT_CACHE_TTL_MS may optionally override the 300000 ms default.
