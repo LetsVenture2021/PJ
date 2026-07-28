@@ -5,6 +5,12 @@ const REALTIME_VOICE = "marin";
 const MAX_ERROR_DETAIL_LENGTH = 320;
 const DEFAULT_TOOL_SCHEMA_CACHE_TTL_MS = 60000;
 const DEFAULT_MAX_REALTIME_TOOLS = 256;
+const DEFAULT_ACCESS_CERT_CACHE_TTL_MS = 300000;
+const ACCESS_CLOCK_SKEW_SECONDS = 60;
+
+// Public: GET /health and CORS preflight. Every other route is privileged so
+// future Full Power endpoints fail closed until they explicitly authenticate.
+const PUBLIC_ROUTES = new Set(["GET /health"]);
 
 let toolSchemaCache = {
   tools: [],
@@ -12,6 +18,7 @@ let toolSchemaCache = {
   detail: null,
   fetched_at_ms: 0,
 };
+const accessCertCache = new Map();
 
 const DEFAULT_INSTRUCTIONS =
   "You are PJ, a helpful realtime voice assistant. Keep responses concise and actionable. " +
@@ -64,8 +71,15 @@ function responseHeaders(corsOrigin, requestId, contentType = "application/json"
   return {
     "content-type": contentType,
     "cache-control": "no-store",
+    "content-security-policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
+    "permissions-policy": "camera=(), microphone=(), geolocation=()",
+    "referrer-policy": "no-referrer",
+    "strict-transport-security": "max-age=31536000; includeSubDomains",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
     "x-request-id": requestId,
     "x-pj-contract-version": CONTRACT_VERSION,
+    vary: "Origin",
     ...corsHeaders(corsOrigin),
   };
 }
@@ -111,6 +125,226 @@ function logEvent(requestId, event, data = {}) {
       ...data,
     }),
   );
+}
+
+function isPublicRoute(method, pathname) {
+  return method === "OPTIONS" || PUBLIC_ROUTES.has(`${method} ${pathname}`);
+}
+
+function splitConfigList(value) {
+  return String(value || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function normalizeAccessTeamDomain(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  if (!raw) {
+    throw new Error("CF_ACCESS_TEAM_DOMAIN is required");
+  }
+
+  let hostname = raw;
+  if (raw.includes("://")) {
+    const url = new URL(raw);
+    if (url.protocol !== "https:" || (url.pathname !== "/" && url.pathname !== "")) {
+      throw new Error("CF_ACCESS_TEAM_DOMAIN must be an HTTPS Cloudflare Access team domain");
+    }
+    hostname = url.hostname;
+  } else if (!raw.includes(".")) {
+    hostname = `${raw}.cloudflareaccess.com`;
+  }
+
+  if (!/^[a-z0-9.-]+$/.test(hostname) || !hostname.endsWith(".cloudflareaccess.com")) {
+    throw new Error("CF_ACCESS_TEAM_DOMAIN must end in .cloudflareaccess.com");
+  }
+  return hostname;
+}
+
+function buildAccessConfig(env) {
+  const teamDomain = normalizeAccessTeamDomain(env.CF_ACCESS_TEAM_DOMAIN);
+  const audiences = splitConfigList(env.CF_ACCESS_AUD);
+  const ownerEmails = splitConfigList(env.PJ_OWNER_EMAILS).map((email) => email.toLowerCase());
+  if (!audiences.length) {
+    throw new Error("CF_ACCESS_AUD is required");
+  }
+  if (!ownerEmails.length) {
+    throw new Error("PJ_OWNER_EMAILS is required");
+  }
+
+  const issuer = `https://${teamDomain}`;
+  return {
+    issuer,
+    certsUrl: `${issuer}/cdn-cgi/access/certs`,
+    audiences: new Set(audiences),
+    ownerEmails: new Set(ownerEmails),
+    certCacheTtlMs: asPositiveInt(
+      env.CF_ACCESS_CERT_CACHE_TTL_MS,
+      DEFAULT_ACCESS_CERT_CACHE_TTL_MS,
+    ),
+  };
+}
+
+function decodeBase64Url(value) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) {
+    throw new Error("Invalid base64url value");
+  }
+  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const binary = atob(padded);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+function decodeJwtSection(value) {
+  return JSON.parse(new TextDecoder().decode(decodeBase64Url(value)));
+}
+
+function parseAccessJwt(assertion) {
+  const parts = String(assertion || "").split(".");
+  if (parts.length !== 3 || parts.some((part) => !part)) {
+    throw new Error("Malformed Access assertion");
+  }
+  const header = decodeJwtSection(parts[0]);
+  const claims = decodeJwtSection(parts[1]);
+  if (!header || typeof header !== "object" || !claims || typeof claims !== "object") {
+    throw new Error("Malformed Access assertion");
+  }
+  if (header.alg !== "RS256" || typeof header.kid !== "string" || !header.kid) {
+    throw new Error("Unsupported Access assertion signature");
+  }
+  return {
+    header,
+    claims,
+    signingInput: new TextEncoder().encode(`${parts[0]}.${parts[1]}`),
+    signature: decodeBase64Url(parts[2]),
+  };
+}
+
+function claimHasExpectedAudience(claim, expectedAudiences) {
+  const tokenAudiences = Array.isArray(claim) ? claim : [claim];
+  return tokenAudiences.some(
+    (audience) => typeof audience === "string" && expectedAudiences.has(audience),
+  );
+}
+
+function validateAccessClaims(claims, config, nowSeconds = Math.floor(Date.now() / 1000)) {
+  if (claims.iss !== config.issuer) {
+    throw new Error("Access assertion issuer mismatch");
+  }
+  if (!claimHasExpectedAudience(claims.aud, config.audiences)) {
+    throw new Error("Access assertion audience mismatch");
+  }
+  if (typeof claims.exp !== "number" || claims.exp <= nowSeconds - ACCESS_CLOCK_SKEW_SECONDS) {
+    throw new Error("Access assertion expired");
+  }
+  if (claims.nbf !== undefined &&
+      (typeof claims.nbf !== "number" || claims.nbf > nowSeconds + ACCESS_CLOCK_SKEW_SECONDS)) {
+    throw new Error("Access assertion is not active");
+  }
+  if (claims.iat !== undefined &&
+      (typeof claims.iat !== "number" || claims.iat > nowSeconds + ACCESS_CLOCK_SKEW_SECONDS)) {
+    throw new Error("Access assertion issued in the future");
+  }
+  if (typeof claims.email !== "string" || !claims.email.trim()) {
+    throw new Error("Access assertion has no email identity");
+  }
+  return claims.email.trim().toLowerCase();
+}
+
+async function fetchAccessCerts(config, fetchImpl, forceRefresh = false) {
+  const cached = accessCertCache.get(config.certsUrl);
+  if (!forceRefresh && cached && Date.now() - cached.fetchedAtMs < config.certCacheTtlMs) {
+    return cached.keys;
+  }
+
+  const response = await fetchImpl(config.certsUrl, {
+    method: "GET",
+    headers: { Accept: "application/json" },
+  });
+  if (!response.ok) {
+    throw new Error(`Access cert endpoint returned ${response.status}`);
+  }
+  const payload = await response.json();
+  const keys = Array.isArray(payload?.keys) ? payload.keys : [];
+  if (!keys.length) {
+    throw new Error("Access cert endpoint returned no keys");
+  }
+  accessCertCache.set(config.certsUrl, { keys, fetchedAtMs: Date.now() });
+  return keys;
+}
+
+async function findAccessCert(config, kid, fetchImpl) {
+  let keys = await fetchAccessCerts(config, fetchImpl);
+  let key = keys.find((candidate) => candidate?.kid === kid);
+  if (!key) {
+    keys = await fetchAccessCerts(config, fetchImpl, true);
+    key = keys.find((candidate) => candidate?.kid === kid);
+  }
+  if (!key) {
+    throw new Error("Access signing key not found");
+  }
+  return key;
+}
+
+async function validateAccessIdentity(request, env, fetchImpl = fetch) {
+  let config;
+  try {
+    config = buildAccessConfig(env);
+  } catch {
+    return {
+      ok: false,
+      status: 503,
+      code: "access_configuration_error",
+      message: "Cloudflare Access authentication is not configured.",
+    };
+  }
+
+  const assertion = request.headers.get("cf-access-jwt-assertion");
+  if (!assertion) {
+    return {
+      ok: false,
+      status: 401,
+      code: "access_authentication_required",
+      message: "A Cloudflare Access identity is required.",
+    };
+  }
+
+  try {
+    const jwt = parseAccessJwt(assertion);
+    const jwk = await findAccessCert(config, jwt.header.kid, fetchImpl);
+    const publicKey = await crypto.subtle.importKey(
+      "jwk",
+      jwk,
+      { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+      false,
+      ["verify"],
+    );
+    const signatureValid = await crypto.subtle.verify(
+      "RSASSA-PKCS1-v1_5",
+      publicKey,
+      jwt.signature,
+      jwt.signingInput,
+    );
+    if (!signatureValid) {
+      throw new Error("Access assertion signature mismatch");
+    }
+    const email = validateAccessClaims(jwt.claims, config);
+    if (!config.ownerEmails.has(email)) {
+      return {
+        ok: false,
+        status: 403,
+        code: "access_identity_forbidden",
+        message: "The authenticated Access identity is not authorized.",
+      };
+    }
+    return { ok: true, identity: { email, subject: jwt.claims.sub || null } };
+  } catch {
+    return {
+      ok: false,
+      status: 401,
+      code: "invalid_access_assertion",
+      message: "The Cloudflare Access assertion is invalid.",
+    };
+  }
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 20000) {
@@ -197,6 +431,8 @@ function parseToolSchemaPayload(rawText, maxTools) {
 }
 
 function bridgeHeaders(env, requestId) {
+  // Construct a fresh allowlisted header set so Access assertions and browser
+  // credentials can never be forwarded to the private tool runtime.
   const headers = {
     "content-type": "application/json",
     "x-pj-client-request-id": requestId,
@@ -256,6 +492,13 @@ async function resolveRealtimeTools(env, requestId, requestUrl, forceRefresh = f
       tools: [],
       source: "disabled",
       detail: "PJ_TOOL_BRIDGE_URL (or PJ_TOOL_SCHEMAS_URL) is not configured",
+    };
+  }
+  if (!(env.PJ_TOOL_BRIDGE_TOKEN || "").trim()) {
+    return {
+      tools: [],
+      source: "misconfigured",
+      detail: "PJ_TOOL_BRIDGE_TOKEN is not configured",
     };
   }
   if (isLoopTarget(schemaUrl, requestUrl)) {
@@ -668,6 +911,18 @@ async function handleExecuteTool(request, env, corsOrigin, requestId) {
       requestId,
     );
   }
+  if (!(env.PJ_TOOL_BRIDGE_TOKEN || "").trim()) {
+    return jsonResponse(
+      errorPayload(
+        "bridge_auth_not_configured",
+        "The private tool bridge credential is not configured.",
+        requestId,
+      ),
+      503,
+      corsOrigin,
+      requestId,
+    );
+  }
 
   let bridgeTarget;
   try {
@@ -742,6 +997,15 @@ async function handleExecuteTool(request, env, corsOrigin, requestId) {
   }
 }
 
+export {
+  bridgeHeaders,
+  buildAccessConfig,
+  isPublicRoute,
+  responseHeaders,
+  validateAccessClaims,
+  validateAccessIdentity,
+};
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -767,6 +1031,7 @@ export default {
 
     if (request.method === "GET" && url.pathname === "/health") {
       const bridgeConfigured = Boolean((env.PJ_TOOL_BRIDGE_URL || "").trim());
+      const bridgeAuthConfigured = Boolean((env.PJ_TOOL_BRIDGE_TOKEN || "").trim());
       return jsonResponse(
         {
           ok: true,
@@ -774,9 +1039,13 @@ export default {
           contract_version: CONTRACT_VERSION,
           realtime_model: env.REALTIME_MODEL || DEFAULT_REALTIME_MODEL,
           tool_bridge_configured: bridgeConfigured,
+          tool_bridge_auth_configured: bridgeAuthConfigured,
           tool_schema_cache_count: toolSchemaCache.tools.length,
           tool_schema_cache_source: toolSchemaCache.source,
-          full_tooling_ready: bridgeConfigured && toolSchemaCache.tools.length > 0,
+          full_tooling_ready:
+            bridgeConfigured && bridgeAuthConfigured && toolSchemaCache.tools.length > 0,
+          public_endpoints: ["GET /health", "OPTIONS *"],
+          privileged_route_policy: "all other routes require an authorized Cloudflare Access identity",
           endpoints: ["/session", "/token", "/tool-schemas", "/execute-tool", "/health"],
         },
         200,
@@ -785,15 +1054,23 @@ export default {
       );
     }
 
-    if (
-      (request.method === "POST" && (url.pathname === "/session" || url.pathname === "/token" || url.pathname === "/execute-tool")) ||
-      (request.method === "GET" && url.pathname === "/tool-schemas")
-    ) {
-      const trust = checkRequestTrust(request, allowedOrigins);
-      if (!trust.ok) {
+    const trust = checkRequestTrust(request, allowedOrigins);
+    if (!trust.ok) {
+      return jsonResponse(
+        errorPayload("request_not_allowed", trust.reason, requestId),
+        403,
+        corsOrigin,
+        requestId,
+      );
+    }
+
+    if (!isPublicRoute(request.method, url.pathname)) {
+      const access = await validateAccessIdentity(request, env);
+      if (!access.ok) {
+        logEvent(requestId, "access.denied", { code: access.code });
         return jsonResponse(
-          errorPayload("request_not_allowed", trust.reason, requestId),
-          403,
+          errorPayload(access.code, access.message, requestId),
+          access.status,
           corsOrigin,
           requestId,
         );
