@@ -1057,11 +1057,22 @@ test("browser module initializes with Full Power helpers in shared scope", async
     hooks.state.realtimeItems.get("assistant-item-2").status,
     "interrupted",
   );
+  hooks.handleRealtimeEvent({
+    event_id: "output-done-after-interruption",
+    type: "response.output_audio_transcript.done",
+    item_id: "assistant-item-2",
+    response_id: "response-2",
+    transcript: "This will be interrupted",
+  });
+  assert.equal(
+    hooks.state.realtimeItems.get("assistant-item-2").status,
+    "interrupted",
+  );
   const interruptedDone = {
     type: "response.done",
     response: {
       id: "response-2",
-      status: "cancelled",
+      status: "completed",
       output: [{ id: "assistant-item-2" }],
     },
   };

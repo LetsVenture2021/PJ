@@ -842,12 +842,13 @@
         state.realtimeItems.set(externalId, item);
       }
       item.text = append ? `${item.text}${text || ""}` : String(text || "");
-      item.status = status;
+      const nextStatus = item.status === "interrupted" ? "interrupted" : status;
+      item.status = nextStatus;
       item.responseId = responseId || item.responseId;
       item.source = source || item.source;
       item.bubble.textContent = item.text;
       item.bubble.dataset.externalId = externalId;
-      item.bubble.dataset.status = status;
+      item.bubble.dataset.status = nextStatus;
       scrollMessagesToBottom();
       return item;
     }
