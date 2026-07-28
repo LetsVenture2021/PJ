@@ -265,6 +265,49 @@ test("public health has security headers and future routes fail closed", async (
   assert.equal(futureRoute.status, 401);
 });
 
+test("public health warms tool schemas and reports n8n readiness", async () => {
+  const originalFetch = globalThis.fetch;
+  const requestedUrls = [];
+  const authorizationHeaders = [];
+  globalThis.fetch = async (url, options = {}) => {
+    requestedUrls.push(String(url));
+    authorizationHeaders.push(options.headers.authorization);
+    return new Response(JSON.stringify({
+      tools: [
+        { type: "function", name: "list_n8n_capabilities", parameters: {} },
+        { type: "function", name: "get_n8n_corpus_status", parameters: {} },
+        { type: "function", name: "get_pj_capability_snapshot", parameters: {} },
+      ],
+    }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  try {
+    const health = await worker.fetch(
+      new Request("https://pj-assistant.ai/health"),
+      {
+        PJ_TOOL_BRIDGE_URL: "https://private-runtime.example/execute-tool",
+        PJ_TOOL_BRIDGE_TOKEN: "bridge-secret",
+      },
+    );
+    assert.equal(health.status, 200);
+    const payload = await health.json();
+    assert.equal(payload.tool_schema_cache_source, "bridge");
+    assert.equal(payload.tool_schema_cache_count, 3);
+    assert.equal(payload.full_tooling_ready, true);
+    assert.equal(payload.n8n_corpus_tools_ready, true);
+    assert.deepEqual(requestedUrls, [
+      "https://private-runtime.example/tool-schemas",
+    ]);
+    assert.equal(authorizationHeaders.length, 1);
+    assert.equal(typeof authorizationHeaders[0], "string");
+    assert.ok(authorizationHeaders[0].endsWith("bridge-secret"));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("downstream bridge headers contain only the bridge credential", () => {
   const headers = bridgeHeaders({ PJ_TOOL_BRIDGE_TOKEN: "bridge-secret" }, "request-123");
   assert.equal(headers.authorization, "Bearer bridge-secret");
