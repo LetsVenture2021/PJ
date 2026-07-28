@@ -203,7 +203,9 @@ function splitConfigList(value) {
 }
 
 function normalizeAccessTeamDomain(value) {
-  const raw = String(value || "").trim().toLowerCase();
+  const raw = String(value || "")
+    .trim()
+    .toLowerCase();
   if (!raw) {
     throw new Error("CF_ACCESS_TEAM_DOMAIN is required");
   }
@@ -253,7 +255,10 @@ function decodeBase64Url(value) {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) {
     throw new Error("Invalid base64url value");
   }
-  const padded = value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
+  const padded = value
+    .replace(/-/g, "+")
+    .replace(/_/g, "/")
+    .padEnd(Math.ceil(value.length / 4) * 4, "=");
   const binary = atob(padded);
   return Uint8Array.from(binary, (character) => character.charCodeAt(0));
 }
@@ -300,12 +305,16 @@ function validateAccessClaims(claims, config, nowSeconds = Math.floor(Date.now()
   if (typeof claims.exp !== "number" || claims.exp <= nowSeconds - ACCESS_CLOCK_SKEW_SECONDS) {
     throw new Error("Access assertion expired");
   }
-  if (claims.nbf !== undefined &&
-      (typeof claims.nbf !== "number" || claims.nbf > nowSeconds + ACCESS_CLOCK_SKEW_SECONDS)) {
+  if (
+    claims.nbf !== undefined &&
+    (typeof claims.nbf !== "number" || claims.nbf > nowSeconds + ACCESS_CLOCK_SKEW_SECONDS)
+  ) {
     throw new Error("Access assertion is not active");
   }
-  if (claims.iat !== undefined &&
-      (typeof claims.iat !== "number" || claims.iat > nowSeconds + ACCESS_CLOCK_SKEW_SECONDS)) {
+  if (
+    claims.iat !== undefined &&
+    (typeof claims.iat !== "number" || claims.iat > nowSeconds + ACCESS_CLOCK_SKEW_SECONDS)
+  ) {
     throw new Error("Access assertion issued in the future");
   }
   if (typeof claims.email !== "string" || !claims.email.trim()) {
@@ -421,12 +430,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 20000, fetchImpl 
   }
 }
 
-async function fetchTextWithTimeout(
-  url,
-  options = {},
-  timeoutMs = 20000,
-  fetchImpl = fetch,
-) {
+async function fetchTextWithTimeout(url, options = {}, timeoutMs = 20000, fetchImpl = fetch) {
   const controller = new AbortController();
   const timeoutError = new Error("timeout");
   let timeout;
@@ -466,10 +470,7 @@ function createSessionConfig(
   return {
     type: "realtime",
     model,
-    instructions:
-      authoritativeInstructions
-      || env.PJ_REALTIME_INSTRUCTIONS
-      || DEFAULT_INSTRUCTIONS,
+    instructions: authoritativeInstructions || env.PJ_REALTIME_INSTRUCTIONS || DEFAULT_INSTRUCTIONS,
     audio: {
       input: {
         transcription: { model: "gpt-4o-transcribe" },
@@ -598,203 +599,195 @@ function deriveToolSchemasUrl(env) {
 }
 
 function deriveResponsesBridgeBaseUrl(env) {
-    const raw = (
-      env.PJ_RESPONSES_BRIDGE_URL ||
-      env.PJ_TOOL_BRIDGE_URL ||
-      ""
-    ).trim();
-    if (!raw) {
-      return "";
-    }
-    let target;
-    try {
-      target = new URL(raw);
-    } catch {
-      return "";
-    }
-    target.search = "";
-    target.hash = "";
-    target.pathname = target.pathname
-      .replace(/\/(?:execute-tool|tool-schemas)\/?$/, "")
-      .replace(/\/+$/, "");
-    return target.toString().replace(/\/+$/, "");
+  const raw = (env.PJ_RESPONSES_BRIDGE_URL || env.PJ_TOOL_BRIDGE_URL || "").trim();
+  if (!raw) {
+    return "";
   }
+  let target;
+  try {
+    target = new URL(raw);
+  } catch {
+    return "";
+  }
+  target.search = "";
+  target.hash = "";
+  target.pathname = target.pathname
+    .replace(/\/(?:execute-tool|tool-schemas)\/?$/, "")
+    .replace(/\/+$/, "");
+  return target.toString().replace(/\/+$/, "");
+}
 
 function isResponsesRoute(method, pathname) {
-    if (method === "GET" && pathname === "/responses/capabilities") {
-      return true;
-    }
-    if (method === "POST" && pathname === "/responses/prompt-perfect") {
-      return true;
-    }
-    if ((method === "GET" || method === "POST") && pathname === "/responses/sessions") {
-      return true;
-    }
-    if (method === "GET" && pathname === "/responses/sessions/search") {
-      return true;
-    }
-    if (
-      method === "GET" &&
-      (
-        /^\/responses\/artifacts\/ART-[a-f0-9]{32}$/.test(pathname) ||
-        /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/artifacts$/.test(pathname)
-      )
-    ) {
-      return true;
-    }
-    return method === "POST" && (
-      /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/resume$/.test(pathname) ||
+  if (method === "GET" && pathname === "/responses/capabilities") {
+    return true;
+  }
+  if (method === "POST" && pathname === "/responses/prompt-perfect") {
+    return true;
+  }
+  if ((method === "GET" || method === "POST") && pathname === "/responses/sessions") {
+    return true;
+  }
+  if (method === "GET" && pathname === "/responses/sessions/search") {
+    return true;
+  }
+  if (
+    method === "GET" &&
+    (/^\/responses\/artifacts\/ART-[a-f0-9]{32}$/.test(pathname) ||
+      /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/artifacts$/.test(pathname))
+  ) {
+    return true;
+  }
+  return (
+    method === "POST" &&
+    (/^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/resume$/.test(pathname) ||
       /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/turns$/.test(pathname) ||
       /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/realtime-messages$/.test(pathname) ||
-      /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/approvals\/[A-Za-z0-9_-]{8,128}$/.test(pathname)
+      /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/approvals\/[A-Za-z0-9_-]{8,128}$/.test(
+        pathname,
+      ))
+  );
+}
+
+async function handleResponsesProxy(request, env, corsOrigin, requestId, fetchImpl = fetch) {
+  const inboundUrl = new URL(request.url);
+  if (!isResponsesRoute(request.method, inboundUrl.pathname)) {
+    return jsonResponse(
+      errorPayload("not_found", "Not found.", requestId),
+      404,
+      corsOrigin,
+      requestId,
+    );
+  }
+  if (!(env.PJ_TOOL_BRIDGE_TOKEN || "").trim()) {
+    return jsonResponse(
+      errorPayload(
+        "bridge_auth_not_configured",
+        "The private runtime credential is not configured.",
+        requestId,
+      ),
+      503,
+      corsOrigin,
+      requestId,
     );
   }
 
-async function handleResponsesProxy(
-    request,
-    env,
-    corsOrigin,
-    requestId,
-    fetchImpl = fetch,
-  ) {
-    const inboundUrl = new URL(request.url);
-    if (!isResponsesRoute(request.method, inboundUrl.pathname)) {
-      return jsonResponse(
-        errorPayload("not_found", "Not found.", requestId),
-        404,
-        corsOrigin,
+  let bridgeBase;
+  try {
+    bridgeBase = deriveResponsesBridgeBaseUrl(env);
+  } catch {
+    bridgeBase = "";
+  }
+  if (!bridgeBase) {
+    return jsonResponse(
+      errorPayload(
+        "responses_bridge_not_configured",
+        "The Full Power runtime bridge is not configured.",
         requestId,
-      );
-    }
-    if (!(env.PJ_TOOL_BRIDGE_TOKEN || "").trim()) {
+      ),
+      503,
+      corsOrigin,
+      requestId,
+    );
+  }
+
+  const target = new URL(bridgeBase);
+  target.pathname = `${target.pathname.replace(/\/+$/, "")}${inboundUrl.pathname}`;
+  target.search = inboundUrl.search;
+  if (isLoopTarget(target.toString(), request.url)) {
+    return jsonResponse(
+      errorPayload(
+        "bridge_loop_detected",
+        "The Full Power runtime bridge would recurse.",
+        requestId,
+      ),
+      500,
+      corsOrigin,
+      requestId,
+    );
+  }
+
+  const isStreamingTurn = /\/turns$/.test(inboundUrl.pathname);
+  const isArtifactDownload = /^\/responses\/artifacts\/ART-[a-f0-9]{32}$/.test(inboundUrl.pathname);
+  const headers = {
+    ...bridgeHeaders(env, requestId),
+    accept: isStreamingTurn
+      ? "text/event-stream"
+      : isArtifactDownload
+        ? "application/octet-stream"
+        : "application/json",
+  };
+  let body;
+  if (request.method === "POST") {
+    body = await request.text();
+    if (new TextEncoder().encode(body).byteLength > MAX_RESPONSES_REQUEST_BYTES) {
       return jsonResponse(
         errorPayload(
-          "bridge_auth_not_configured",
-          "The private runtime credential is not configured.",
+          "request_too_large",
+          `Request body exceeds ${MAX_RESPONSES_REQUEST_BYTES} bytes.`,
           requestId,
         ),
-        503,
+        413,
         corsOrigin,
         requestId,
       );
     }
+  }
 
-    let bridgeBase;
-    try {
-      bridgeBase = deriveResponsesBridgeBaseUrl(env);
-    } catch {
-      bridgeBase = "";
+  try {
+    const bridgeResponse = await fetchImpl(target.toString(), {
+      method: request.method,
+      headers,
+      ...(body !== undefined ? { body } : {}),
+    });
+    const upstreamContentType =
+      bridgeResponse.headers.get("content-type") ||
+      (isStreamingTurn ? "text/event-stream" : "application/json");
+    const isEventStream = upstreamContentType.includes("text/event-stream");
+    const isJson = upstreamContentType.includes("application/json");
+    const contentType = isEventStream
+      ? "text/event-stream"
+      : isArtifactDownload && !isJson
+        ? upstreamContentType.split(";")[0].trim()
+        : "application/json";
+    const responseHeaderSet = responseHeaders(corsOrigin, requestId, contentType);
+    if (isEventStream) {
+      responseHeaderSet["x-accel-buffering"] = "no";
     }
-    if (!bridgeBase) {
-      return jsonResponse(
-        errorPayload(
-          "responses_bridge_not_configured",
-          "The Full Power runtime bridge is not configured.",
-          requestId,
-        ),
-        503,
-        corsOrigin,
-        requestId,
+    if (isArtifactDownload && !isJson) {
+      const safeDisposition = safeAttachmentDisposition(
+        bridgeResponse.headers.get("content-disposition") || "",
       );
-    }
-
-    const target = new URL(bridgeBase);
-    target.pathname = `${target.pathname.replace(/\/+$/, "")}${inboundUrl.pathname}`;
-    target.search = inboundUrl.search;
-    if (isLoopTarget(target.toString(), request.url)) {
-      return jsonResponse(
-        errorPayload(
-          "bridge_loop_detected",
-          "The Full Power runtime bridge would recurse.",
-          requestId,
-        ),
-        500,
-        corsOrigin,
-        requestId,
-      );
-    }
-
-    const isStreamingTurn = /\/turns$/.test(inboundUrl.pathname);
-    const isArtifactDownload =
-      /^\/responses\/artifacts\/ART-[a-f0-9]{32}$/.test(inboundUrl.pathname);
-    const headers = {
-      ...bridgeHeaders(env, requestId),
-      accept: isStreamingTurn
-        ? "text/event-stream"
-        : (isArtifactDownload ? "application/octet-stream" : "application/json"),
-    };
-    let body;
-    if (request.method === "POST") {
-      body = await request.text();
-      if (new TextEncoder().encode(body).byteLength > MAX_RESPONSES_REQUEST_BYTES) {
-        return jsonResponse(
-          errorPayload(
-            "request_too_large",
-            `Request body exceeds ${MAX_RESPONSES_REQUEST_BYTES} bytes.`,
-            requestId,
-          ),
-          413,
-          corsOrigin,
-          requestId,
-        );
+      const etag = bridgeResponse.headers.get("etag") || "";
+      if (safeDisposition) {
+        responseHeaderSet["content-disposition"] = safeDisposition;
+      }
+      if (/^"[A-Za-z0-9._-]{1,160}"$/.test(etag)) {
+        responseHeaderSet.etag = etag;
       }
     }
-
-    try {
-      const bridgeResponse = await fetchImpl(target.toString(), {
-        method: request.method,
-        headers,
-        ...(body !== undefined ? { body } : {}),
-      });
-      const upstreamContentType =
-        bridgeResponse.headers.get("content-type") ||
-        (isStreamingTurn ? "text/event-stream" : "application/json");
-      const isEventStream = upstreamContentType.includes("text/event-stream");
-      const isJson = upstreamContentType.includes("application/json");
-      const contentType = isEventStream
-        ? "text/event-stream"
-        : (isArtifactDownload && !isJson
-          ? upstreamContentType.split(";")[0].trim()
-          : "application/json");
-      const responseHeaderSet = responseHeaders(corsOrigin, requestId, contentType);
-      if (isEventStream) {
-        responseHeaderSet["x-accel-buffering"] = "no";
-      }
-      if (isArtifactDownload && !isJson) {
-        const safeDisposition = safeAttachmentDisposition(
-          bridgeResponse.headers.get("content-disposition") || "",
-        );
-        const etag = bridgeResponse.headers.get("etag") || "";
-        if (safeDisposition) {
-          responseHeaderSet["content-disposition"] = safeDisposition;
-        }
-        if (/^"[A-Za-z0-9._-]{1,160}"$/.test(etag)) {
-          responseHeaderSet.etag = etag;
-        }
-      }
-      logEvent(requestId, "responses.bridge_complete", {
-        path: inboundUrl.pathname,
-        status: bridgeResponse.status,
-        streaming: isEventStream,
-        artifact: isArtifactDownload && !isJson,
-      });
-      return new Response(bridgeResponse.body, {
-        status: bridgeResponse.status,
-        headers: responseHeaderSet,
-      });
-    } catch (exc) {
-      return jsonResponse(
-        errorPayload(
-          "responses_bridge_unreachable",
-          "The Full Power runtime request failed before completion.",
-          requestId,
-          trimDetail(exc),
-        ),
-        502,
-        corsOrigin,
+    logEvent(requestId, "responses.bridge_complete", {
+      path: inboundUrl.pathname,
+      status: bridgeResponse.status,
+      streaming: isEventStream,
+      artifact: isArtifactDownload && !isJson,
+    });
+    return new Response(bridgeResponse.body, {
+      status: bridgeResponse.status,
+      headers: responseHeaderSet,
+    });
+  } catch (exc) {
+    return jsonResponse(
+      errorPayload(
+        "responses_bridge_unreachable",
+        "The Full Power runtime request failed before completion.",
         requestId,
-      );
-    }
+        trimDetail(exc),
+      ),
+      502,
+      corsOrigin,
+      requestId,
+    );
+  }
 }
 
 function isLoopTarget(targetUrl, requestUrl) {
@@ -812,7 +805,10 @@ function isLoopTarget(targetUrl, requestUrl) {
 
 async function resolveRealtimeTools(env, requestId, requestUrl, forceRefresh = false) {
   const maxTools = asPositiveInt(env.PJ_MAX_REALTIME_TOOLS, DEFAULT_MAX_REALTIME_TOOLS);
-  const cacheTtlMs = asPositiveInt(env.PJ_TOOL_SCHEMA_CACHE_TTL_MS, DEFAULT_TOOL_SCHEMA_CACHE_TTL_MS);
+  const cacheTtlMs = asPositiveInt(
+    env.PJ_TOOL_SCHEMA_CACHE_TTL_MS,
+    DEFAULT_TOOL_SCHEMA_CACHE_TTL_MS,
+  );
 
   const inlineToolsRaw = (env.PJ_REALTIME_TOOL_SCHEMAS_JSON || "").trim();
   if (inlineToolsRaw) {
@@ -854,10 +850,10 @@ async function resolveRealtimeTools(env, requestId, requestUrl, forceRefresh = f
 
   const now = Date.now();
   if (
-    !forceRefresh
-    && toolSchemaReconciliation.status === "success"
-    && toolSchemaCache.fetched_at_ms
-    && now - toolSchemaCache.fetched_at_ms < cacheTtlMs
+    !forceRefresh &&
+    toolSchemaReconciliation.status === "success" &&
+    toolSchemaCache.fetched_at_ms &&
+    now - toolSchemaCache.fetched_at_ms < cacheTtlMs
   ) {
     return {
       tools: toolSchemaCache.tools,
@@ -911,60 +907,39 @@ async function resolveRealtimeTools(env, requestId, requestUrl, forceRefresh = f
     }
     const tools = parseToolSchemaPayload(raw, maxTools);
     if (!parsed || parsed.contract_version !== CONTRACT_VERSION) {
-      return bridgeSchemaFailure(
-        "bridge contract version is missing or incompatible",
-      );
+      return bridgeSchemaFailure("bridge contract version is missing or incompatible");
     }
     const expectedToolManifestSha256 =
-      typeof parsed.tool_manifest_sha256 === "string"
-        ? parsed.tool_manifest_sha256
-        : "";
+      typeof parsed.tool_manifest_sha256 === "string" ? parsed.tool_manifest_sha256 : "";
     const actualToolManifestSha256 = Array.isArray(parsed.tools)
       ? await sha256Hex(stableJson(parsed.tools))
       : "";
     if (
-      !/^[a-f0-9]{64}$/.test(expectedToolManifestSha256)
-      || actualToolManifestSha256 !== expectedToolManifestSha256
+      !/^[a-f0-9]{64}$/.test(expectedToolManifestSha256) ||
+      actualToolManifestSha256 !== expectedToolManifestSha256
     ) {
-      return bridgeSchemaFailure(
-        "bridge tool manifest failed SHA-256 validation",
-      );
+      return bridgeSchemaFailure("bridge tool manifest failed SHA-256 validation");
     }
     const instructions =
-      parsed && typeof parsed.instructions === "string"
-        ? parsed.instructions
-        : "";
+      parsed && typeof parsed.instructions === "string" ? parsed.instructions : "";
     const instructionsSha256 =
-      parsed && typeof parsed.instructions_sha256 === "string"
-        ? parsed.instructions_sha256
-        : "";
-    const actualInstructionsSha256 = instructions
-      ? await sha256Hex(instructions)
-      : "";
+      parsed && typeof parsed.instructions_sha256 === "string" ? parsed.instructions_sha256 : "";
+    const actualInstructionsSha256 = instructions ? await sha256Hex(instructions) : "";
     if (
-      !instructions.trim()
-      || !/^[a-f0-9]{64}$/.test(instructionsSha256)
-      || actualInstructionsSha256 !== instructionsSha256
+      !instructions.trim() ||
+      !/^[a-f0-9]{64}$/.test(instructionsSha256) ||
+      actualInstructionsSha256 !== instructionsSha256
     ) {
-      return bridgeSchemaFailure(
-        "bridge instructions are missing or failed SHA-256 validation",
-      );
+      return bridgeSchemaFailure("bridge instructions are missing or failed SHA-256 validation");
     }
     const promptPerfectingVersion =
       typeof parsed.prompt_perfecting_version === "string"
         ? parsed.prompt_perfecting_version.trim()
         : "";
     const toolPolicySha256 =
-      typeof parsed.tool_policy_sha256 === "string"
-        ? parsed.tool_policy_sha256
-        : "";
-    if (
-      !promptPerfectingVersion
-      || !/^[a-f0-9]{64}$/.test(toolPolicySha256)
-    ) {
-      return bridgeSchemaFailure(
-        "bridge prompt or policy version metadata is invalid",
-      );
+      typeof parsed.tool_policy_sha256 === "string" ? parsed.tool_policy_sha256 : "";
+    if (!promptPerfectingVersion || !/^[a-f0-9]{64}$/.test(toolPolicySha256)) {
+      return bridgeSchemaFailure("bridge prompt or policy version metadata is invalid");
     }
     toolSchemaCache = {
       tools,
@@ -972,8 +947,7 @@ async function resolveRealtimeTools(env, requestId, requestUrl, forceRefresh = f
       detail: tools.length ? null : "bridge responded but no function tools were parsed",
       instructions,
       instructions_sha256: instructionsSha256,
-      tool_manifest_sha256:
-        actualToolManifestSha256,
+      tool_manifest_sha256: actualToolManifestSha256,
       prompt_perfecting_version: promptPerfectingVersion,
       tool_policy_sha256: toolPolicySha256,
       fetched_at_ms: Date.now(),
@@ -998,7 +972,9 @@ async function resolveRealtimeTools(env, requestId, requestUrl, forceRefresh = f
 }
 
 function normalizeSdp(sdpOffer) {
-  const lines = String(sdpOffer || "").split(/\r?\n/).filter((line) => line.length > 0);
+  const lines = String(sdpOffer || "")
+    .split(/\r?\n/)
+    .filter((line) => line.length > 0);
   if (!lines.length) {
     return "";
   }
@@ -1018,9 +994,7 @@ async function requestRealtimeCall(
   form.set("sdp", sdpOffer);
   form.set(
     "session",
-    JSON.stringify(
-      createSessionConfig(model, env, tools, voiceMode, instructions),
-    ),
+    JSON.stringify(createSessionConfig(model, env, tools, voiceMode, instructions)),
   );
 
   try {
@@ -1070,13 +1044,7 @@ async function requestRealtimeClientSecret(
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          session: createSessionConfig(
-            model,
-            env,
-            tools,
-            voiceMode,
-            instructions,
-          ),
+          session: createSessionConfig(model, env, tools, voiceMode, instructions),
         }),
       },
       REALTIME_TOKEN_TIMEOUT_MS,
@@ -1128,7 +1096,10 @@ function checkRequestTrust(request, allowedOrigins) {
 
   const refererOrigin = normalizedOriginFromReferer(request.headers.get("referer"));
   if (refererOrigin && !isAllowedOrigin(refererOrigin, allowedOrigins)) {
-    return { ok: false, reason: `Referer origin not allowed: ${refererOrigin}` };
+    return {
+      ok: false,
+      reason: `Referer origin not allowed: ${refererOrigin}`,
+    };
   }
 
   return { ok: true };
@@ -1174,11 +1145,7 @@ async function handleSession(request, env, corsOrigin, requestId) {
     (sessionId && !/^[A-Za-z0-9_-]{8,128}$/.test(sessionId))
   ) {
     return jsonResponse(
-      errorPayload(
-        "invalid_realtime_session",
-        "session_id or voice_mode is invalid.",
-        requestId,
-      ),
+      errorPayload("invalid_realtime_session", "session_id or voice_mode is invalid.", requestId),
       400,
       corsOrigin,
       requestId,
@@ -1297,7 +1264,11 @@ async function handleToken(request, env, corsOrigin, requestId) {
       payload = JSON.parse(rawBody);
     } catch {
       return jsonResponse(
-        errorPayload("invalid_json", "Expected JSON body for /token when body is present.", requestId),
+        errorPayload(
+          "invalid_json",
+          "Expected JSON body for /token when body is present.",
+          requestId,
+        ),
         400,
         corsOrigin,
         requestId,
@@ -1306,19 +1277,13 @@ async function handleToken(request, env, corsOrigin, requestId) {
   }
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     return jsonResponse(
-      errorPayload(
-        "invalid_realtime_session",
-        "session_id or voice_mode is invalid.",
-        requestId,
-      ),
+      errorPayload("invalid_realtime_session", "session_id or voice_mode is invalid.", requestId),
       400,
       corsOrigin,
       requestId,
     );
   }
-  const extras = Object.keys(payload).filter(
-    (key) => !["session_id", "voice_mode"].includes(key),
-  );
+  const extras = Object.keys(payload).filter((key) => !["session_id", "voice_mode"].includes(key));
   const sessionId = payload.session_id || "";
   const voiceMode = payload.voice_mode || "fast";
   if (
@@ -1327,11 +1292,7 @@ async function handleToken(request, env, corsOrigin, requestId) {
     (sessionId && !/^[A-Za-z0-9_-]{8,128}$/.test(sessionId))
   ) {
     return jsonResponse(
-      errorPayload(
-        "invalid_realtime_session",
-        "session_id or voice_mode is invalid.",
-        requestId,
-      ),
+      errorPayload("invalid_realtime_session", "session_id or voice_mode is invalid.", requestId),
       400,
       corsOrigin,
       requestId,
@@ -1439,8 +1400,7 @@ async function handleToolSchemas(request, env, corsOrigin, requestId) {
       tools: toolBundle.tools,
       instructions_sha256: toolBundle.instructions_sha256 || null,
       tool_manifest_sha256: toolBundle.tool_manifest_sha256 || null,
-      prompt_perfecting_version:
-        toolBundle.prompt_perfecting_version || null,
+      prompt_perfecting_version: toolBundle.prompt_perfecting_version || null,
       tool_policy_sha256: toolBundle.tool_policy_sha256 || null,
     },
     200,
@@ -1502,12 +1462,7 @@ async function handleExecuteTool(request, env, corsOrigin, requestId) {
     bridgeTarget = new URL(bridgeUrl);
   } catch {
     return jsonResponse(
-      errorPayload(
-        "invalid_bridge_url",
-        "PJ_TOOL_BRIDGE_URL is invalid.",
-        requestId,
-        bridgeUrl,
-      ),
+      errorPayload("invalid_bridge_url", "PJ_TOOL_BRIDGE_URL is invalid.", requestId, bridgeUrl),
       500,
       corsOrigin,
       requestId,
@@ -1529,7 +1484,11 @@ async function handleExecuteTool(request, env, corsOrigin, requestId) {
   try {
     const bridgeResp = await fetchWithTimeout(
       bridgeTarget.toString(),
-      { method: "POST", headers: bridgeHeaders(env, requestId), body: JSON.stringify(payload) },
+      {
+        method: "POST",
+        headers: bridgeHeaders(env, requestId),
+        body: JSON.stringify(payload),
+      },
       toolBridgeTimeoutMs(payload?.name),
     );
     const body = await bridgeResp.text();
@@ -1619,14 +1578,8 @@ export default {
     if (request.method === "GET" && url.pathname === "/health") {
       const bridgeConfigured = Boolean((env.PJ_TOOL_BRIDGE_URL || "").trim());
       const bridgeAuthConfigured = Boolean((env.PJ_TOOL_BRIDGE_TOKEN || "").trim());
-      const resolvedTools = await resolveRealtimeTools(
-        env,
-        requestId,
-        request.url,
-      );
-      const resolvedToolNames = new Set(
-        resolvedTools.tools.map((tool) => tool.name),
-      );
+      const resolvedTools = await resolveRealtimeTools(env, requestId, request.url);
+      const resolvedToolNames = new Set(resolvedTools.tools.map((tool) => tool.name));
       const n8nToolsReady = [
         "list_n8n_capabilities",
         "get_n8n_corpus_status",
@@ -1644,36 +1597,32 @@ export default {
           tool_schema_cache_source: toolSchemaCache.source,
           tool_manifest_sha256: toolSchemaCache.tool_manifest_sha256,
           instructions_sha256: toolSchemaCache.instructions_sha256,
-          prompt_perfecting_version:
-            toolSchemaCache.prompt_perfecting_version,
+          prompt_perfecting_version: toolSchemaCache.prompt_perfecting_version,
           tool_policy_sha256: toolSchemaCache.tool_policy_sha256,
           last_successful_reconciliation_at:
             toolSchemaCache.source === "bridge" && toolSchemaCache.fetched_at_ms
               ? new Date(toolSchemaCache.fetched_at_ms).toISOString()
               : null,
-          tool_schema_reconciliation_status:
-            toolSchemaReconciliation.status,
-          last_reconciliation_attempt_at:
-            toolSchemaReconciliation.attempted_at_ms
-              ? new Date(
-                toolSchemaReconciliation.attempted_at_ms,
-              ).toISOString()
-              : null,
+          tool_schema_reconciliation_status: toolSchemaReconciliation.status,
+          last_reconciliation_attempt_at: toolSchemaReconciliation.attempted_at_ms
+            ? new Date(toolSchemaReconciliation.attempted_at_ms).toISOString()
+            : null,
           full_tooling_ready:
-            bridgeConfigured
-            && bridgeAuthConfigured
-            && toolSchemaReconciliation.status === "success"
-            && toolSchemaCache.source === "bridge"
-            && toolSchemaCache.tools.length > 0
-            && Boolean(toolSchemaCache.tool_manifest_sha256)
-            && Boolean(toolSchemaCache.instructions_sha256)
-            && Boolean(toolSchemaCache.prompt_perfecting_version)
-            && Boolean(toolSchemaCache.tool_policy_sha256),
+            bridgeConfigured &&
+            bridgeAuthConfigured &&
+            toolSchemaReconciliation.status === "success" &&
+            toolSchemaCache.source === "bridge" &&
+            toolSchemaCache.tools.length > 0 &&
+            Boolean(toolSchemaCache.tool_manifest_sha256) &&
+            Boolean(toolSchemaCache.instructions_sha256) &&
+            Boolean(toolSchemaCache.prompt_perfecting_version) &&
+            Boolean(toolSchemaCache.tool_policy_sha256),
           n8n_corpus_tools_ready: n8nToolsReady,
           full_power_bridge_configured:
             Boolean(deriveResponsesBridgeBaseUrl(env)) && bridgeAuthConfigured,
           public_endpoints: ["GET /health", "OPTIONS *"],
-          privileged_route_policy: "all other routes require an authorized Cloudflare Access identity",
+          privileged_route_policy:
+            "all other routes require an authorized Cloudflare Access identity",
           endpoints: [
             "/session",
             "/token",
