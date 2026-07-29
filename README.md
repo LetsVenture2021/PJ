@@ -264,12 +264,22 @@ Run commands from the repository root with the virtual environment active.
 
 # Validate a structured response against the checked-in schema
 ./pj --json schemas/task_triage.json "Triage these tasks: ..."
+
+# Inspect the shared CLI/Web Workbench manifest
+./pj workbench
+./pj workbench --json
+
+# Launch a task through a named Workbench workflow
+./pj workbench code "Inspect this repository and fix the failing tests"
 ```
 
 Interactive palette keys are `/` for commands, `#` for local tools, `%` for
 features/connectors, and `$` for generated skills. `/new`, `/chats`,
 `/resume`, `/history`, and `/search` operate on durable SQLite history.
 Feature toggles write to `config.json` or `mcp_servers.json`.
+`/workbench` shows the same workflow readiness surfaced in the browser;
+`/workbench <workflow> <task>` launches a task with that workflow's operating
+prompt while preserving the user's task in chat history.
 
 To avoid the launcher, activate the environment, export `OPENAI_API_KEY`, and
 replace `./pj` with `python pj.py`.
@@ -550,17 +560,20 @@ workflow.
 
 ### Browser frontend
 
-The repository contains the static client (`webrtc_client.html` and `assets/`)
+The repository contains the static client (`webrtc_client.html`, `assets/`, and `web/`)
 but no committed frontend deployment manifest. The Worker routes intentionally
 exclude `/` and `/assets/*`; serve those paths from a static host such as a
 Cloudflare Pages project on the same domain, protected by the same Access
-application. A direct-upload deploy stages the client as `index.html` plus the
-`assets/` directory:
+application. A direct-upload deploy stages the client as `index.html`, copies
+the manifest and service worker to the site root, and preserves `web/` for
+service-worker dependencies:
 
 ```bash
-mkdir -p /tmp/pj-site/assets
+mkdir -p /tmp/pj-site
 cp webrtc_client.html /tmp/pj-site/index.html
-cp assets/pj_web_utils.js /tmp/pj-site/assets/
+cp webrtc_client.html /tmp/pj-site/webrtc_client.html
+cp -R assets web /tmp/pj-site/
+cp web/manifest.webmanifest web/service-worker.js /tmp/pj-site/
 wrangler pages deploy /tmp/pj-site --project-name=YOUR_PAGES_PROJECT --branch=master
 ```
 

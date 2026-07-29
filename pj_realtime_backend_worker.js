@@ -700,7 +700,7 @@ function stableJson(value) {
   return JSON.stringify(value);
 }
 
-function bridgeHeaders(env, requestId) {
+function bridgeHeaders(env, requestId, request = null) {
   // Construct a fresh allowlisted header set so Access assertions and browser
   // credentials can never be forwarded to the private tool runtime.
   const headers = {
@@ -709,6 +709,10 @@ function bridgeHeaders(env, requestId) {
     "x-pj-contract-version": CONTRACT_VERSION,
     "x-pj-protocol-version": String(PROTOCOL_VERSION),
   };
+  const idempotencyKey = request?.headers.get("x-pj-idempotency-key") || "";
+  if (/^[A-Za-z0-9._:-]{16,128}$/.test(idempotencyKey)) {
+    headers["x-pj-idempotency-key"] = idempotencyKey;
+  }
   if (env.PJ_TOOL_BRIDGE_TOKEN) {
     headers.authorization = `Bearer ${env.PJ_TOOL_BRIDGE_TOKEN}`;
   }
@@ -750,12 +754,34 @@ function deriveResponsesBridgeBaseUrl(env) {
 }
 
 function isResponsesRoute(method, pathname) {
+  if ((method === "GET" || method === "POST") && pathname === "/projects") {
+    return true;
+  }
+  if (method === "POST" && pathname === "/projects/import") {
+    return true;
+  }
+  if (["GET", "PATCH", "DELETE"].includes(method) && /^\/projects\/[a-f0-9-]{36}$/.test(pathname)) {
+    return true;
+  }
+  if (
+    ["GET", "POST"].includes(method) &&
+    /^\/projects\/[a-f0-9-]{36}\/(conversations|sources|artifacts|goals)$/.test(pathname)
+  ) {
+    return true;
+  }
+  if (method === "POST" && /^\/projects\/[a-f0-9-]{36}\/(archive|restore|export)$/.test(pathname)) {
+    return true;
+  }
+  if (method === "DELETE" && /^\/projects\/conversations\/[A-Za-z0-9_-]{8,128}$/.test(pathname)) {
+    return true;
+  }
   if (method === "POST" && pathname === "/conversations") {
     return true;
   }
   if (
     (/^\/conversations\/[A-Za-z0-9_-]{8,128}\/events$/.test(pathname) && method === "GET") ||
-    (/^\/conversations\/[A-Za-z0-9_-]{8,128}\/(turns|realtime-token)$/.test(pathname) && method === "POST")
+    (/^\/conversations\/[A-Za-z0-9_-]{8,128}\/(turns|realtime-token)$/.test(pathname) &&
+      method === "POST")
   ) {
     return true;
   }
@@ -849,18 +875,27 @@ async function handleResponsesProxy(request, env, corsOrigin, requestId, fetchIm
 
   const isStreamingTurn = /\/turns$/.test(inboundUrl.pathname);
   const isArtifactDownload = /^\/responses\/artifacts\/ART-[a-f0-9]{32}$/.test(inboundUrl.pathname);
+  const isProjectExport = /\/projects\/[a-f0-9-]{36}\/export$/.test(inboundUrl.pathname);
+  const isProjectImport = inboundUrl.pathname === "/projects/import";
   const headers = {
-    ...bridgeHeaders(env, requestId),
+    ...bridgeHeaders(env, requestId, request),
     accept: isStreamingTurn
       ? "text/event-stream"
       : isArtifactDownload
         ? "application/octet-stream"
         : "application/json",
   };
+  const ownerId = request.headers.get("x-pj-owner-id");
+  if (ownerId) headers["x-pj-owner-id"] = ownerId.slice(0, 200);
   let body;
-  if (request.method === "POST") {
-    body = await request.text();
-    if (new TextEncoder().encode(body).byteLength > MAX_RESPONSES_REQUEST_BYTES) {
+  if (["POST", "PATCH"].includes(request.method)) {
+    body = isProjectImport ? await request.arrayBuffer() : await request.text();
+    const byteLength =
+      typeof body === "string" ? new TextEncoder().encode(body).byteLength : body.byteLength;
+    const requestLimit = isProjectImport
+      ? asPositiveInt(env.PJ_MAX_UPLOAD_BYTES, DEFAULT_MAX_UPLOAD_PROXY_BYTES)
+      : MAX_RESPONSES_REQUEST_BYTES;
+    if (byteLength > requestLimit) {
       return jsonResponse(
         errorPayload(
           "request_too_large",
@@ -872,6 +907,7 @@ async function handleResponsesProxy(request, env, corsOrigin, requestId, fetchIm
         requestId,
       );
     }
+    if (isProjectImport) headers["content-type"] = request.headers.get("content-type") || "";
   }
 
   try {
@@ -887,14 +923,14 @@ async function handleResponsesProxy(request, env, corsOrigin, requestId, fetchIm
     const isJson = upstreamContentType.includes("application/json");
     const contentType = isEventStream
       ? "text/event-stream"
-      : isArtifactDownload && !isJson
+      : (isArtifactDownload || isProjectExport) && !isJson
         ? upstreamContentType.split(";")[0].trim()
         : "application/json";
     const responseHeaderSet = responseHeaders(corsOrigin, requestId, contentType);
     if (isEventStream) {
       responseHeaderSet["x-accel-buffering"] = "no";
     }
-    if (isArtifactDownload && !isJson) {
+    if ((isArtifactDownload || isProjectExport) && !isJson) {
       const safeDisposition = safeAttachmentDisposition(
         bridgeResponse.headers.get("content-disposition") || "",
       );
@@ -1030,6 +1066,10 @@ async function handleUploadProxy(request, env, corsOrigin, requestId, fetchImpl 
   const sessionId = request.headers.get("x-pj-session-id") || "";
   if (/^[A-Za-z0-9_-]{8,128}$/.test(sessionId)) {
     headers["x-pj-session-id"] = sessionId;
+  }
+  const idempotencyKey = request.headers.get("x-pj-idempotency-key") || "";
+  if (/^[A-Za-z0-9._:-]{16,128}$/.test(idempotencyKey)) {
+    headers["x-pj-idempotency-key"] = idempotencyKey;
   }
   try {
     const bridgeResponse = await fetchImpl(target.toString(), {
@@ -2033,7 +2073,11 @@ export default {
       return handleExecuteTool(request, env, corsOrigin, requestId);
     }
 
-    if (url.pathname.startsWith("/responses/") || url.pathname.startsWith("/conversations")) {
+    if (
+      url.pathname.startsWith("/responses/") ||
+      url.pathname.startsWith("/projects") ||
+      url.pathname.startsWith("/conversations")
+    ) {
       return handleResponsesProxy(request, env, corsOrigin, requestId);
     }
 

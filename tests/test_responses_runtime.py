@@ -107,6 +107,15 @@ class TestResponsesRuntime(unittest.TestCase):
             ["configured", "degraded", "disabled"],
         )
         self.assertEqual(manifest["native"]["computer_use"]["status"], "unavailable")
+        self.assertEqual(
+            manifest["experience"]["target"],
+            "codex_class_private_assistant",
+        )
+        workflows = {workflow["id"]: workflow for workflow in manifest["experience"]["workflows"]}
+        self.assertIn("codex_workspace", workflows)
+        self.assertEqual(workflows["documents_and_artifacts"]["status"], "active")
+        self.assertEqual(workflows["vision_and_media"]["status"], "active")
+        self.assertFalse(manifest["experience"]["secret_values_included"])
         rendered = json.dumps(manifest)
         self.assertNotIn("super-secret-value", rendered)
         self.assertNotIn("READY_TOKEN", rendered)
@@ -1941,6 +1950,14 @@ class TestResponsesRoutes(unittest.TestCase):
         self.assertEqual(
             capabilities["local_functions"]["count"],
             len(skills.TOOL_SCHEMAS),
+        )
+        self.assertEqual(
+            capabilities["experience"]["default_mode"],
+            "full_power_text",
+        )
+        self.assertIn(
+            "codex_workspace",
+            {workflow["id"] for workflow in capabilities["experience"]["workflows"]},
         )
         self.assertNotIn("headers", json.dumps(capabilities))
 

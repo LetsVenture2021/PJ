@@ -29,10 +29,7 @@ test("browser visual capture is permissioned, bounded, revocable, and ephemeral 
   assert.match(webClientSource, /width: 1280, height: 720/);
   assert.match(webClientSource, /bytes: 8_000_000, durationMs: 120_000/);
   assert.match(webClientSource, /visualTaskActive\.checked/);
-  assert.match(
-    webClientSource,
-    /retention: el\.retainCapture\.checked \? "retain" : "ephemeral"/,
-  );
+  assert.match(webClientSource, /retention: el\.retainCapture\.checked \? "retain" : "ephemeral"/);
   assert.match(webClientSource, /captureOverlay\.replaceChildren\(\)/);
   assert.doesNotMatch(webClientSource, /captureOverlay\.innerHTML/);
 });
@@ -65,7 +62,40 @@ const {
   validateAccessIdentity,
   validateProtocolRequest,
 } = workerModule;
-const { parseErrorBody } = webUtilsModule;
+const { fetchWithTimeout: browserFetchWithTimeout, parseErrorBody } = webUtilsModule;
+
+test("browser fetch timeout preserves caller cancellation", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (_url, options) =>
+    new Promise((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+    });
+  try {
+    const caller = new AbortController();
+    const request = browserFetchWithTimeout("https://example.invalid", { signal: caller.signal });
+    const reason = new DOMException("View closed", "AbortError");
+    caller.abort(reason);
+    await assert.rejects(request, (error) => error === reason);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("browser fetch timeout aborts stalled requests with a typed reason", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (_url, options) =>
+    new Promise((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+    });
+  try {
+    await assert.rejects(
+      browserFetchWithTimeout("https://example.invalid", {}, 1),
+      (error) => error?.name === "TimeoutError",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 const TEAM_DOMAIN = "pj-owner-tests.cloudflareaccess.com";
 const ISSUER = `https://${TEAM_DOMAIN}`;
@@ -135,6 +165,8 @@ function assertionRequest(assertion) {
 
 test("deployment routes cover APIs without claiming frontend assets", () => {
   for (const route of [
+    "pj-assistant.ai/conversations*",
+    "pj-assistant.ai/projects*",
     "pj-assistant.ai/health",
     "pj-assistant.ai/session",
     "pj-assistant.ai/token",
@@ -1198,6 +1230,10 @@ test("browser module initializes with Full Power helpers in shared scope", async
   assert.equal(typeof listeners.get("fullPowerVoiceModeBtn:click"), "function");
   assert.equal(typeof listeners.get("runCodexBtn:click"), "function");
   assert.equal(typeof listeners.get("refreshSessionsBtn:click"), "function");
+  assert.match(html, /id="experienceGrid"/);
+  assert.match(moduleSource, /function renderExperienceManifest/);
+  assert.match(moduleSource, /function queueWorkflowPrompt/);
+  assert.match(moduleSource, /dataset\.workflowPrompt/);
   assert.match(moduleSource, /event\.type === "artifact\.ready"/);
   assert.match(moduleSource, /className = "artifact-download"/);
   assert.match(html, /className = "artifact-card"/);
@@ -1215,7 +1251,10 @@ test("browser module initializes with Full Power helpers in shared scope", async
   assert.match(html, /artifact-image-preview/);
   assert.match(html, /startsWith\("image\/"\)/);
   assert.match(html, /className = "canvas-open"/);
-  assert.match(html, /frame\.sandbox = "allow-scripts allow-forms allow-modals allow-pointer-lock allow-downloads"/);
+  assert.match(
+    html,
+    /frame\.sandbox = "allow-scripts allow-forms allow-modals allow-pointer-lock allow-downloads"/,
+  );
   assert.match(html, /URL\.createObjectURL\(new Blob\(\[source\], \{ type: "text\/html" \}\)\)/);
   assert.match(html, /state\.canvasObjectUrl\) URL\.revokeObjectURL/);
   assert.doesNotMatch(html, /innerHTML\s*=\s*event\./);

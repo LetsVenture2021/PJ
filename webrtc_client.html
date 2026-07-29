@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1220">
+  <link rel="manifest" href="/manifest.webmanifest">
   <title>PJ Desktop</title>
   <style>
     :root {
@@ -31,13 +33,15 @@
 
     .app {
       width: 100%;
-      height: 100vh;
-      padding: 0;
+      height: 100dvh;
+      padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
       display: grid;
       grid-template-columns: 280px minmax(420px, 1fr) 320px;
       gap: 0;
       min-height: 720px;
     }
+
+    .app > * { min-width: 0; }
 
     .card {
       background: var(--panel);
@@ -169,6 +173,7 @@
       cursor: pointer;
       background: #1a1f27;
       transition: 120ms ease;
+      min-height: 44px;
     }
     button:hover { background-color: #242a34; }
     button:disabled {
@@ -273,6 +278,71 @@
       border-radius: 8px;
       background: #0b0e12;
       color: var(--text);
+    }
+
+    .experience-module {
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #0b0e12;
+    }
+
+    .experience-head,
+    .experience-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .experience-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 8px;
+    }
+
+    .experience-card {
+      min-width: 0;
+      min-height: 74px;
+      display: grid;
+      align-content: space-between;
+      gap: 8px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #11151a;
+      text-align: left;
+      color: #d8dde5;
+    }
+
+    .experience-tools {
+      overflow-wrap: anywhere;
+    }
+
+    .experience-card[data-status="active"] { border-color: rgba(34, 197, 94, .45); }
+    .experience-card[data-status="degraded"] { border-color: rgba(245, 158, 11, .55); }
+    .experience-card[data-status="unavailable"] { opacity: .7; }
+    .experience-card strong { font-size: 13px; }
+
+    .status-pill {
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: #a7b0bd;
+    }
+
+    .status-pill.active { color: #86efac; }
+    .status-pill.degraded { color: #fcd34d; }
+    .status-pill.disabled, .status-pill.unavailable { color: #94a3b8; }
+
+    .experience-tools {
+      min-height: 16px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.3;
     }
 
     .chat {
@@ -508,6 +578,9 @@
       display: flex;
       gap: 10px;
       align-items: flex-end;
+      position: sticky;
+      bottom: 0;
+      padding-bottom: max(14px, env(safe-area-inset-bottom));
     }
 
     .composer textarea {
@@ -563,29 +636,96 @@
     .keyboard-hint { color: #69717d; font-size: 11px; border: 1px solid var(--line); padding: 3px 7px; border-radius: 6px; }
     .welcome { margin: auto; max-width: 610px; text-align: center; padding: 36px 20px; }
     .welcome-mark { width: 56px; height: 56px; margin: 0 auto 18px; display: grid; place-items: center; border-radius: 17px; color: #c9c3ff; background: linear-gradient(145deg, rgba(108,92,231,.28), rgba(108,92,231,.08)); border: 1px solid rgba(130,116,238,.3); font-size: 24px; }
-    .welcome h3 { font-size: 27px; letter-spacing: -.03em; margin: 0 0 9px; }
+    .welcome h3 { font-size: 27px; letter-spacing: 0; margin: 0 0 9px; }
     .welcome p { color: var(--muted); margin: 0 auto 24px; line-height: 1.6; }
     .suggestions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: left; }
     .suggestion { padding: 13px; border: 1px solid var(--line); border-radius: 11px; background: #11151a; color: #cdd2da; font-size: 13px; }
     .suggestion strong { display: block; color: #f1f3f6; margin-bottom: 4px; }
     @media (max-width: 940px) {
       .app {
+        display: block;
+        height: auto;
+        min-height: 100vh;
         grid-template-columns: 1fr;
       }
       .sidebar {
         height: auto;
+        overflow: visible;
+        border-width: 0 0 1px;
       }
-      .artifact-panel { position: static; height: auto; }
+      .experience-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .artifact-panel {
+        position: static;
+        height: auto;
+        min-height: 180px;
+        border-width: 1px 0 0;
+      }
       .chat {
-        height: 70vh;
+        height: min(780px, 82vh);
+        min-height: 620px;
       }
       .bubble { max-width: 94%; }
+    }
+    :focus-visible { outline: 3px solid #93c5fd; outline-offset: 3px; }
+    .skip-link { position: fixed; left: 8px; top: -80px; z-index: 20; background: #fff; color: #07101f; padding: 12px; }
+    .skip-link:focus { top: 8px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+    .nav-toggle { display: none; }
+    @media (max-width: 640px) {
+      .app { padding-top: max(8px, env(safe-area-inset-top)); gap: 8px; }
+      .nav-toggle { display: block; width: 100%; }
+      .sidebar.collapsed > :not(.nav-toggle):not(:first-child) { display: none; }
+      .chat { min-height: calc(100dvh - 90px); max-height: 100dvh; }
+      .chat-head, .messages { padding: 12px; }
+      .composer { flex-wrap: wrap; }
+      .composer textarea { order: -1; flex-basis: 100%; max-height: 30dvh; }
+      .composer #sendBtn { flex: 1; min-width: 80px; }
+      .artifact-card, .bubble { max-width: 100%; width: 100%; }
+    }
+
+    @media (max-width: 600px) {
+      .sidebar { padding: 18px 16px; }
+      .chat-head {
+        align-items: flex-start;
+        flex-wrap: wrap;
+        padding: 12px 14px;
+      }
+      .workspace-heading { width: 100%; }
+      .head-actions { width: 100%; }
+      .head-actions button { flex: 1; }
+      .keyboard-hint { display: none; }
+      .messages { padding: 24px 14px; }
+      .welcome { padding: 24px 0; }
+      .welcome h3 { font-size: 24px; }
+      .suggestions { grid-template-columns: 1fr; }
+      .composer {
+        gap: 8px;
+        padding: 10px;
+      }
+      .composer textarea {
+        min-width: 0;
+        padding-inline: 10px;
+      }
+      .composer button {
+        min-width: 58px;
+        padding-inline: 9px;
+      }
+      .composer .composer-icon-btn {
+        min-width: 42px;
+        width: 42px;
+      }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
     }
   </style>
 </head>
 <body>
+  <a class="skip-link" href="#messages">Skip to conversation</a>
+  <div id="announcer" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
   <div class="app">
-    <aside class="card sidebar">
+    <aside id="navigationPanel" class="card sidebar" aria-label="Navigation and conversation context">
+      <button id="navToggle" class="nav-toggle muted-btn" type="button" aria-expanded="true" aria-controls="navigationPanel">Hide navigation</button>
       <div class="brand-lockup">
         <div class="brand-mark" aria-hidden="true">P</div>
         <div>
@@ -596,7 +736,7 @@
 
       <div class="status">
         <span id="statusDot" class="dot"></span>
-        <span id="statusText">Idle</span>
+        <span id="statusText" role="status">Idle</span>
       </div>
 
       <div class="mode-switch" aria-label="Assistant mode">
@@ -618,6 +758,33 @@
         Full Force Voice refines every completed thought, then uses PJ's full
         Responses runtime for tools, research, artifacts, and governed actions.
       </div>
+
+      <section class="experience-module" aria-labelledby="experienceTitle">
+        <div class="experience-head">
+          <strong id="experienceTitle">Workbench</strong>
+          <span id="experienceScore" class="status-pill">Checking</span>
+        </div>
+        <div id="experienceGrid" class="experience-grid" aria-live="polite"></div>
+      </section>
+
+      <details open>
+        <summary>Projects</summary>
+        <div class="field">
+          <label for="projectSelect">Current retrieval scope</label>
+          <select id="projectSelect"><option value="">Unassigned (legacy conversation)</option></select>
+        </div>
+        <div id="projectScope" class="note">Scope: current project (none selected)</div>
+        <div class="search-row">
+          <input id="projectName" type="text" maxlength="120" placeholder="New project name">
+          <button id="createProjectBtn" class="muted-btn" type="button">Create</button>
+        </div>
+        <div class="button-row">
+          <button id="moveConversationBtn" class="muted-btn" type="button">Move conversation here</button>
+          <button id="removeConversationBtn" class="muted-btn" type="button">Remove from project</button>
+        </div>
+        <details><summary>Sources</summary><div id="projectSources" class="note">No project selected.</div></details>
+        <details><summary>Artifacts</summary><div id="projectArtifacts" class="note">No project selected.</div></details>
+      </details>
 
       <section class="codex-module" aria-labelledby="codexTitle">
         <div class="codex-module-header">
@@ -691,7 +858,7 @@
           <span class="workspace-icon" aria-hidden="true">✦</span>
           <div>
             <p class="eyebrow">Private workspace</p>
-            <h2>New conversation</h2>
+            <h2 id="workspaceTitle">New conversation</h2>
           </div>
         </div>
         <div class="head-actions">
@@ -700,7 +867,7 @@
           <button id="clearBtn" class="muted-btn">Clear</button>
         </div>
       </div>
-      <div id="messages" class="messages">
+      <div id="messages" class="messages" tabindex="-1" role="log" aria-live="polite" aria-relevant="additions text" aria-label="Conversation timeline">
         <section class="welcome" aria-label="Get started">
           <div class="welcome-mark" aria-hidden="true">✦</div>
           <h3>What can I help you make?</h3>
@@ -708,8 +875,8 @@
           <div class="suggestions">
             <button class="suggestion" type="button" data-prompt="Help me plan a project with clear milestones and next steps."><strong>Plan a project</strong>Turn an idea into clear milestones and next steps</button>
             <button class="suggestion" type="button" data-prompt="Help me summarize and compare my documents."><strong>Work with documents</strong>Summarize, compare, or transform your files</button>
-            <button class="suggestion" type="button" data-prompt="Help me create a polished brief from an idea."><strong>Create something</strong>Draft a presentation, image, or polished brief</button>
-            <button class="suggestion" type="button" data-prompt="I'd like to talk through an idea."><strong>Talk it through</strong>Use Full Force Voice for a natural, tool-enabled conversation</button>
+            <button class="suggestion" type="button" data-prompt="Use the Codex workspace path: inspect this repository, state a short plan, make scoped changes only if approved, and run relevant validation."><strong>Work on code</strong>Inspect, patch, validate, and report clearly</button>
+            <button class="suggestion" type="button" data-prompt="Research this with cited sources, separate facts from assumptions, and preserve links."><strong>Research</strong>Find, cite, and synthesize current evidence</button>
           </div>
         </section>
       </div>
@@ -787,7 +954,7 @@
       shorten,
       parseErrorBody,
       fetchWithTimeout,
-    } from "/assets/pj_web_utils.js?v=2026-07-28.6";
+    } from "/assets/pj_web_utils.js?v=2026-07-29.1";
 
     const localHostnames = new Set(["localhost", "127.0.0.1"]);
     const DEFAULT_API_BASE = localHostnames.has(window.location.hostname)
@@ -825,6 +992,8 @@
       refreshCapabilitiesBtn: document.getElementById("refreshCapabilitiesBtn"),
       capabilityStatus: document.getElementById("capabilityStatus"),
       toolSummary: document.getElementById("toolSummary"),
+      experienceGrid: document.getElementById("experienceGrid"),
+      experienceScore: document.getElementById("experienceScore"),
       fullPowerVoiceModeBtn: document.getElementById("fullPowerVoiceModeBtn"),
       fullPowerModeBtn: document.getElementById("fullPowerModeBtn"),
       codexAction: document.getElementById("codexAction"),
@@ -843,6 +1012,17 @@
       composerFolderBtn: document.getElementById("composerFolderBtn"),
       filePicker: document.getElementById("filePicker"),
       folderPicker: document.getElementById("folderPicker"),
+      announcer: document.getElementById("announcer"),
+      navToggle: document.getElementById("navToggle"),
+      navigationPanel: document.getElementById("navigationPanel"),
+      projectSelect: document.getElementById("projectSelect"),
+      projectScope: document.getElementById("projectScope"),
+      projectName: document.getElementById("projectName"),
+      createProjectBtn: document.getElementById("createProjectBtn"),
+      moveConversationBtn: document.getElementById("moveConversationBtn"),
+      removeConversationBtn: document.getElementById("removeConversationBtn"),
+      projectSources: document.getElementById("projectSources"),
+      projectArtifacts: document.getElementById("projectArtifacts"),
       cameraBtn: document.getElementById("cameraBtn"),
       screenBtn: document.getElementById("screenBtn"),
       capturePauseBtn: document.getElementById("capturePauseBtn"),
@@ -862,6 +1042,7 @@
       canvasDownload: document.getElementById("canvasDownload"),
       canvasFullscreenBtn: document.getElementById("canvasFullscreenBtn"),
       canvasCloseBtn: document.getElementById("canvasCloseBtn"),
+      workspaceTitle: document.getElementById("workspaceTitle"),
     };
 
     const state = {
@@ -880,6 +1061,7 @@
       fullPowerBusy: false,
       responsesAbortController: null,
       capabilityManifest: null,
+      experienceManifest: null,
       pendingApprovals: {},
       fullPowerToolRows: new Map(),
       artifactCards: new Map(),
@@ -918,6 +1100,7 @@
     function setStatus(text, kind = "idle") {
       el.statusText.textContent = text;
       el.statusDot.classList.toggle("live", kind === "live");
+      el.announcer.textContent = text;
     }
 
     function apiBase() {
@@ -932,6 +1115,7 @@
         "x-pj-protocol-version": String(PROTOCOL_VERSION),
       };
       if (contentType) headers["Content-Type"] = contentType;
+      headers["x-pj-idempotency-key"] = window.crypto?.randomUUID?.() || `idem-${requestId}-00000000`;
       return headers;
     }
 
@@ -1467,6 +1651,11 @@
       el.stopBtn.textContent = mode !== MODE.FULL_POWER
         ? "End Session"
         : "Close Conversation";
+      el.workspaceTitle.textContent = mode === MODE.FULL_POWER
+        ? "Full Power workspace"
+        : mode === MODE.FULL_POWER_VOICE
+          ? "Full Force Voice"
+          : "Realtime Voice";
       el.modeNote.textContent = mode === MODE.REALTIME
         ? "Realtime voice is available as an internal compatibility mode."
         : mode === MODE.FULL_POWER_VOICE
@@ -1783,6 +1972,78 @@
       state.seededSessionIds.add(state.activeSessionId);
     }
 
+    function statusCopy(status) {
+      if (status === "active") return "Ready";
+      if (status === "degraded") return "Setup";
+      if (status === "disabled") return "Off";
+      return "Unavailable";
+    }
+
+    function workflowToolPreview(workflow) {
+      const tools = Array.isArray(workflow?.tools) ? workflow.tools : [];
+      if (workflow?.ready_count !== undefined || workflow?.needs_setup_count !== undefined) {
+        const ready = Number(workflow.ready_count || 0);
+        const setup = Number(workflow.needs_setup_count || 0);
+        return `${ready} ready${setup ? ` · ${setup} setup` : ""}`;
+      }
+      return tools.slice(0, 3).join(" · ");
+    }
+
+    function queueWorkflowPrompt(prompt) {
+      const text = String(prompt || "").trim();
+      if (!text) return;
+      if (state.mode !== MODE.FULL_POWER) setMode(MODE.FULL_POWER);
+      el.textInput.value = text;
+      el.textInput.focus();
+      if (state.phase === PHASE.IDLE) {
+        startFullPowerSession().catch((error) => {
+          appendBubble("system", `Unable to start workflow: ${shorten(String(error), 240)}`);
+        });
+      }
+    }
+
+    function renderExperienceManifest(experience) {
+      state.experienceManifest = experience && typeof experience === "object" ? experience : null;
+      const workflows = Array.isArray(state.experienceManifest?.workflows)
+        ? state.experienceManifest.workflows
+        : [
+            {
+              id: "assistant_chat",
+              label: "Chat",
+              status: state.toolCatalog?.count ? "active" : "degraded",
+              launch_prompt: "Help me solve this with the best available PJ tools.",
+              tools: ["responses", "local_functions"],
+            },
+          ];
+      const visible = workflows.slice(0, 6);
+      const ready = workflows.filter((workflow) => workflow.status === "active").length;
+      el.experienceScore.textContent = `${ready}/${workflows.length} ready`;
+      el.experienceScore.className = `status-pill ${ready ? "active" : "degraded"}`;
+      el.experienceGrid.replaceChildren();
+      for (const workflow of visible) {
+        const card = document.createElement("button");
+        card.type = "button";
+        card.className = "experience-card";
+        card.dataset.workflowId = workflow.id || "";
+        card.dataset.status = workflow.status || "unavailable";
+        card.dataset.workflowPrompt = workflow.launch_prompt || "";
+        const head = document.createElement("div");
+        head.className = "experience-card-head";
+        const label = document.createElement("strong");
+        label.textContent = workflow.label || workflow.id || "Workflow";
+        const status = document.createElement("span");
+        status.className = `status-pill ${workflow.status || "unavailable"}`;
+        status.textContent = statusCopy(workflow.status);
+        const tools = document.createElement("div");
+        tools.className = "experience-tools";
+        tools.textContent = workflowToolPreview(workflow);
+        head.append(label, status);
+        card.append(head, tools);
+        card.addEventListener("click", () => queueWorkflowPrompt(card.dataset.workflowPrompt));
+        el.experienceGrid.appendChild(card);
+      }
+    }
+
     function capabilityNames(manifest) {
       const native = Object.entries(manifest?.native || {})
         .filter(([, value]) => value?.status === "active")
@@ -1802,6 +2063,7 @@
         );
         const manifest = parsed.capabilities || {};
         state.capabilityManifest = manifest;
+        renderExperienceManifest(manifest.experience);
         const functionCount = manifest.local_functions?.count || 0;
         const names = capabilityNames(manifest);
         el.capabilityStatus.textContent =
@@ -1812,6 +2074,7 @@
         return manifest;
       } catch (error) {
         state.capabilityManifest = null;
+        renderExperienceManifest(null);
         el.capabilityStatus.textContent = "Capability mode: Full Power unavailable";
         el.toolSummary.textContent = `Capability error: ${shorten(String(error), 240)}`;
         return null;
@@ -1849,11 +2112,30 @@
         el.toolSummary.textContent = preview
           ? `Available tools: ${preview}`
           : "Available tools: none exposed by backend yet.";
+        await refreshExperienceSummary(apiBase, createRequestId());
         return schemaInfo;
       } catch (error) {
         state.toolCatalog = null;
+        renderExperienceManifest(null);
         el.capabilityStatus.textContent = "Capability mode: tool catalog unavailable";
         el.toolSummary.textContent = `Tool catalog error: ${shorten(String(error), 240)}`;
+        return null;
+      }
+    }
+
+    async function refreshExperienceSummary(base, requestId) {
+      try {
+        const parsed = await fetchJson(
+          `${base}/responses/capabilities`,
+          { headers: requestHeaders(requestId) },
+          12000,
+        );
+        const manifest = parsed.capabilities || {};
+        state.capabilityManifest = manifest;
+        renderExperienceManifest(manifest.experience);
+        return manifest.experience || null;
+      } catch (_) {
+        renderExperienceManifest(null);
         return null;
       }
     }
@@ -3223,6 +3505,15 @@
     }
 
     el.startBtn.addEventListener("click", startSelectedMode);
+    el.navToggle.addEventListener("click", () => {
+      const collapsed = el.navigationPanel.classList.toggle("collapsed");
+      el.navToggle.setAttribute("aria-expanded", String(!collapsed));
+      el.navToggle.textContent = collapsed ? "Show navigation" : "Hide navigation";
+    });
+    window.addEventListener?.("offline", () =>
+      setStatus("Offline — changes will retry when connected"),
+    );
+    window.addEventListener?.("online", () => setStatus("Online — reconnecting", "live"));
     el.stopBtn.addEventListener("click", stopSelectedMode);
     el.sendBtn.addEventListener("click", sendSelectedMessage);
     el.copyBtn.addEventListener("click", copyTranscript);
@@ -3278,6 +3569,55 @@
     el.sessionSelect.addEventListener("change", () => {
       if (el.sessionSelect.value) resumeFullPowerSession(el.sessionSelect.value);
     });
+
+    async function loadProjectPanel() {
+      const selected = el.projectSelect.value;
+      const parsed = await fetchJson(`${apiBase()}/projects`, { credentials: "same-origin" });
+      el.projectSelect.replaceChildren(new Option("Unassigned (legacy conversation)", ""));
+      for (const project of parsed.projects || []) {
+        el.projectSelect.add(new Option(project.name, project.id, false, project.id === selected));
+      }
+      await refreshProjectScope();
+    }
+
+    async function refreshProjectScope() {
+      const projectId = el.projectSelect.value;
+      el.projectScope.textContent = projectId
+        ? `Scope: current project · ${el.projectSelect.selectedOptions[0].textContent}`
+        : "Scope: current project (none selected; retrieval is isolated)";
+      if (!projectId) {
+        el.projectSources.textContent = "No project selected.";
+        el.projectArtifacts.textContent = "No project selected.";
+        return;
+      }
+      for (const [kind, target] of [["sources", el.projectSources], ["artifacts", el.projectArtifacts]]) {
+        const data = await fetchJson(`${apiBase()}/projects/${encodeURIComponent(projectId)}/${kind}`, { credentials: "same-origin" });
+        const items = data[kind] || [];
+        target.textContent = items.length ? items.map((item) => item.label || item.artifact_id || item.source_id).join(" · ") : `No linked ${kind}.`;
+      }
+    }
+
+    el.projectSelect.addEventListener("change", () => refreshProjectScope().catch((error) => setStatus(String(error), true)));
+    el.createProjectBtn.addEventListener("click", async () => {
+      const name = el.projectName.value.trim();
+      if (!name) return;
+      const data = await fetchJson(`${apiBase()}/projects`, { method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name}) });
+      el.projectName.value = "";
+      await loadProjectPanel();
+      el.projectSelect.value = data.project.id;
+      await refreshProjectScope();
+    });
+    el.moveConversationBtn.addEventListener("click", async () => {
+      if (!el.projectSelect.value || !state.activeSessionId) return;
+      await fetchJson(`${apiBase()}/projects/${encodeURIComponent(el.projectSelect.value)}/conversations`, { method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"}, body: JSON.stringify({conversation_id: state.activeSessionId, conversation_type: state.mode === MODE.REALTIME ? "realtime" : "responses"}) });
+      setStatus("Conversation moved into current project.");
+    });
+    el.removeConversationBtn.addEventListener("click", async () => {
+      if (!state.activeSessionId) return;
+      await fetchJson(`${apiBase()}/projects/conversations/${encodeURIComponent(state.activeSessionId)}`, { method: "DELETE", credentials: "same-origin" });
+      setStatus("Conversation is unassigned.");
+    });
+    loadProjectPanel().catch(() => { el.projectScope.textContent = "Project navigation unavailable."; });
     el.searchHistoryBtn.addEventListener("click", async () => {
       const query = el.historySearch.value.trim();
       if (!query) return;
@@ -3316,18 +3656,18 @@
     });
     document.querySelectorAll?.("[data-prompt]").forEach((button) => {
       button.addEventListener("click", () => {
-        el.textInput.value = button.dataset.prompt;
-        if (state.phase === PHASE.IDLE) {
-          el.startBtn.focus();
-          setStatus("Start a session to send your prompt");
-        } else {
-          el.textInput.focus();
-        }
+        queueWorkflowPrompt(button.dataset.prompt);
       });
     });
 
+    renderExperienceManifest(null);
     setPhase(PHASE.IDLE, "Idle");
     refreshCurrentCapabilities({ forceRefresh: false });
+    if ("serviceWorker" in navigator && window.isSecureContext) {
+      navigator.serviceWorker.register("/service-worker.js").catch(() => {
+        setStatus("Offline support unavailable");
+      });
+    }
   </script>
 </body>
 </html>

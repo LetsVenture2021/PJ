@@ -180,7 +180,15 @@ def _validate_result(original: str, payload: dict, max_output_chars: int) -> dic
             "prompt_intent_changed",
             "Prompt perfecting changed a control response.",
         )
-    missing = _missing_preserved_literals(original, normalized)
+    missing = _missing_preserved_literal_values(original, normalized)
+    if missing:
+        normalized = _repair_preserved_literals(original, normalized, missing)
+        if len(normalized) > max_output_chars:
+            raise PromptPerfectingError(
+                "invalid_prompt_perfecting_output",
+                "Prompt perfecting repair exceeded the configured output limit.",
+            )
+        missing = _missing_preserved_literal_values(original, normalized)
     if missing:
         categories = ", ".join(sorted(missing))
         raise PromptPerfectingError(
@@ -195,8 +203,8 @@ def _validate_result(original: str, payload: dict, max_output_chars: int) -> dic
     }
 
 
-def _missing_preserved_literals(original: str, refined: str) -> set[str]:
-    extractors = {
+def _literal_extractors():
+    return {
         "URL": lambda text: {item.rstrip(".,);]") for item in _URL_RE.findall(text)},
         "date": lambda text: set(_DATE_RE.findall(text)),
         "quantity": lambda text: set(_QUANTITY_RE.findall(text)),
@@ -204,12 +212,45 @@ def _missing_preserved_literals(original: str, refined: str) -> set[str]:
         "code": lambda text: set(_FENCED_CODE_RE.findall(text) + _INLINE_CODE_RE.findall(text)),
         "identifier": lambda text: set(_IDENTIFIER_RE.findall(text)),
     }
-    missing = set()
-    for category, extract in extractors.items():
-        values = {value for value in extract(original) if value}
-        if any(value not in refined for value in values):
-            missing.add(category)
+
+
+def _preserved_literals(text: str) -> dict[str, set[str]]:
+    return {
+        category: {value for value in extract(text) if value}
+        for category, extract in _literal_extractors().items()
+    }
+
+
+def _missing_preserved_literal_values(original: str, refined: str) -> dict[str, list[str]]:
+    missing = {}
+    for category, values in _preserved_literals(original).items():
+        absent = sorted(value for value in values if value not in refined)
+        if absent:
+            missing[category] = absent
     return missing
+
+
+def _missing_preserved_literals(original: str, refined: str) -> set[str]:
+    return set(_missing_preserved_literal_values(original, refined))
+
+
+def _repair_preserved_literals(
+    original: str,
+    refined: str,
+    missing: dict[str, list[str]] | None = None,
+) -> str:
+    missing = missing or _missing_preserved_literal_values(original, refined)
+    if not missing:
+        return refined
+    lines = [refined.rstrip(), "", "Immutable literals to preserve exactly:"]
+    seen = set()
+    for category in sorted(missing):
+        for value in missing[category]:
+            if value in seen:
+                continue
+            seen.add(value)
+            lines.append(f"- {value}")
+    return "\n".join(lines).strip()
 
 
 def _unchanged_result(original: str, surface: str, summary: str) -> dict:
@@ -276,10 +317,12 @@ def perfect_prompt(
             "- Boundaries: preserve every stated constraint verbatim - what must "
             "stay unchanged, what to avoid, approvals required before acting - "
             "and add a final self-check when the task is consequential.\n"
-            "Preserve the exact intent, requested format, named entities, facts, "
-            "constraints, dates, quantities, permissions, scope, and uncertainty. "
-            "Write in the user's first person. Do not answer the prompt. Do not "
-            "invent requirements. Keep explicit approval, refusal, stop, or "
+            "Preserve exact URL, code, identifier, quoted, date, and quantity "
+            "literals character-for-character. Preserve the exact intent, "
+            "requested format, named entities, facts, constraints, dates, "
+            "quantities, permissions, scope, and uncertainty. Write in the "
+            "user's first person. Do not answer the prompt. Do not invent "
+            "requirements. Keep explicit approval, refusal, stop, or "
             "confirmation language unchanged. Return only the requested "
             "structured output."
         )

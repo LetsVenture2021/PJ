@@ -3,9 +3,11 @@
 
 import contextvars
 import copy
+import importlib.util
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 from time import perf_counter
 
@@ -101,6 +103,185 @@ def _expand_secret_value(value, environ):
 
 def _public_url(value):
     return _shared_public_url(value)
+
+
+def _tool_names(functions):
+    return {
+        tool.get("name")
+        for tool in functions
+        if (
+            isinstance(tool, dict)
+            and tool.get("type", "function") == "function"
+            and tool.get("name")
+        )
+    }
+
+
+def _function_status(function_names, required):
+    required = set(required)
+    available = required & function_names
+    if available == required:
+        return "active"
+    if available:
+        return "degraded"
+    return "unavailable"
+
+
+def _experience_manifest(cfg, *, functions, native, mcp_servers, image_status):
+    function_names = _tool_names(functions)
+    codex_runtime = {
+        "sdk_installed": importlib.util.find_spec("openai_codex") is not None,
+        "cli_available": shutil.which("codex") is not None,
+        "requires_local_login": True,
+    }
+    codex_tools_status = _function_status(
+        function_names,
+        {"run_codex_task", "codex_analyze", "codex_generate_artifact"},
+    )
+    codex_runtime_ready = codex_runtime["sdk_installed"] and codex_runtime["cli_available"]
+    codex_status = (
+        "active"
+        if codex_tools_status == "active" and codex_runtime_ready
+        else "degraded"
+        if codex_tools_status in {"active", "degraded"}
+        else "unavailable"
+    )
+    mcp_ready = sum(1 for server in mcp_servers if server["status"] == "configured")
+    mcp_degraded = sum(1 for server in mcp_servers if server["status"] == "degraded")
+    image_generation_status = (
+        "active"
+        if image_status.get("generation") == "active"
+        else "disabled"
+        if image_status.get("generation") == "disabled"
+        else "degraded"
+    )
+
+    return {
+        "target": "codex_class_private_assistant",
+        "parity_boundary": (
+            "PJ exposes open, configurable equivalents of the user-visible "
+            "assistant workflows; proprietary ChatGPT/Codex internals and "
+            "unconnected external accounts are not cloned."
+        ),
+        "default_mode": "full_power_text",
+        "modes": [
+            {
+                "id": "full_power_text",
+                "label": "Full Power Text",
+                "status": "active",
+                "entrypoint": "browser_and_cli",
+                "capabilities": [
+                    "responses_streaming",
+                    "tool_calls",
+                    "web_search",
+                    "file_search",
+                    "mcp",
+                    "local_functions",
+                    "artifacts",
+                    "structured_output",
+                ],
+            },
+            {
+                "id": "full_power_voice",
+                "label": "Full Force Voice",
+                "status": "active",
+                "entrypoint": "browser_and_terminal",
+                "capabilities": [
+                    "realtime_audio",
+                    "prompt_refinement",
+                    "shared_history",
+                    "tool_delegation",
+                ],
+            },
+            {
+                "id": "realtime_voice",
+                "label": "Realtime Voice",
+                "status": "active",
+                "entrypoint": "browser",
+                "capabilities": ["low_latency_audio", "bounded_realtime_tools"],
+            },
+        ],
+        "workflows": [
+            {
+                "id": "assistant_chat",
+                "label": "Chat",
+                "status": "active",
+                "launch_prompt": "Help me solve this with a concise plan, tool use where useful, and clear next steps.",
+                "tools": ["responses", "web_search", "file_search", "local_functions"],
+            },
+            {
+                "id": "codex_workspace",
+                "label": "Code",
+                "status": codex_status,
+                "launch_prompt": (
+                    "Use the Codex workspace path: inspect the repository, state a short plan, "
+                    "make scoped changes only if approved, and run relevant validation."
+                ),
+                "tools": ["codex_analyze", "run_codex_task", "codex_generate_artifact"],
+                "runtime": codex_runtime,
+                "approval_required_for": ["workspace_write", "generated_artifact_promotion"],
+            },
+            {
+                "id": "documents_and_artifacts",
+                "label": "Files",
+                "status": _function_status(
+                    function_names,
+                    {"draft_document", "export_document", "list_uploaded_documents"},
+                ),
+                "launch_prompt": "Use uploaded files and DocOps to produce a verified, downloadable deliverable.",
+                "tools": ["upload", "docops", "artifact_registry"],
+            },
+            {
+                "id": "research",
+                "label": "Research",
+                "status": (
+                    "active"
+                    if native["web_search"]["status"] == "active"
+                    or "start_deep_research" in function_names
+                    else "degraded"
+                ),
+                "launch_prompt": "Research this with cited sources, separate facts from assumptions, and preserve links.",
+                "tools": ["web_search", "start_deep_research", "fetch_url"],
+            },
+            {
+                "id": "vision_and_media",
+                "label": "Visual",
+                "status": (
+                    "active"
+                    if "analyze_uploaded_image" in function_names
+                    else image_generation_status
+                ),
+                "launch_prompt": "Analyze or generate the needed visual asset and return a verified artifact.",
+                "tools": [
+                    "analyze_uploaded_image",
+                    "generate_image_asset",
+                    "create_controlled_image",
+                ],
+            },
+            {
+                "id": "connectors",
+                "label": "Apps",
+                "status": "active" if mcp_ready else "degraded" if mcp_degraded else "unavailable",
+                "launch_prompt": "Use connected app tools only when configured and approval-gated.",
+                "ready_count": mcp_ready,
+                "needs_setup_count": mcp_degraded,
+            },
+        ],
+        "approval_boundaries": [
+            "file_writes",
+            "codex_workspace_write",
+            "external_connectors",
+            "publishing",
+            "paid_image_generation",
+            "environment_file_edits",
+        ],
+        "limits": [
+            "No hidden access to proprietary ChatGPT/Codex internals.",
+            "External app access depends on configured MCP endpoints and credentials.",
+            "Provider-priced actions remain budget and approval gated.",
+        ],
+        "secret_values_included": False,
+    }
 
 
 def sanitize_text_urls(value):
@@ -308,6 +489,13 @@ def capability_manifest(cfg=None, *, mcp_servers=None, environ=None):
             "tools": functions,
         },
         "mcp_servers": mcp,
+        "experience": _experience_manifest(
+            cfg,
+            functions=functions,
+            native=native,
+            mcp_servers=mcp,
+            image_status=image_status,
+        ),
         "disabled_capabilities": [
             name for name, value in native.items() if value["status"] in ("disabled", "unavailable")
         ]
