@@ -99,3 +99,32 @@ class TestPersistGeneratedImages(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSpreadsheetExtraction(unittest.TestCase):
+    def test_xlsm_classifies_as_spreadsheet_and_previews_values(self):
+        import tempfile
+
+        from openpyxl import Workbook
+
+        from ops.docs.extraction import extract_preview
+        from ops.docs.formats import classify
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "model.xlsm"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "Underwriting"
+            sheet.append(["Metric", "Value"])
+            sheet.append(["LTV", 0.72])
+            workbook.save(path)
+
+            head = path.read_bytes()[:8]
+            classification = classify("model.xlsm", head, path.stat().st_size)
+            self.assertEqual(classification.spec.family.value, "spreadsheet")
+            self.assertEqual(classification.spec.handling, "extract")
+
+            preview = extract_preview(path, classification)
+            self.assertIn("Underwriting", preview)
+            self.assertIn("LTV", preview)
+            self.assertIn("macros not executed", preview)

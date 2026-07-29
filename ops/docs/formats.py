@@ -32,6 +32,7 @@ class Family(str, Enum):
     TABULAR = "tabular"
     NOTEBOOK = "notebook"
     MARKUP = "markup"
+    SPREADSHEET = "spreadsheet"
     VECTOR = "vector"
     RASTER = "raster"
     PDF = "pdf"
@@ -130,8 +131,17 @@ SPECS: tuple[FormatSpec, ...] = (
         label="PDF",
     ),
     FormatSpec(
+        Family.SPREADSHEET,
+        frozenset({".xlsx", ".xlsm"}),
+        "extract",
+        40 * MB,
+        magic=(b"PK\x03\x04",),
+        strict_magic=True,
+        label="Spreadsheet",
+    ),
+    FormatSpec(
         Family.OFFICE,
-        frozenset({".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp"}),
+        frozenset({".docx", ".pptx", ".odt", ".ods", ".odp"}),
         "register_only",
         0,
         magic=(b"PK\x03\x04",),
@@ -215,7 +225,9 @@ SECRET_NAME_PATTERNS = tuple(
 
 MAGIC_TO_EXTENSIONS: dict[bytes, frozenset[str]] = {
     b"%PDF-": frozenset({".pdf"}),
-    b"PK\x03\x04": frozenset({".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp", ".npz", ".zip"}),
+    b"PK\x03\x04": frozenset(
+        {".docx", ".xlsx", ".xlsm", ".pptx", ".odt", ".ods", ".odp", ".npz", ".zip"}
+    ),
     b"\x89PNG\r\n\x1a\n": frozenset({".png"}),
     b"\xff\xd8\xff": frozenset({".jpg", ".jpeg"}),
     b"GGUF": frozenset({".gguf"}),

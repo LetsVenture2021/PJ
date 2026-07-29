@@ -112,6 +112,7 @@ def extract_preview(path: Path, classification: Classification, char_cap: int = 
         Family.TABULAR: _tabular,
         Family.NOTEBOOK: _notebook,
         Family.MARKUP: _html,
+        Family.SPREADSHEET: _spreadsheet,
         Family.VECTOR: _svg,
     }.get(family, _plain_text)
     return extractor(path, char_cap)
@@ -195,6 +196,38 @@ def _tabular(path: Path, char_cap: int) -> str:
         f"**Table** `{path.name}` — {total} rows, {len(header)} columns "
         f"(showing first {len(body)})\n\n{rendered}\n"
     )
+
+
+def _spreadsheet(path: Path, char_cap: int) -> str:
+    """Read cell values only via openpyxl; VBA macros are never loaded or run."""
+    try:
+        from openpyxl import load_workbook
+    except ImportError as exc:
+        raise ExtractionError("extraction_missing_openpyxl") from exc
+    try:
+        workbook = load_workbook(path, read_only=True, data_only=True)
+    except Exception as exc:
+        raise ExtractionError("extraction_invalid_spreadsheet") from exc
+    parts = [
+        f"**Spreadsheet** `{path.name}` - {len(workbook.sheetnames)} sheet(s); "
+        "values only, formulas shown as last-computed results, macros not executed.\n"
+    ]
+    for sheet_name in workbook.sheetnames[:5]:
+        sheet = workbook[sheet_name]
+        rows = []
+        for index, row in enumerate(sheet.iter_rows(values_only=True)):
+            if index >= 40:
+                rows.append(["..."])
+                break
+            rows.append(["" if cell is None else str(cell) for cell in row[:20]])
+        parts.append(f"### Sheet: {sheet_name} ({sheet.max_row} rows x {sheet.max_column} cols)")
+        for row in rows:
+            parts.append("| " + " | ".join(value.replace("|", "\\|") for value in row) + " |")
+        parts.append("")
+    if len(workbook.sheetnames) > 5:
+        parts.append(f"({len(workbook.sheetnames) - 5} more sheet(s) not shown)")
+    workbook.close()
+    return redact("\n".join(parts))[:char_cap]
 
 
 def _notebook(path: Path, char_cap: int) -> str:
