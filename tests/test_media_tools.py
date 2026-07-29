@@ -128,3 +128,35 @@ class TestSpreadsheetExtraction(unittest.TestCase):
             self.assertIn("Underwriting", preview)
             self.assertIn("LTV", preview)
             self.assertIn("macros not executed", preview)
+
+
+class TestCodexArtifacts(unittest.TestCase):
+    def test_empty_prompt_rejected(self):
+        from ops.shared.codexops import codex_generate_artifact
+
+        self.assertIn("error", codex_generate_artifact(""))
+
+    def test_workspace_outputs_register_as_uploads(self):
+        import tempfile
+
+        from ops.docs import uploads as document_uploads
+        from ops.shared.codexops import _register_workspace_outputs
+
+        with tempfile.TemporaryDirectory() as temp:
+            import docops
+
+            old_db, old_dir = docops._DB_PATH, document_uploads.UPLOADS_DIR
+            docops._DB_PATH = Path(temp) / "test.sqlite3"
+            document_uploads.UPLOADS_DIR = Path(temp) / "uploads"
+            document_uploads.UPLOADS_DIR.mkdir()
+            workspace = Path(temp) / "scratch"
+            workspace.mkdir()
+            (workspace / "diagram.svg").write_text("<svg/>")
+            (workspace / ".hidden").write_text("skip me")
+            try:
+                docs = _register_workspace_outputs(workspace, "codexgen_test1")
+                self.assertEqual(len(docs), 1)
+                self.assertEqual(docs[0]["name"], "diagram.svg")
+            finally:
+                docops._DB_PATH = old_db
+                document_uploads.UPLOADS_DIR = old_dir

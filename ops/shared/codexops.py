@@ -43,6 +43,93 @@ def run_codex_task(prompt: str = "", sandbox: str = "read-only") -> dict:
         return {"error": f"codex_run_failed: {str(exc)[:300]}"}
 
 
+def _register_workspace_outputs(workspace, session_id: str) -> list:
+    """Register files Codex wrote in its scratch workspace as uploads."""
+    import secrets as _secrets
+
+    from ops.docs import uploads as document_uploads
+    from ops.shared.io import sha256_file
+
+    produced = sorted(
+        path for path in workspace.rglob("*") if path.is_file() and not path.name.startswith(".")
+    )
+    if not produced:
+        return []
+    upload_id = f"UPL-{_secrets.token_hex(16)}"
+    target_dir = document_uploads.UPLOADS_DIR / session_id / upload_id
+    files = []
+    for source in produced[:20]:
+        if source.stat().st_size > 50 * 1024 * 1024:
+            continue
+        target_dir.mkdir(parents=True, exist_ok=True)
+        destination = target_dir / source.name
+        destination.write_bytes(source.read_bytes())
+        destination.chmod(0o600)
+        files.append(
+            {
+                "saved_path": f"uploads/{session_id}/{upload_id}/{source.name}",
+                "path": destination,
+                "name": source.name,
+                "mime": "application/octet-stream",
+                "size": destination.stat().st_size,
+                "sha256": sha256_file(destination),
+            }
+        )
+    if not files:
+        return []
+    registered = document_uploads.register_uploaded_documents(upload_id, session_id, files)
+    return registered["documents"]
+
+
+def codex_generate_artifact(prompt: str = "") -> dict:
+    """Have Codex produce deliverable files (diagrams, charts, data files).
+
+    Writes are confined to a fresh scratch workspace; everything produced is
+    copied into durable upload storage and returned as downloadable records.
+    """
+    import secrets as _secrets
+    import tempfile
+
+    task = str(prompt or "").strip()
+    if not task:
+        return {"error": "prompt is required"}
+    from ops.shared.spend_guard import check_and_count
+
+    guard_error = check_and_count(BASE_DIR / "pj_data.sqlite3", "codex")
+    if guard_error:
+        return {"error": guard_error}
+    try:
+        from openai_codex import Codex, Sandbox
+    except ImportError:
+        return {"error": "the openai-codex SDK is not installed in this environment"}
+    session_id = f"codexgen_{_secrets.token_hex(8)}"
+    with tempfile.TemporaryDirectory(prefix="pj-codex-artifact-") as scratch:
+        workspace = Path(scratch)
+        instruction = (
+            f"Working directory: {workspace}. Create the requested deliverable "
+            f"as one or more files saved in that directory (SVG preferred for "
+            f"diagrams, PNG for charts, CSV/MD for data). Task: {task}"
+        )
+        try:
+            with Codex() as codex:
+                thread = codex.thread_start(sandbox=Sandbox.workspace_write)
+                result = thread.run(instruction)
+        except Exception as exc:
+            return {"error": f"codex_run_failed: {str(exc)[:300]}"}
+        documents = _register_workspace_outputs(workspace, session_id)
+    if not documents:
+        return {
+            "status": "completed_no_files",
+            "final_response": str(result.final_response or "")[:4000],
+        }
+    return {
+        "status": "generated",
+        "count": len(documents),
+        "documents": documents,
+        "final_response": str(result.final_response or "")[:4000],
+    }
+
+
 CODEXOPS_SCHEMAS = [
     {
         "type": "function",
@@ -83,7 +170,26 @@ CODEXOPS_SCHEMAS.append(
     }
 )
 
+CODEXOPS_SCHEMAS.append(
+    {
+        "type": "function",
+        "name": "codex_generate_artifact",
+        "description": (
+            "Generate deliverable files with Codex: diagrams (SVG), charts "
+            "(PNG), data files, and other visual artifacts produced by code. "
+            "Use for any diagram, graph, chart, or visualization request. "
+            "Outputs are saved as downloadable documents automatically."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"prompt": {"type": "string"}},
+            "required": ["prompt"],
+        },
+    }
+)
+
 CODEXOPS_DISPATCH = {
     "run_codex_task": lambda prompt="", sandbox="read-only": run_codex_task(prompt, sandbox),
     "codex_analyze": lambda prompt="": run_codex_task(prompt, "read-only"),
+    "codex_generate_artifact": lambda prompt="": codex_generate_artifact(prompt),
 }
