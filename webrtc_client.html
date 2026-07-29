@@ -3,63 +3,69 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>PJ Web App</title>
+  <title>PJ Desktop</title>
   <style>
     :root {
-      --bg: #0b1220;
-      --panel: #111a2b;
-      --panel-2: #172338;
-      --text: #e6edf7;
-      --muted: #9fb1c9;
-      --line: #243149;
+      color-scheme: dark;
+      --bg: #07090d;
+      --panel: #101318;
+      --panel-2: #171b22;
+      --text: #f4f6f8;
+      --muted: #9098a5;
+      --line: #252a32;
       --ok: #22c55e;
       --warn: #f59e0b;
       --danger: #ef4444;
-      --brand: #3b82f6;
+      --brand: #6c5ce7;
+      --brand-soft: rgba(108, 92, 231, .16);
+      --radius: 12px;
     }
 
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; }
     body {
-      background: radial-gradient(circle at top, #15233a 0%, var(--bg) 42%);
+      background: var(--bg);
       color: var(--text);
       font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     }
 
     .app {
-      max-width: 1100px;
-      margin: 0 auto;
-      padding: 24px 16px;
+      width: 100%;
+      height: 100vh;
+      padding: 0;
       display: grid;
       grid-template-columns: 280px 1fr;
-      gap: 16px;
-      min-height: 100%;
+      gap: 0;
+      min-height: 720px;
     }
 
     .card {
-      background: linear-gradient(180deg, var(--panel) 0%, #0f1828 100%);
+      background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 14px;
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+      border-radius: 0;
+      box-shadow: none;
     }
 
     .sidebar {
-      padding: 16px;
+      padding: 22px 18px;
       display: flex;
       flex-direction: column;
       gap: 14px;
-      height: fit-content;
-      position: sticky;
-      top: 16px;
+      height: 100vh;
+      overflow-y: auto;
+      border-width: 0 1px 0 0;
     }
 
     .title {
       margin: 0;
-      font-size: 20px;
+      font-size: 19px;
       font-weight: 700;
       letter-spacing: 0.2px;
     }
 
+    .brand-lockup { display: flex; align-items: center; gap: 11px; }
+    .brand-mark { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; background: linear-gradient(145deg, #8777f2, #5142c6); font-weight: 800; box-shadow: 0 8px 24px rgba(108,92,231,.28); }
+    .eyebrow { color: #7065dd; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .12em; margin: 0 0 5px; }
     .sub {
       margin: 4px 0 0;
       font-size: 13px;
@@ -70,7 +76,11 @@
       display: flex;
       align-items: center;
       gap: 8px;
-      margin-top: 10px;
+      margin: 2px 0 4px;
+      padding: 9px 11px;
+      border: 1px solid var(--line);
+      background: #0b0e12;
+      border-radius: 9px;
       font-size: 13px;
       color: var(--muted);
     }
@@ -80,12 +90,12 @@
       height: 9px;
       border-radius: 999px;
       background: var(--danger);
-      box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.12);
+      box-shadow: none;
     }
 
     .dot.live {
       background: var(--ok);
-      box-shadow: 0 0 0 6px rgba(34, 197, 94, 0.13);
+      box-shadow: 0 0 8px rgba(34,197,94,.5);
     }
 
     .field {
@@ -110,9 +120,9 @@
 
     input[type="text"], select {
       width: 100%;
-      background: #0d1524;
+      background: #0b0e12;
       border: 1px solid var(--line);
-      border-radius: 10px;
+      border-radius: 8px;
       padding: 10px 12px;
       color: var(--text);
       outline: none;
@@ -124,24 +134,25 @@
 
     .mode-switch {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: 1fr;
       gap: 6px;
       padding: 4px;
       border: 1px solid var(--line);
-      border-radius: 12px;
-      background: #0d1524;
+      border-radius: 10px;
+      background: #0b0e12;
     }
 
     .mode-switch button {
-      padding: 8px 6px;
+      padding: 9px 10px;
+      text-align: left;
       background: transparent;
       color: var(--muted);
     }
 
     .mode-switch button.active {
-      background: #1f4f87;
+      background: var(--brand-soft);
       color: #fff;
-      border-color: #3b82f6;
+      border-color: rgba(108,92,231,.5);
     }
 
     .button-row {
@@ -156,27 +167,28 @@
       border-radius: 10px;
       padding: 10px 12px;
       cursor: pointer;
-      background: #1a2941;
+      background: #1a1f27;
       transition: 120ms ease;
     }
-    button:hover { transform: translateY(-1px); }
+    button:hover { background-color: #242a34; }
     button:disabled {
       opacity: 0.45;
       cursor: not-allowed;
       transform: none;
     }
 
-    .primary { background: var(--brand); color: #fff; border-color: #4f93ff; }
+    .primary { background: var(--brand); color: #fff; border-color: #8072ec; }
+    .primary:hover { background: #7a6bea; }
     .danger { background: #3a1a20; color: #fecaca; border-color: #7f1d1d; }
-    .muted-btn { background: #102036; border-color: var(--line); color: #d8e5f8; }
+    .muted-btn { background: #171b21; border-color: var(--line); color: #d8dde5; }
 
     .note {
       font-size: 12px;
       line-height: 1.35;
       color: var(--muted);
-      background: #0d1524;
+      background: #0b0e12;
       border: 1px solid var(--line);
-      border-radius: 10px;
+      border-radius: 8px;
       padding: 10px;
     }
 
@@ -197,7 +209,7 @@
     details.structured-output {
       border: 1px solid var(--line);
       border-radius: 10px;
-      background: #0d1524;
+      background: #0b0e12;
       padding: 9px 10px;
     }
 
@@ -226,26 +238,64 @@
       width: 100%;
     }
 
+    .codex-module {
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+      padding: 12px;
+      border: 1px solid rgba(108, 92, 231, .42);
+      border-radius: 10px;
+      background: linear-gradient(145deg, rgba(108, 92, 231, .14), rgba(11, 14, 18, .96));
+    }
+
+    .codex-module-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .codex-module-header strong { font-size: 13px; }
+    .codex-badge {
+      color: #c9c3ff;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .codex-module textarea {
+      width: 100%;
+      min-height: 84px;
+      resize: vertical;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0b0e12;
+      color: var(--text);
+    }
+
     .chat {
       display: grid;
       grid-template-rows: auto 1fr auto;
-      min-height: 72vh;
+      height: 100vh;
       overflow: hidden;
     }
 
     .chat-head {
-      padding: 16px 18px;
+      min-height: 66px;
+      padding: 12px 24px;
       border-bottom: 1px solid var(--line);
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 12px;
-      background: linear-gradient(180deg, #172338, #152136);
+      background: rgba(16,19,24,.96);
     }
 
     .chat-head h2 {
       margin: 0;
-      font-size: 18px;
+      font-size: 15px;
       font-weight: 700;
     }
 
@@ -256,21 +306,19 @@
     }
 
     .messages {
-      padding: 18px;
+      padding: 34px max(28px, calc((100% - 760px) / 2));
       overflow: auto;
       display: flex;
       flex-direction: column;
       gap: 10px;
-      background:
-        linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0)),
-        #0c1526;
+      background: #0c0f13;
     }
 
     .bubble {
       max-width: 85%;
       border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 10px 12px;
+      border-radius: 14px;
+      padding: 12px 15px;
       line-height: 1.4;
       white-space: pre-wrap;
       word-break: break-word;
@@ -279,13 +327,13 @@
 
     .bubble.user {
       align-self: flex-end;
-      background: #12355f;
-      border-color: #2b5d95;
+      background: #27213e;
+      border-color: #4b3f7b;
     }
 
     .bubble.assistant {
       align-self: flex-start;
-      background: #15243b;
+      background: #171b21;
     }
 
     .bubble.system {
@@ -333,7 +381,7 @@
       padding: 14px;
       border: 1px solid #2b5d95;
       border-radius: 12px;
-      background: linear-gradient(135deg, #142a47, #102036);
+      background: linear-gradient(135deg, #1d1a31, #151922);
       display: grid;
       gap: 9px;
     }
@@ -407,9 +455,9 @@
     .capture-overlay > span { position: absolute; border: 2px solid #f59e0b; }
 
     .composer {
-      padding: 14px 16px;
+      padding: 14px max(24px, calc((100% - 800px) / 2)) 18px;
       border-top: 1px solid var(--line);
-      background: #101b2e;
+      background: #101318;
       display: flex;
       gap: 10px;
       align-items: flex-end;
@@ -420,9 +468,9 @@
       min-height: 52px;
       max-height: 160px;
       resize: vertical;
-      background: #0d1524;
+      background: #171b21;
       border: 1px solid var(--line);
-      border-radius: 10px;
+      border-radius: 13px;
       padding: 10px 12px;
       color: var(--text);
       outline: none;
@@ -433,8 +481,9 @@
     }
 
     .composer button {
-      min-width: 120px;
-      align-self: stretch;
+      min-width: 84px;
+      align-self: flex-end;
+      height: 44px;
     }
 
     .composer .composer-icon-btn {
@@ -447,7 +496,7 @@
       align-items: center;
       justify-content: center;
       padding: 0;
-      background: #0d1524;
+      background: #171b21;
       border: 1px solid var(--line);
       border-radius: 10px;
       color: var(--muted);
@@ -462,15 +511,25 @@
       cursor: not-allowed;
     }
 
+    .workspace-heading { display: flex; align-items: center; gap: 10px; }
+    .workspace-icon { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; color: #b9b1ff; background: var(--brand-soft); }
+    .keyboard-hint { color: #69717d; font-size: 11px; border: 1px solid var(--line); padding: 3px 7px; border-radius: 6px; }
+    .welcome { margin: auto; max-width: 610px; text-align: center; padding: 36px 20px; }
+    .welcome-mark { width: 56px; height: 56px; margin: 0 auto 18px; display: grid; place-items: center; border-radius: 17px; color: #c9c3ff; background: linear-gradient(145deg, rgba(108,92,231,.28), rgba(108,92,231,.08)); border: 1px solid rgba(130,116,238,.3); font-size: 24px; }
+    .welcome h3 { font-size: 27px; letter-spacing: -.03em; margin: 0 0 9px; }
+    .welcome p { color: var(--muted); margin: 0 auto 24px; line-height: 1.6; }
+    .suggestions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: left; }
+    .suggestion { padding: 13px; border: 1px solid var(--line); border-radius: 11px; background: #11151a; color: #cdd2da; font-size: 13px; }
+    .suggestion strong { display: block; color: #f1f3f6; margin-bottom: 4px; }
     @media (max-width: 940px) {
       .app {
         grid-template-columns: 1fr;
       }
       .sidebar {
-        position: static;
+        height: auto;
       }
       .chat {
-        min-height: 65vh;
+        height: 70vh;
       }
       .bubble { max-width: 94%; }
     }
@@ -479,9 +538,12 @@
 <body>
   <div class="app">
     <aside class="card sidebar">
-      <div>
-        <h1 class="title">PJ Web App</h1>
-        <p class="sub">Realtime voice and full-power PJ workspace</p>
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true">P</div>
+        <div>
+          <h1 class="title">PJ Desktop</h1>
+          <p class="sub">Personal intelligence workspace</p>
+        </div>
       </div>
 
       <div class="status">
@@ -490,8 +552,7 @@
       </div>
 
       <div class="mode-switch" aria-label="Assistant mode">
-        <button id="realtimeModeBtn" class="active" type="button">Fast Voice</button>
-        <button id="fullPowerVoiceModeBtn" type="button">Full Power Voice</button>
+        <button id="fullPowerVoiceModeBtn" class="active" type="button">Full Force Voice</button>
         <button id="fullPowerModeBtn" type="button">Full Power Text</button>
       </div>
 
@@ -506,9 +567,26 @@
       </div>
 
       <div id="modeNote" class="note">
-        Voice mode requires microphone permission. You can still send text
-        messages once the realtime session is connected.
+        Full Force Voice refines every completed thought, then uses PJ's full
+        Responses runtime for tools, research, artifacts, and governed actions.
       </div>
+
+      <section class="codex-module" aria-labelledby="codexTitle">
+        <div class="codex-module-header">
+          <strong id="codexTitle">Codex</strong>
+          <span class="codex-badge">Coding agent</span>
+        </div>
+        <label for="codexAction">Task mode</label>
+        <select id="codexAction">
+          <option value="analyze">Analyze safely</option>
+          <option value="delegate">Implement with approval</option>
+          <option value="artifact">Create an artifact</option>
+        </select>
+        <label for="codexPrompt">Coding task</label>
+        <textarea id="codexPrompt" placeholder="Review a repository, debug an issue, or describe what Codex should build."></textarea>
+        <button id="runCodexBtn" class="primary full-width-btn" type="button">Open in Codex</button>
+        <small class="sub">Codex runs through Full Power. Write access remains owner-approval gated.</small>
+      </section>
 
       <section class="capture-panel" aria-labelledby="captureTitle">
         <strong id="captureTitle">Visual context (read-only)</strong>
@@ -561,13 +639,32 @@
 
     <main class="card chat">
       <div class="chat-head">
-        <h2>Conversation</h2>
+        <div class="workspace-heading">
+          <span class="workspace-icon" aria-hidden="true">✦</span>
+          <div>
+            <p class="eyebrow">Private workspace</p>
+            <h2>New conversation</h2>
+          </div>
+        </div>
         <div class="head-actions">
+          <span class="keyboard-hint">⌘ K</span>
           <button id="copyBtn" class="muted-btn">Copy Transcript</button>
           <button id="clearBtn" class="muted-btn">Clear</button>
         </div>
       </div>
-      <div id="messages" class="messages"></div>
+      <div id="messages" class="messages">
+        <section class="welcome" aria-label="Get started">
+          <div class="welcome-mark" aria-hidden="true">✦</div>
+          <h3>What can I help you make?</h3>
+          <p>Think, research, create, and get work done with your private assistant. Choose a mode, start a session, or attach context below.</p>
+          <div class="suggestions">
+            <button class="suggestion" type="button" data-prompt="Help me plan a project with clear milestones and next steps."><strong>Plan a project</strong>Turn an idea into clear milestones and next steps</button>
+            <button class="suggestion" type="button" data-prompt="Help me summarize and compare my documents."><strong>Work with documents</strong>Summarize, compare, or transform your files</button>
+            <button class="suggestion" type="button" data-prompt="Help me create a polished brief from an idea."><strong>Create something</strong>Draft a presentation, image, or polished brief</button>
+            <button class="suggestion" type="button" data-prompt="I'd like to talk through an idea."><strong>Talk it through</strong>Use Full Force Voice for a natural, tool-enabled conversation</button>
+          </div>
+        </section>
+      </div>
       <div class="composer">
         <input id="filePicker" class="upload-input" type="file" multiple>
         <input
@@ -656,9 +753,11 @@
       refreshCapabilitiesBtn: document.getElementById("refreshCapabilitiesBtn"),
       capabilityStatus: document.getElementById("capabilityStatus"),
       toolSummary: document.getElementById("toolSummary"),
-      realtimeModeBtn: document.getElementById("realtimeModeBtn"),
       fullPowerVoiceModeBtn: document.getElementById("fullPowerVoiceModeBtn"),
       fullPowerModeBtn: document.getElementById("fullPowerModeBtn"),
+      codexAction: document.getElementById("codexAction"),
+      codexPrompt: document.getElementById("codexPrompt"),
+      runCodexBtn: document.getElementById("runCodexBtn"),
       modeNote: document.getElementById("modeNote"),
       fullPowerControls: document.getElementById("fullPowerControls"),
       sessionSelect: document.getElementById("sessionSelect"),
@@ -695,7 +794,7 @@
       activeStartRequestId: null,
       liveAnnounced: false,
       toolCatalog: null,
-      mode: MODE.REALTIME,
+      mode: MODE.FULL_POWER_VOICE,
       fullPowerSessionId: null,
       activeSessionId: null,
       fullPowerBusy: false,
@@ -1275,7 +1374,6 @@
         stopFullPowerSession({ announce: false, preserveSession: true });
       }
       state.mode = mode;
-      el.realtimeModeBtn.classList.toggle("active", mode === MODE.REALTIME);
       el.fullPowerVoiceModeBtn.classList.toggle(
         "active", mode === MODE.FULL_POWER_VOICE
       );
@@ -1288,22 +1386,22 @@
         ? "End Session"
         : "Close Conversation";
       el.modeNote.textContent = mode === MODE.REALTIME
-        ? "Fast Voice responds immediately through Realtime and stores finalized transcripts."
+        ? "Realtime voice is available as an internal compatibility mode."
         : mode === MODE.FULL_POWER_VOICE
-          ? "Full Power Voice refines each completed transcript before PJ responds and preserves the original wording in shared history."
+          ? "Full Force Voice refines every completed thought before using PJ's full Responses runtime, while preserving your original wording in shared history."
           : "Full Power Text uses PJ's terminal-equivalent Responses runtime: web and file search, MCP, local tools, citations, structured output, and shared history.";
       const idleText = mode === MODE.REALTIME
-        ? "Fast Voice idle"
+        ? "Realtime Voice idle"
         : mode === MODE.FULL_POWER_VOICE
-          ? "Full Power Voice idle"
+          ? "Full Force Voice idle"
           : "Full Power Text idle";
       setPhase(PHASE.IDLE, idleText);
       appendBubble(
         "system",
         mode === MODE.REALTIME
-          ? "Fast Voice selected."
+          ? "Realtime Voice selected."
           : mode === MODE.FULL_POWER_VOICE
-            ? "Full Power Voice selected."
+            ? "Full Force Voice selected."
             : "Full Power Text selected. Start or resume a conversation.",
       );
       refreshCurrentCapabilities({ forceRefresh: false });
@@ -1317,6 +1415,7 @@
         return state.activeAssistantBubble;
       }
 
+      el.messages.querySelector(".welcome")?.remove();
       const bubble = document.createElement("div");
       bubble.className = `bubble ${role}`;
       bubble.textContent = text;
@@ -1783,8 +1882,8 @@
         appendBubble(
           "system",
           state.mode === MODE.FULL_POWER_VOICE
-            ? "Starting Full Power Voice session..."
-            : "Starting Fast Voice session...",
+            ? "Starting Full Force Voice session..."
+            : "Starting Realtime Voice session...",
         );
         const health = await checkBackendHealth(apiBase, requestId);
         await refreshCapabilities(apiBase, requestId, { health, forceRefresh: false });
@@ -2465,6 +2564,35 @@
         }
       }
 
+      async function runCodexTask() {
+        const task = el.codexPrompt.value.trim();
+        if (!task || state.fullPowerBusy) {
+          if (!task) appendBubble("system", "Describe the coding task before opening Codex.");
+          return;
+        }
+        const action = el.codexAction.value;
+        const instructions = {
+          analyze: "Use codex_analyze in its read-only sandbox to analyze this coding task. Report findings, evidence, and recommended next steps:",
+          delegate: "Use run_codex_task to implement this coding task. Request owner approval before any gated execution, preserve the sandbox policy, and report changed files plus validation:",
+          artifact: "Use codex_generate_artifact to create the requested coding deliverable and return every resulting artifact:",
+        };
+        el.runCodexBtn.disabled = true;
+        try {
+          if (state.mode !== MODE.FULL_POWER) setMode(MODE.FULL_POWER);
+          if (state.phase === PHASE.IDLE) await startFullPowerSession();
+          if (state.phase !== PHASE.LIVE || !state.fullPowerSessionId) {
+            throw new Error("Full Power could not start for Codex.");
+          }
+          el.textInput.value = `${instructions[action] || instructions.analyze}\n\n${task}`;
+          await sendFullPowerMessage();
+          el.codexPrompt.value = "";
+        } catch (error) {
+          appendBubble("system", `Codex could not start: ${shorten(String(error), 260)}`);
+        } finally {
+          el.runCodexBtn.disabled = false;
+        }
+      }
+
       function startSelectedMode() {
         return state.mode === MODE.FULL_POWER ? startFullPowerSession() : startSession();
       }
@@ -2979,12 +3107,12 @@
         appendBubble("system", `Capability catalog refreshed: ${count} local tools loaded.`);
       }
     });
-    el.realtimeModeBtn.addEventListener("click", () => setMode(MODE.REALTIME));
     el.fullPowerVoiceModeBtn.addEventListener(
       "click",
       () => setMode(MODE.FULL_POWER_VOICE),
     );
     el.fullPowerModeBtn.addEventListener("click", () => setMode(MODE.FULL_POWER));
+    el.runCodexBtn.addEventListener("click", runCodexTask);
     el.refreshSessionsBtn.addEventListener("click", refreshFullPowerSessions);
     el.sessionSelect.addEventListener("change", () => {
       if (el.sessionSelect.value) resumeFullPowerSession(el.sessionSelect.value);
@@ -3011,9 +3139,19 @@
         sendSelectedMessage();
       }
     });
+    document.querySelectorAll?.("[data-prompt]").forEach((button) => {
+      button.addEventListener("click", () => {
+        el.textInput.value = button.dataset.prompt;
+        if (state.phase === PHASE.IDLE) {
+          el.startBtn.focus();
+          setStatus("Start a session to send your prompt");
+        } else {
+          el.textInput.focus();
+        }
+      });
+    });
 
     setPhase(PHASE.IDLE, "Idle");
-    appendBubble("system", "Ready. Click Start Session to connect to PJ.");
     refreshCurrentCapabilities({ forceRefresh: false });
   </script>
 </body>
