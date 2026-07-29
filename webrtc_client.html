@@ -370,7 +370,7 @@
       word-break: break-all;
     }
 
-    .artifact-download {
+    .artifact-download, .canvas-open {
       width: fit-content;
       color: #fff;
       background: var(--brand);
@@ -381,6 +381,39 @@
       font-weight: 700;
       font-size: 13px;
     }
+
+    .artifact-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .canvas-open { border-color: #52e5ee; background: #12323a; color: #b9fbff; }
+    .canvas-dialog {
+      width: min(1180px, calc(100vw - 32px));
+      height: min(860px, calc(100vh - 32px));
+      padding: 0;
+      border: 1px solid #444842;
+      border-radius: 16px;
+      overflow: hidden;
+      color: #f4f5f2;
+      background: #191a18;
+      box-shadow: 0 30px 90px #000c;
+    }
+    .canvas-dialog::backdrop { background: #050606b8; backdrop-filter: blur(4px); }
+    .canvas-shell { display: grid; grid-template-rows: 58px 1fr; height: 100%; }
+    .canvas-toolbar {
+      display: flex; align-items: center; gap: 10px; padding: 9px 14px;
+      border-bottom: 1px solid #30312e; background: #252623;
+    }
+    .canvas-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .canvas-title strong { display: block; overflow: hidden; text-overflow: ellipsis; }
+    .canvas-title small { color: #999d96; }
+    .canvas-view-toggle { display: flex; padding: 3px; border-radius: 9px; background: #151614; }
+    .canvas-view-toggle button, .canvas-icon-btn {
+      border: 0; border-radius: 7px; padding: 8px 10px; color: #c5c8c1; background: transparent; cursor: pointer;
+    }
+    .canvas-view-toggle button[aria-pressed="true"] { color: white; background: #3b3d38; }
+    .canvas-icon-btn:hover { color: white; background: #3b3d38; }
+    .canvas-stage { min-height: 0; background: #070a13; }
+    .canvas-frame { width: 100%; height: 100%; border: 0; background: white; }
+    .canvas-source { box-sizing: border-box; width: 100%; height: 100%; margin: 0; padding: 22px; overflow: auto; color: #d4d9d0; background: #0c0e0d; font: 13px/1.6 ui-monospace, monospace; white-space: pre-wrap; }
+    .canvas-loading { display: grid; place-items: center; height: 100%; color: #a7aaa3; }
 
     .upload-input {
       display: none;
@@ -652,6 +685,22 @@
 
   <audio id="pjAudio" autoplay></audio>
 
+  <dialog id="canvasDialog" class="canvas-dialog" aria-labelledby="canvasTitle">
+    <div class="canvas-shell">
+      <header class="canvas-toolbar">
+        <div class="canvas-view-toggle" aria-label="Canvas view">
+          <button id="canvasPreviewBtn" type="button" aria-pressed="true">Preview</button>
+          <button id="canvasSourceBtn" type="button" aria-pressed="false">Code</button>
+        </div>
+        <div class="canvas-title"><strong id="canvasTitle">Canvas</strong><small>Interactive HTML canvas</small></div>
+        <a id="canvasDownload" class="canvas-icon-btn" download>Download</a>
+        <button id="canvasFullscreenBtn" class="canvas-icon-btn" type="button" aria-label="Toggle fullscreen">⛶</button>
+        <button id="canvasCloseBtn" class="canvas-icon-btn" type="button" aria-label="Close canvas">✕</button>
+      </header>
+      <div id="canvasStage" class="canvas-stage"><div class="canvas-loading">Loading canvas…</div></div>
+    </div>
+  </dialog>
+
   <script type="module">
     // The ?v= query busts stale cached copies of the module; bump it whenever
     // pj_web_utils.js changes exports, or the import dies on cached clients.
@@ -727,6 +776,14 @@
       capturePreview: document.getElementById("capturePreview"),
       captureVideo: document.getElementById("captureVideo"),
       captureOverlay: document.getElementById("captureOverlay"),
+      canvasDialog: document.getElementById("canvasDialog"),
+      canvasStage: document.getElementById("canvasStage"),
+      canvasTitle: document.getElementById("canvasTitle"),
+      canvasPreviewBtn: document.getElementById("canvasPreviewBtn"),
+      canvasSourceBtn: document.getElementById("canvasSourceBtn"),
+      canvasDownload: document.getElementById("canvasDownload"),
+      canvasFullscreenBtn: document.getElementById("canvasFullscreenBtn"),
+      canvasCloseBtn: document.getElementById("canvasCloseBtn"),
     };
 
     const state = {
@@ -773,6 +830,8 @@
       captureTimer: null,
       captureBytes: 0,
       captureStartedAt: 0,
+      canvasSource: "",
+      canvasObjectUrl: null,
     };
 
     const savedBase = localStorage.getItem(STORAGE_KEY);
@@ -2263,6 +2322,47 @@
         return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
       }
 
+      function renderCanvasView(sourceMode = false) {
+        el.canvasPreviewBtn.setAttribute("aria-pressed", String(!sourceMode));
+        el.canvasSourceBtn.setAttribute("aria-pressed", String(sourceMode));
+        el.canvasStage.replaceChildren();
+        if (sourceMode) {
+          const source = document.createElement("pre");
+          source.className = "canvas-source";
+          source.textContent = state.canvasSource;
+          el.canvasStage.appendChild(source);
+          return;
+        }
+        const frame = document.createElement("iframe");
+        frame.className = "canvas-frame";
+        frame.title = `${el.canvasTitle.textContent} preview`;
+        frame.sandbox = "allow-scripts allow-forms allow-modals allow-pointer-lock allow-downloads";
+        frame.src = state.canvasObjectUrl;
+        el.canvasStage.appendChild(frame);
+      }
+
+      async function openCanvas(artifact, downloadUrl) {
+        el.canvasTitle.textContent = artifact.filename;
+        el.canvasStage.innerHTML = '<div class="canvas-loading">Loading canvas…</div>';
+        el.canvasDialog.showModal();
+        try {
+          const response = await fetchWithTimeout(downloadUrl.href, {
+            credentials: "include",
+            headers: requestHeaders(createRequestId()),
+          }, 15000);
+          if (!response.ok) throw new Error(`Canvas download failed (${response.status})`);
+          const source = await response.text();
+          if (state.canvasObjectUrl) URL.revokeObjectURL(state.canvasObjectUrl);
+          state.canvasSource = source;
+          state.canvasObjectUrl = URL.createObjectURL(new Blob([source], { type: "text/html" }));
+          el.canvasDownload.href = state.canvasObjectUrl;
+          el.canvasDownload.download = artifact.filename;
+          renderCanvasView(false);
+        } catch (error) {
+          el.canvasStage.textContent = shorten(String(error), 300);
+        }
+      }
+
       function renderArtifactCard(artifact) {
         if (!artifact?.artifact_id || !artifact.filename || !artifact.download_url) return;
         let downloadUrl;
@@ -2284,7 +2384,16 @@
           link.className = "artifact-download";
           link.textContent = "Download";
           link.rel = "noopener";
-          card.append(title, meta, link);
+          card.append(title, meta);
+          if (String(artifact.mime_type || "").startsWith("text/html")) {
+            const open = document.createElement("button");
+            open.type = "button";
+            open.className = "canvas-open";
+            open.textContent = "Open canvas";
+            open.addEventListener("click", () => openCanvas(artifact, downloadUrl));
+            card.appendChild(open);
+          }
+          card.appendChild(link);
           el.messages.appendChild(card);
           state.artifactCards.set(artifact.artifact_id, card);
         }
@@ -3055,6 +3164,20 @@
         event.preventDefault();
         sendSelectedMessage();
       }
+    });
+    el.canvasPreviewBtn.addEventListener("click", () => renderCanvasView(false));
+    el.canvasSourceBtn.addEventListener("click", () => renderCanvasView(true));
+    el.canvasCloseBtn.addEventListener("click", () => el.canvasDialog.close());
+    el.canvasFullscreenBtn.addEventListener("click", async () => {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await el.canvasDialog.requestFullscreen();
+    });
+    el.canvasDialog.addEventListener("close", () => {
+      if (document.fullscreenElement === el.canvasDialog) document.exitFullscreen();
+      if (state.canvasObjectUrl) URL.revokeObjectURL(state.canvasObjectUrl);
+      state.canvasObjectUrl = null;
+      state.canvasSource = "";
+      el.canvasStage.replaceChildren();
     });
     document.querySelectorAll?.("[data-prompt]").forEach((button) => {
       button.addEventListener("click", () => {
