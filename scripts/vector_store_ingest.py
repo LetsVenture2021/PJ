@@ -117,6 +117,15 @@ def main() -> int:
         default="pj-openai-api-key",
     )
     parser.add_argument(
+        "--vector-store-id",
+        default="",
+        help=(
+            "Target a specific vector store instead of the configured default. "
+            "Use a dedicated store for untrusted corpora so searches must opt "
+            "in by name."
+        ),
+    )
+    parser.add_argument(
         "--timeout-seconds",
         type=int,
         default=900,
@@ -175,7 +184,7 @@ def main() -> int:
         version = declared_version
 
     api_key = _api_key(args.keychain_service)
-    vector_store_id = skillops._require_vector_store_id()
+    vector_store_id = args.vector_store_id or skillops._require_vector_store_id()
     file_id = _cached_file_id(source_sha256, filename)
     reused = False
 
