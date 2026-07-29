@@ -7,9 +7,13 @@ voice, a local browser client, and an optional Cloudflare Worker edge proxy.
 ## Documentation
 
 - [Architecture and technology-stack assessment (July 29, 2026)](docs/architecture-stack-assessment-2026-07-29.md)
+- [Market-competitive capability gaps](docs/market-competitive-capabilities-2026-07-29.md)
+  prioritizes the additional product capabilities PJ needs for parity and
+  differentiation across assistant, research, work-copilot, and agent markets.
 - [Product and technology report (July 28, 2026)](docs/product-technology-report-2026-07-28.md)
 - [Product vision: the governed personal intelligence layer](docs/product-vision.md)
 - [End-to-end architecture](docs/architecture.md)
+- [Current application workflow diagrams](docs/workflow-diagrams.md)
 - [Realtime protocol compatibility](docs/realtime-protocol.md)
 - [Incident response and recovery runbook](docs/runbook.md)
 - [GitHub security controls](docs/security-controls.md)
@@ -87,6 +91,9 @@ voice, a local browser client, and an optional Cloudflare Worker edge proxy.
 - Vector-store source ingestion/synchronization into DocOps, CodeOps, and the
   governed n8n capability corpus, including release receipts and fail-closed
   validation.
+- Privacy-preserving process mining over PJ's metadata-only JSONL logs, with
+  discovered workflow variants, transitions, failure and latency hotspots, and
+  prioritized optimization recommendations (`scripts/process_mining.py`).
 - A standalone stdio Hugging Face MCP server for bounded public Hub discovery
   and token-authenticated inference. See
   [`docs/huggingface-mcp-server.md`](docs/huggingface-mcp-server.md).
@@ -352,6 +359,30 @@ default stores queried by Full Power Text.
 Ingestion needs `OPENAI_API_KEY` and a configured vector store. Governed n8n
 ingestion additionally requires an independent evaluation receipt; inspect each
 script's `--help` before changing a corpus.
+
+### Process mining and workflow optimization
+
+PJ can discover the paths actually taken through its workflows without reading
+prompts, tool arguments, results, request bodies, or credentials:
+
+```bash
+python scripts/process_mining.py /path/to/pj.jsonl
+python scripts/process_mining.py /path/to/pj.jsonl --output process-report.json
+```
+
+The report groups metadata events into cases using request, upload, tool-call,
+or session correlation IDs. It summarizes variants, directly-follows
+transitions, activity failure rates, mean and p95 duration, incomplete cases,
+and exact-once replays. Recommendations prioritize reliability before latency:
+failure and incomplete-case hotspots are high priority, p95 latency hotspots
+are medium priority, and replay counts trigger a low-priority investigation of
+upstream retries without recommending removal of replay protection.
+
+Only fixed PJ lifecycle event names and numeric timing/status metadata are
+accepted. Unknown messages and payload-shaped fields are ignored, and reports
+contain aggregate counts rather than raw correlation IDs. See the
+[process-mining optimization loop](docs/workflow-diagrams.md#16-process-mining-optimization-loop)
+for how findings feed back into each feature workflow.
 
 ## Tests and quality checks
 

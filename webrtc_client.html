@@ -375,6 +375,37 @@
       display: none;
     }
 
+    .capture-panel {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+    }
+    .capture-indicator {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 13px;
+    }
+    .capture-indicator::before {
+      content: "";
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: #64748b;
+    }
+    .capture-indicator.live::before { background: #ef4444; }
+    .capture-indicator.paused::before { background: #f59e0b; }
+    .capture-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .capture-actions button { flex: 1; min-width: 70px; }
+    .capture-panel textarea { min-height: 54px; }
+    .capture-preview { position: relative; display: none; }
+    .capture-preview.active { display: block; }
+    .capture-preview video { width: 100%; max-height: 160px; background: #05080d; }
+    .capture-overlay { position: absolute; inset: 0; pointer-events: none; }
+    .capture-overlay > span { position: absolute; border: 2px solid #f59e0b; }
+
     .composer {
       padding: 14px 16px;
       border-top: 1px solid var(--line);
@@ -478,6 +509,28 @@
         Voice mode requires microphone permission. You can still send text
         messages once the realtime session is connected.
       </div>
+
+      <section class="capture-panel" aria-labelledby="captureTitle">
+        <strong id="captureTitle">Visual context (read-only)</strong>
+        <div id="captureIndicator" class="capture-indicator" role="status" aria-live="polite">
+          Not capturing · ephemeral
+        </div>
+        <div class="capture-actions">
+          <button id="cameraBtn" class="muted-btn" type="button">Camera</button>
+          <button id="screenBtn" class="muted-btn" type="button">Share screen</button>
+          <button id="capturePauseBtn" class="muted-btn" type="button" disabled>Pause</button>
+          <button id="captureStopBtn" class="danger" type="button" disabled>Stop</button>
+        </div>
+        <label><input id="retainCapture" type="checkbox"> Retain sampled frames</label>
+        <label><input id="visualTaskActive" type="checkbox"> Current task requires visual analysis</label>
+        <label for="visualEquivalent">Text equivalent / accessibility description</label>
+        <textarea id="visualEquivalent" placeholder="Describe the relevant visual content without sharing media."></textarea>
+        <div id="capturePreview" class="capture-preview" aria-hidden="true">
+          <video id="captureVideo" autoplay muted playsinline></video>
+          <div id="captureOverlay" class="capture-overlay"></div>
+        </div>
+        <small class="note">Frames are sampled at most once every 2 seconds and scaled to 1280×720. Nothing is sent unless the current task requires it.</small>
+      </section>
 
       <div id="fullPowerControls" class="full-power-controls hidden">
         <div class="field">
@@ -619,6 +672,17 @@
       composerFolderBtn: document.getElementById("composerFolderBtn"),
       filePicker: document.getElementById("filePicker"),
       folderPicker: document.getElementById("folderPicker"),
+      cameraBtn: document.getElementById("cameraBtn"),
+      screenBtn: document.getElementById("screenBtn"),
+      capturePauseBtn: document.getElementById("capturePauseBtn"),
+      captureStopBtn: document.getElementById("captureStopBtn"),
+      captureIndicator: document.getElementById("captureIndicator"),
+      retainCapture: document.getElementById("retainCapture"),
+      visualTaskActive: document.getElementById("visualTaskActive"),
+      visualEquivalent: document.getElementById("visualEquivalent"),
+      capturePreview: document.getElementById("capturePreview"),
+      captureVideo: document.getElementById("captureVideo"),
+      captureOverlay: document.getElementById("captureOverlay"),
     };
 
     const state = {
@@ -659,6 +723,12 @@
       uploadLocalSkips: [],
       uploadBusy: false,
       uploadSessionId: `upload_${createRequestId().replace(/[^A-Za-z0-9_-]/g, "_")}`,
+      captureStream: null,
+      captureKind: null,
+      capturePaused: false,
+      captureTimer: null,
+      captureBytes: 0,
+      captureStartedAt: 0,
     };
 
     const savedBase = localStorage.getItem(STORAGE_KEY);
@@ -695,6 +765,100 @@
       }
       return `${unit === 0 ? value : value.toFixed(1)} ${units[unit]}`;
     }
+
+    const CAPTURE_LIMITS = Object.freeze({ width: 1280, height: 720, intervalMs: 2000, bytes: 8_000_000, durationMs: 120_000 });
+
+    function updateCaptureIndicator(message = null) {
+      const retention = el.retainCapture.checked ? "retained by choice" : "ephemeral";
+      const status = message || (state.captureStream
+        ? `${state.capturePaused ? "Paused" : "Capturing"} ${state.captureKind} · ${retention}`
+        : `Not capturing · ${retention}`);
+      el.captureIndicator.textContent = status;
+      el.captureIndicator.classList.toggle("live", Boolean(state.captureStream && !state.capturePaused));
+      el.captureIndicator.classList.toggle("paused", Boolean(state.captureStream && state.capturePaused));
+    }
+
+    function stopVisualCapture(reason = "Capture stopped") {
+      clearInterval(state.captureTimer);
+      state.captureTimer = null;
+      for (const track of state.captureStream?.getTracks() || []) track.stop();
+      state.captureStream = null;
+      state.captureKind = null;
+      state.capturePaused = false;
+      el.captureVideo.srcObject = null;
+      el.capturePreview.classList.remove("active");
+      el.capturePauseBtn.disabled = true;
+      el.captureStopBtn.disabled = true;
+      updateCaptureIndicator(reason);
+    }
+
+    async function sampleVisualFrame() {
+      if (!state.captureStream || state.capturePaused || !el.visualTaskActive.checked) return;
+      if (Date.now() - state.captureStartedAt > CAPTURE_LIMITS.durationMs) {
+        stopVisualCapture("Stopped: duration budget reached");
+        return;
+      }
+      const video = el.captureVideo;
+      if (!video.videoWidth || !video.videoHeight) return;
+      const scale = Math.min(1, CAPTURE_LIMITS.width / video.videoWidth, CAPTURE_LIMITS.height / video.videoHeight);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+      canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+      canvas.getContext("2d", { alpha: false }).drawImage(video, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.8));
+      if (!blob) return;
+      if (state.captureBytes + blob.size > CAPTURE_LIMITS.bytes) {
+        stopVisualCapture("Stopped: byte budget reached");
+        return;
+      }
+      state.captureBytes += blob.size;
+      // A domain integration may consume this event and upload one bounded frame.
+      // The web client itself never continuously streams visual media.
+      window.dispatchEvent(new CustomEvent("pj:visual-frame", { detail: {
+        blob,
+        source: state.captureKind,
+        retention: el.retainCapture.checked ? "retain" : "ephemeral",
+        textEquivalent: el.visualEquivalent.value,
+      } }));
+    }
+
+    async function startVisualCapture(kind) {
+      stopVisualCapture("Requesting permission…");
+      try {
+        const stream = kind === "camera"
+          ? await navigator.mediaDevices.getUserMedia({ video: { width: { max: 1280 }, height: { max: 720 } }, audio: false })
+          : await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        state.captureStream = stream;
+        state.captureKind = kind;
+        state.captureBytes = 0;
+        state.captureStartedAt = Date.now();
+        el.captureVideo.srcObject = stream;
+        el.capturePreview.classList.add("active");
+        el.capturePauseBtn.disabled = false;
+        el.captureStopBtn.disabled = false;
+        const track = stream.getVideoTracks()[0];
+        track.addEventListener("ended", () => stopVisualCapture("Capture source ended or permission was revoked"), { once: true });
+        updateCaptureIndicator(`${kind === "screen" ? "Sharing" : "Using"} ${track.label || kind} · ${el.retainCapture.checked ? "retained by choice" : "ephemeral"}`);
+        state.captureTimer = setInterval(sampleVisualFrame, CAPTURE_LIMITS.intervalMs);
+      } catch (error) {
+        updateCaptureIndicator(error?.name === "NotAllowedError" ? "Capture permission denied" : "Capture unavailable");
+      }
+    }
+
+    function renderGroundedRegions(regions) {
+      el.captureOverlay.replaceChildren();
+      for (const region of regions || []) {
+        if (![region.x, region.y, region.width, region.height].every((value) => Number.isFinite(value) && value >= 0 && value <= 1)) continue;
+        const marker = document.createElement("span");
+        marker.style.left = `${region.x * 100}%`;
+        marker.style.top = `${region.y * 100}%`;
+        marker.style.width = `${region.width * 100}%`;
+        marker.style.height = `${region.height * 100}%`;
+        marker.title = String(region.label || "Grounded region");
+        el.captureOverlay.append(marker); // Never interpret OCR or labels as HTML.
+      }
+    }
+    window.pjRenderGroundedRegions = renderGroundedRegions;
 
     function setUploadBusy(busy) {
       state.uploadBusy = busy;
@@ -2774,6 +2938,18 @@
     el.sendBtn.addEventListener("click", sendSelectedMessage);
     el.copyBtn.addEventListener("click", copyTranscript);
     el.clearBtn.addEventListener("click", clearTranscript);
+    el.cameraBtn.addEventListener("click", () => startVisualCapture("camera"));
+    el.screenBtn.addEventListener("click", () => startVisualCapture("screen"));
+    el.capturePauseBtn.addEventListener("click", () => {
+      state.capturePaused = !state.capturePaused;
+      for (const track of state.captureStream?.getVideoTracks() || []) {
+        track.enabled = !state.capturePaused;
+      }
+      el.capturePauseBtn.textContent = state.capturePaused ? "Resume" : "Pause";
+      updateCaptureIndicator();
+    });
+    el.captureStopBtn.addEventListener("click", () => stopVisualCapture());
+    el.retainCapture.addEventListener("change", () => updateCaptureIndicator());
     el.composerFilesBtn.addEventListener("click", () => {
       el.filePicker.value = "";
       el.filePicker.click();
