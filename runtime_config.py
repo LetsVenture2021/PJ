@@ -44,10 +44,19 @@ class RuntimeConfig:
     tool_policy: dict[str, Any]
     realtime: dict[str, Any]
     worker: dict[str, Any]
+    conversation_routing: ConversationRoutingSettings
     providers: dict[str, Any]
     execution_modes: dict[str, Any]
     collaboration: dict[str, Any]
     sources: dict[str, Path]
+
+
+@dataclass(frozen=True)
+class ConversationRoutingSettings:
+    enabled_routes: tuple[str, ...]
+    timeout_budgets_ms: dict[str, int]
+    maximum_estimated_spend_usd: float
+    safe_fallback_order: tuple[str, ...]
 
 
 EXECUTION_MODE_FIELDS = {"capability", "latency", "tools", "spend", "privacy"}
@@ -362,6 +371,21 @@ def load_runtime_config(
             "voice": "marin",
         },
         "worker": _load_worker_config(worker_path, selected),
+        "conversation_routing": assistant.pop(
+            "conversation_routing",
+            {
+                "enabled_routes": ["realtime", "responses", "local", "hosted", "delegated"],
+                "timeout_budgets_ms": {
+                    "realtime": 12000,
+                    "responses": 30000,
+                    "local": 5000,
+                    "hosted": 30000,
+                    "delegated": 300000,
+                },
+                "maximum_estimated_spend_usd": 5.0,
+                "safe_fallback_order": ["local", "responses", "realtime"],
+            },
+        ),
         "providers": assistant.pop(
             "providers",
             {
@@ -455,6 +479,33 @@ def load_runtime_config(
     worker = sections["worker"]
     if not isinstance(worker, dict):
         raise ConfigError("worker configuration must be an object")
+    routing = sections["conversation_routing"]
+    routes = {"realtime", "responses", "local", "hosted", "delegated"}
+    if not isinstance(routing, dict):
+        raise ConfigError("conversation_routing must be an object")
+    enabled = routing.get("enabled_routes")
+    fallbacks = routing.get("safe_fallback_order")
+    budgets = routing.get("timeout_budgets_ms")
+    spend = routing.get("maximum_estimated_spend_usd")
+    if not isinstance(enabled, list) or not enabled or not set(enabled) <= routes:
+        raise ConfigError("conversation_routing.enabled_routes contains invalid routes")
+    if not isinstance(fallbacks, list) or not fallbacks or not set(fallbacks) <= set(enabled):
+        raise ConfigError("conversation_routing.safe_fallback_order must contain enabled routes")
+    if (
+        not isinstance(budgets, dict)
+        or not set(enabled) <= set(budgets)
+        or any(not isinstance(value, int) or value <= 0 for value in budgets.values())
+    ):
+        raise ConfigError("conversation_routing.timeout_budgets_ms must contain positive integers")
+    if not isinstance(spend, (int, float)) or isinstance(spend, bool) or spend <= 0:
+        raise ConfigError("conversation_routing.maximum_estimated_spend_usd must be positive")
+    if selected == "prod" and ("responses" not in enabled or "responses" not in fallbacks):
+        raise ConfigError(
+            "production conversation routing requires Responses as an enabled safe fallback"
+        )
+    routing_settings = ConversationRoutingSettings(
+        tuple(enabled), copy.deepcopy(budgets), float(spend), tuple(fallbacks)
+    )
     _validate_provider_routing(sections)
     collaboration = sections["collaboration"]
     if not isinstance(collaboration, dict) or not isinstance(collaboration.get("enabled"), bool):
@@ -478,6 +529,7 @@ def load_runtime_config(
         tool_policy=tool_policy,
         realtime=copy.deepcopy(realtime),
         worker=copy.deepcopy(worker),
+        conversation_routing=routing_settings,
         providers=copy.deepcopy(sections["providers"]),
         execution_modes=copy.deepcopy(sections["execution_modes"]),
         collaboration=copy.deepcopy(collaboration),

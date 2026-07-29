@@ -13,6 +13,7 @@ from ops.docs.quality.service import (
     approve_report,
     assert_report_current,
     report_is_approved,
+    validate_manifest,
 )
 
 
@@ -116,3 +117,19 @@ class DocumentQualityTests(unittest.TestCase):
         for value in (actual, expected):
             value.pop("source")
         self.assertEqual(actual, expected)
+
+    def test_validate_manifest_accepts_path_entries(self):
+        documents_dir = self.root / "documents"
+        documents_dir.mkdir()
+        source = documents_dir / "brief.md"
+        source.write_text("# Brief\n", encoding="utf-8")
+        manifest = documents_dir / "library-manifest.json"
+        manifest.write_text(
+            json.dumps({"documents": [{"path": "documents/brief.md"}]}),
+            encoding="utf-8",
+        )
+
+        reports = validate_manifest(manifest)
+
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(Path(reports[0].source).name, "brief.md")
