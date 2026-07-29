@@ -20,8 +20,28 @@ const webUtilsModule = await import(
   `data:text/javascript;base64,${Buffer.from(webUtilsSource).toString("base64")}`
 );
 
+test("browser visual capture is permissioned, bounded, revocable, and ephemeral by default", () => {
+  assert.match(webClientSource, /getUserMedia\(/);
+  assert.match(webClientSource, /getDisplayMedia\(/);
+  assert.match(webClientSource, /NotAllowedError/);
+  assert.match(webClientSource, /addEventListener\("ended"/);
+  assert.match(webClientSource, /intervalMs: 2000/);
+  assert.match(webClientSource, /width: 1280, height: 720/);
+  assert.match(webClientSource, /bytes: 8_000_000, durationMs: 120_000/);
+  assert.match(webClientSource, /visualTaskActive\.checked/);
+  assert.match(
+    webClientSource,
+    /retention: el\.retainCapture\.checked \? "retain" : "ephemeral"/,
+  );
+  assert.match(webClientSource, /captureOverlay\.replaceChildren\(\)/);
+  assert.doesNotMatch(webClientSource, /captureOverlay\.innerHTML/);
+});
+
 const {
   bridgeHeaders,
+  buildCollaborationConfig,
+  authorizeResourceRequest,
+  authorizeShareLink,
   buildAccessConfig,
   CONTRACT_VERSION,
   PROTOCOL_VERSION,
@@ -151,6 +171,110 @@ test("only health and preflight are public", () => {
   ]) {
     assert.equal(isPublicRoute(method, path), false, `${method} ${path} must be privileged`);
   }
+});
+
+test("collaboration is explicit and fails closed without identity and tenant configuration", () => {
+  assert.deepEqual(buildCollaborationConfig({}), { enabled: false });
+  assert.throws(
+    () => buildCollaborationConfig({ PJ_COLLABORATION_ENABLED: "true" }),
+    /requires PJ_IDENTITY_CONFIG and PJ_TENANT_CONFIG/,
+  );
+});
+
+test("collaborative resource checks bind identity tenant resource expiry and revocation", () => {
+  const identity = { email: "member@example.com", subject: "member-subject" };
+  const baseGrant = {
+    principal_id: "principal-member",
+    organization_id: "tenant-a",
+    resource_type: "project",
+    resource_id: "project-one",
+    permission: "editor",
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+  };
+  const collaboration = {
+    enabled: true,
+    identities: {
+      "member@example.com": {
+        id: "principal-member",
+        subject: "member-subject",
+        organization_id: "tenant-a",
+      },
+    },
+    grants: [baseGrant],
+  };
+  const request = (headers = {}, method = "GET") =>
+    new Request("https://pj-assistant.ai/responses/projects/project-one", {
+      method,
+      headers: {
+        "x-pj-organization-id": "tenant-a",
+        "x-pj-resource-type": "project",
+        "x-pj-resource-id": "project-one",
+        ...headers,
+      },
+    });
+  assert.equal(authorizeResourceRequest(request(), identity, collaboration).ok, true);
+  assert.equal(
+    authorizeResourceRequest(
+      request({ "x-pj-organization-id": "tenant-b" }),
+      identity,
+      collaboration,
+    ).ok,
+    false,
+  );
+  assert.equal(
+    authorizeResourceRequest(request({ "x-pj-resource-id": "guessed" }), identity, collaboration)
+      .ok,
+    false,
+  );
+  assert.equal(
+    authorizeResourceRequest(request(), identity, {
+      ...collaboration,
+      grants: [{ ...baseGrant, expires_at: new Date(Date.now() - 1_000).toISOString() }],
+    }).ok,
+    false,
+  );
+  assert.equal(
+    authorizeResourceRequest(request(), identity, {
+      ...collaboration,
+      grants: [{ ...baseGrant, revoked_at: new Date().toISOString() }],
+    }).ok,
+    false,
+  );
+  assert.equal(
+    authorizeResourceRequest(request(), { ...identity, subject: "forged" }, collaboration).ok,
+    false,
+  );
+});
+
+test("external links are hashed, exact-resource, short-lived, and revocable", async () => {
+  const token = "one-time-external-token";
+  const tokenHash = createHash("sha256").update(token).digest("hex");
+  const link = {
+    token_hash: tokenHash,
+    organization_id: "tenant-a",
+    resource_type: "project",
+    resource_id: "project-one",
+    permission: "viewer",
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+  };
+  const request = new Request("https://pj-assistant.ai/responses/projects/project-one", {
+    headers: {
+      "x-pj-organization-id": "tenant-a",
+      "x-pj-resource-type": "project",
+      "x-pj-resource-id": "project-one",
+    },
+  });
+  assert.equal((await authorizeShareLink(request, [link], token)).ok, true);
+  assert.equal(
+    (await authorizeShareLink(request, [{ ...link, revoked_at: new Date().toISOString() }], token))
+      .ok,
+    false,
+  );
+  assert.equal(
+    (await authorizeShareLink(request, [{ ...link, expires_at: new Date(0).toISOString() }], token))
+      .ok,
+    false,
+  );
 });
 
 test("Full Power routes and bridge URL derivation are narrowly scoped", () => {

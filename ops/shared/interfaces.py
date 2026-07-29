@@ -1,6 +1,15 @@
 """Interfaces between orchestration and infrastructure implementations."""
+
 from collections.abc import Callable, Iterable, Mapping
 from typing import Any, Protocol
+
+
+class ResponseResult(Protocol):
+    """Normalized response fields consumed outside provider adapters."""
+
+    id: str
+    status: str
+    output_text: str
 
 
 class ResponsesProvider(Protocol):
@@ -8,6 +17,12 @@ class ResponsesProvider(Protocol):
 
     def create_response(self, **kwargs: Any) -> Any:
         """Create a provider response using normalized orchestration arguments."""
+
+    def retrieve_response(self, response_id: str) -> ResponseResult:
+        """Retrieve normalized state for an asynchronous response."""
+
+    def cancel_response(self, response_id: str) -> ResponseResult:
+        """Request cancellation of an asynchronous response."""
 
 
 class ToolDispatcher(Protocol):
