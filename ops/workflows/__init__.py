@@ -1,6 +1,31 @@
-"""Versioned workflow definitions and safe, side-effect-free simulation."""
+"""Governed, declarative WorkflowOps API with safe, side-effect-free simulation."""
 
-from ops.workflows.models import ApprovalPolicy, Step, Workflow, WorkflowKind
-from ops.workflows.simulation import Simulation, simulate
+from .compiler import WorkflowCompiler
+from .evaluation import EvaluationHarness
+from .models import (
+    ApprovalPolicy,
+    Step,
+    Workflow,
+    WorkflowDefinition,
+    WorkflowError,
+    WorkflowKind,
+)
+from .packages import export_package, import_package
+from .simulation import Simulation, simulate
+from .store import WorkflowStore
 
-__all__ = ["ApprovalPolicy", "Simulation", "Step", "Workflow", "WorkflowKind", "simulate"]
+__all__ = [
+    "ApprovalPolicy",
+    "EvaluationHarness",
+    "Simulation",
+    "Step",
+    "Workflow",
+    "WorkflowCompiler",
+    "WorkflowDefinition",
+    "WorkflowError",
+    "WorkflowKind",
+    "WorkflowStore",
+    "export_package",
+    "import_package",
+    "simulate",
+]
