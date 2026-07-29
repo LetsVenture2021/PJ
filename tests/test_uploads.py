@@ -377,3 +377,20 @@ if __name__ == "__main__":
         self.assertEqual(response.status_code, 201)
         classification = response.get_json()["files"][0]["classification"]
         self.assertEqual(classification["handling"], "extract")
+
+    def test_single_file_folder_upload_uses_skip_semantics(self):
+        response = self._upload(
+            "/upload/folder",
+            [(".env", b"OPENAI_API_KEY=sk-secret\n", "application/octet-stream")],
+            ["project/.env"],
+        )
+        self.assertEqual(response.status_code, 415)
+        self.assertEqual(response.get_json()["error"]["code"], "no_acceptable_files")
+
+        response = self._upload(
+            "/upload/folder",
+            [("readme.md", b"# ok\n", "text/markdown")],
+            ["project/readme.md"],
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.get_json()["count"], 1)

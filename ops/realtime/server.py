@@ -1325,9 +1325,10 @@ def _handle_document_upload(*, folder_mode):
     prepared = []
     seen_paths = set()
     skipped = []
-    # Multi-file batches skip individually unacceptable files and continue;
-    # single-file uploads keep returning the file's own rejection directly.
-    multi_file = len(files) > 1
+    # Folder uploads and multi-file batches skip individually unacceptable
+    # files and continue; single-file document uploads keep returning the
+    # file's own rejection directly.
+    multi_file = folder_mode or len(files) > 1
     try:
         for index, storage in enumerate(files):
             raw_path = paths[index] if paths else storage.filename
