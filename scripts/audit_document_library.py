@@ -22,6 +22,7 @@ SCHEMA_DIR = ROOT / "schemas" / "documents"
 
 
 def audit(manifest_path: Path = DEFAULT_MANIFEST) -> dict:
+    root = ROOT.resolve()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     schema = json.loads((SCHEMA_DIR / "document-library-v1.json").read_text())
     schema["properties"]["documents"]["items"] = json.loads(
@@ -36,9 +37,9 @@ def audit(manifest_path: Path = DEFAULT_MANIFEST) -> dict:
         if document_id in seen:
             findings.append({"document_id": document_id, "error": "duplicate_document_id"})
         seen.add(document_id)
-        path = (ROOT / entry.get("path", "")).resolve()
+        path = (root / entry.get("path", "")).resolve()
         try:
-            path.relative_to(ROOT)
+            path.relative_to(root)
         except ValueError:
             findings.append({"document_id": document_id, "error": "path_outside_repository"})
             continue

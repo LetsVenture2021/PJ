@@ -1,15 +1,30 @@
-"""Typed models for the bounded WorkflowOps manifest format.
+"""Typed models for workflow automation and the WorkflowOps manifest format.
 
-The format is deliberately data-only.  It has no expression evaluator and no
-field capable of carrying Python or JavaScript source.
+Covers both the versioned workflow definitions used by safe simulation and the
+bounded manifest format. The manifest format is deliberately data-only: it has
+no expression evaluator and no field capable of carrying Python or JavaScript
+source.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from enum import Enum
 from typing import Any, Mapping
+
+
+class WorkflowKind(str, Enum):
+    SUGGESTION = "suggestion"
+    ACTION = "action"
+
+
+class ApprovalPolicy(str, Enum):
+    NONE = "none"
+    OWNER = "owner"
+    MANDATORY = "mandatory"
+
 
 FORMAT_VERSION = "1.0"
 STEP_TYPES = frozenset(
@@ -69,6 +84,43 @@ class Budget:
 
 @dataclass(frozen=True)
 class Step:
+    name: str
+    effect: str = "internal"
+    estimated_cost: float = 0.0
+    approval: ApprovalPolicy = ApprovalPolicy.NONE
+
+    @property
+    def requires_approval(self) -> bool:
+        sensitive = {"destructive", "public", "credentialed", "paid", "irreversible"}
+        return self.approval != ApprovalPolicy.NONE or self.effect in sensitive
+
+
+@dataclass(frozen=True)
+class Workflow:
+    workflow_id: str
+    version: int
+    owner: str
+    kind: WorkflowKind
+    steps: tuple[Step, ...]
+    budget: float = 0.0
+    enabled: bool = True
+    project_id: str = "default"
+    conditions: tuple[str, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        if not self.workflow_id or not self.owner or self.version < 1 or self.budget < 0:
+            raise ValueError(
+                "workflow id, owner, positive version, and nonnegative budget required"
+            )
+        if self.kind == WorkflowKind.SUGGESTION and any(s.effect != "internal" for s in self.steps):
+            raise ValueError("suggestion workflows cannot contain external effects")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ManifestStep:
     id: str
     type: str
     next: tuple[str, ...] = ()
@@ -77,7 +129,7 @@ class Step:
     rollback: str | None = None
 
     @classmethod
-    def parse(cls, value: Any) -> "Step":
+    def parse(cls, value: Any) -> "ManifestStep":
         if not isinstance(value, Mapping):
             raise WorkflowError("each step must be an object")
         step_id, step_type = value.get("id"), value.get("type")
@@ -110,7 +162,7 @@ class WorkflowDefinition:
     profile: Mapping[str, Any]
     inputs: Mapping[str, Any]
     outputs: Mapping[str, Any]
-    steps: tuple[Step, ...]
+    steps: tuple[ManifestStep, ...]
     tools: Mapping[str, Mapping[str, Any]]
     knowledge: tuple[Mapping[str, Any], ...]
     policy: Mapping[str, Any]
@@ -150,7 +202,7 @@ class WorkflowDefinition:
             profile=dict(data.get("assistant_profile", {})),
             inputs=dict(schemas[0]),
             outputs=dict(schemas[1]),
-            steps=tuple(Step.parse(x) for x in steps_raw),
+            steps=tuple(ManifestStep.parse(x) for x in steps_raw),
             tools={str(k): dict(v) for k, v in tools.items() if isinstance(v, Mapping)},
             knowledge=tuple(dict(x) for x in knowledge),
             policy=dict(data.get("policy", {})),

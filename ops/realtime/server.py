@@ -48,6 +48,7 @@ import docops
 import promptops
 import skills
 from ops.docs import formats as upload_formats
+from ops.productivity.ui import blueprint as productivity_blueprint
 from ops.docs import uploads as document_uploads
 from pj_contract import CONTRACT_VERSION, PROTOCOL_VERSION
 from ops.shared.logging import (
@@ -133,6 +134,7 @@ class DurableExecutionOutcomeUnknown(RuntimeError):
 
 
 app = Flask(__name__, static_folder=str(BASE_DIR / "assets"), static_url_path="/assets")
+app.register_blueprint(productivity_blueprint)
 app.secret_key = os.getenv("PJ_LOCAL_WEB_SESSION_SECRET") or secrets.token_hex(32)
 app.config.update(
     LOCAL_WEB_OWNER_SESSION_ENABLED=(os.getenv("PJ_LOCAL_WEB_OWNER_SESSION_ENABLED") == "1"),

@@ -18,6 +18,14 @@ from .service import (
     revise_presentation,
     validate_document,
 )
+from .quality import (
+    calculate_scorecard,
+    generate_monthly_scorecard,
+    record_control_calibration,
+    record_quality_incident,
+    record_quality_run,
+    regression_alerts,
+)
 
 __all__ = [
     "DOCOPS_DISPATCH",
@@ -36,4 +44,10 @@ __all__ = [
     "revise_document",
     "revise_presentation",
     "validate_document",
+    "calculate_scorecard",
+    "generate_monthly_scorecard",
+    "record_control_calibration",
+    "record_quality_incident",
+    "record_quality_run",
+    "regression_alerts",
 ]

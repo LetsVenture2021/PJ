@@ -1,8 +1,8 @@
 """Deterministic, metadata-safe quality gates for governed documents.
 
-The validators deliberately operate locally: they do not call providers, fetch URLs,
-or log document content.  Reports contain rule identifiers and locations, never the
-matched text, so callers can safely retain them as governance evidence.
+The validators deliberately operate locally: they do not call providers, fetch
+URLs, or log document content. Reports contain rule identifiers and locations,
+never matched text, so callers can safely retain them as governance evidence.
 """
 
 from __future__ import annotations
