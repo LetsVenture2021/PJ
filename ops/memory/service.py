@@ -23,10 +23,13 @@ class MemoryService:
         if not self.enabled or not config.get("extraction_enabled", False):
             return []
         maximum = max(1, min(int(config.get("max_proposals_per_turn", 3)), 10))
+        model = config.get("model")
+        if not isinstance(model, str) or not model.strip():
+            return []
         proposals = extract_proposals(
             provider,
             turn_text,
-            model=config["model"],
+            model=model,
             source_ref=source_ref,
             project_scope=project_scope,
             maximum=maximum,
