@@ -305,6 +305,20 @@ python scripts/vector_store_sync.py --dry-run
 python scripts/vector_store_sync.py
 ```
 
+Pull a public Hugging Face dataset and project it into an untrusted corpus
+before ingestion (see `scripts/hf_dataset_pull.py --help`):
+
+```bash
+python scripts/hf_dataset_pull.py --license "apache-2.0 (verified on card)"
+python -c "from pathlib import Path; from ops.docs.hf_rows import write_corpus; \
+           write_corpus(Path('documents/datasets/hermes_fc_v1.jsonl'), \
+                        Path('documents/corpora/hermes_fc'), 'schemas')"
+```
+
+Every corpus file opens with an untrusted-data banner, and pulled datasets
+should be ingested into a dedicated opt-in vector store rather than the
+default stores queried by Full Power Text.
+
 Ingestion needs `OPENAI_API_KEY` and a configured vector store. Governed n8n
 ingestion additionally requires an independent evaluation receipt; inspect each
 script's `--help` before changing a corpus.

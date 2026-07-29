@@ -9,3 +9,5 @@ state.json
 .DS_Store
 documents/exports/
 backups/
+documents/datasets/
+documents/corpora/
