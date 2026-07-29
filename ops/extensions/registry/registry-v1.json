@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "mode": "curated-local-only",
+  "automatic_execution": false,
+  "public_ratings": false,
+  "remote_installation": false,
+  "entries": [
+    {"identifier": "pj.reviewed.http-connector", "type": "connector", "review_status": "reviewed", "package": "packages/http-connector.pjx"},
+    {"identifier": "pj.reviewed.workflow-template", "type": "workflow_template", "review_status": "reviewed", "package": "packages/workflow-template.pjx"}
+  ]
+}

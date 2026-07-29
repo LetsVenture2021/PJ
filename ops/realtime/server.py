@@ -48,7 +48,9 @@ import docops
 import promptops
 import skills
 from ops.docs import formats as upload_formats
+from ops.productivity.ui import blueprint as productivity_blueprint
 from ops.docs import uploads as document_uploads
+from ops.artifacts import ArtifactError, ArtifactFacade
 from pj_contract import CONTRACT_VERSION, PROTOCOL_VERSION
 from ops.shared.logging import (
     bind_log_context,
@@ -67,6 +69,7 @@ from ops.realtime.payload_validation import (
 from ops.conversations.models import ConversationContext, ConversationRequest
 from ops.conversations.routing import CapabilityRouter, RoutingError
 from ops.conversations.service import ConversationService
+from ops.workflows.ui import create_workflow_blueprint
 from runtime_config import load_runtime_config
 from realtime_config import realtime_session_config, realtime_tool_schemas
 from responses_runtime import (
@@ -129,6 +132,7 @@ TEXT_UPLOAD_EXTENSIONS = {
 
 configure_logging()
 _LOGGER = get_logger("realtime.server")
+ARTIFACT_FACADE = ArtifactFacade(BASE_DIR / "pj_data.sqlite3")
 
 
 class DurableExecutionOutcomeUnknown(RuntimeError):
@@ -136,6 +140,7 @@ class DurableExecutionOutcomeUnknown(RuntimeError):
 
 
 app = Flask(__name__, static_folder=str(BASE_DIR / "assets"), static_url_path="/assets")
+app.register_blueprint(productivity_blueprint)
 app.secret_key = os.getenv("PJ_LOCAL_WEB_SESSION_SECRET") or secrets.token_hex(32)
 app.config.update(
     LOCAL_WEB_OWNER_SESSION_ENABLED=(os.getenv("PJ_LOCAL_WEB_OWNER_SESSION_ENABLED") == "1"),
@@ -148,6 +153,7 @@ app.config.update(
 app.config.setdefault("UPLOAD_SCANNER", None)
 app.config.setdefault("CONVERSATION_SERVICE", ConversationService())
 CORS(app)  # allow local browser origins when running on localhost
+app.register_blueprint(create_workflow_blueprint())
 
 
 @app.before_request
@@ -1746,6 +1752,99 @@ def record_realtime_message(session_id):
         req_id=req_id,
         outbound_schema="realtime.message.response",
     )
+
+
+def _facade_access(artifact_id, session_id, req_id):
+    _session_record, error = _validated_session(session_id, req_id)
+    if error:
+        return None, error
+    if artifact_id not in chatlog.list_session_artifact_ids(session_id):
+        return None, _error_response("artifact_not_found", "Artifact was not found.", 404, req_id)
+    try:
+        return ARTIFACT_FACADE.get(artifact_id, project_id=None, session_id=session_id), None
+    except ArtifactError as exc:
+        return None, _error_response(exc.code, str(exc), 404, req_id)
+
+
+@app.route("/responses/sessions/<session_id>/artifacts/<artifact_id>", methods=["GET", "DELETE"])
+def artifact_metadata(session_id, artifact_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    artifact, error = _facade_access(artifact_id, session_id, req_id)
+    if error:
+        return error
+    try:
+        if request.method == "DELETE":
+            artifact = ARTIFACT_FACADE.tombstone(
+                artifact_id, project_id=None, session_id=session_id
+            )
+        return _json_response({"artifact": artifact.as_dict()}, req_id=req_id)
+    except ArtifactError as exc:
+        return _error_response(exc.code, str(exc), 409, req_id)
+
+
+@app.route("/responses/sessions/<session_id>/artifacts/<artifact_id>/preview", methods=["GET"])
+def artifact_preview(session_id, artifact_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    _artifact, error = _facade_access(artifact_id, session_id, req_id)
+    if error:
+        return error
+    try:
+        return _json_response(
+            ARTIFACT_FACADE.preview(artifact_id, project_id=None, session_id=session_id),
+            req_id=req_id,
+        )
+    except ArtifactError as exc:
+        return _error_response(exc.code, str(exc), 409, req_id)
+
+
+@app.route("/responses/sessions/<session_id>/artifacts/<artifact_id>/download", methods=["GET"])
+def artifact_download(session_id, artifact_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    artifact, error = _facade_access(artifact_id, session_id, req_id)
+    if error:
+        return error
+    try:
+        path = ARTIFACT_FACADE.verified_path(artifact_id, project_id=None, session_id=session_id)
+    except ArtifactError as exc:
+        return _error_response(exc.code, str(exc), 409, req_id)
+    response = send_file(
+        path,
+        mimetype=artifact.media_type,
+        as_attachment=True,
+        download_name=path.name,
+        conditional=False,
+        etag=False,
+        max_age=0,
+    )
+    response.headers["ETag"] = f'"sha256-{artifact.content_hash}"'
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+@app.route("/responses/sessions/<session_id>/outcomes/<outcome_id>", methods=["GET"])
+def outcome_metadata(session_id, outcome_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    _session_record, error = _validated_session(session_id, req_id)
+    if error:
+        return error
+    try:
+        outcome = ARTIFACT_FACADE.get_outcome(outcome_id, project_id=None, session_id=session_id)
+    except ArtifactError as exc:
+        return _error_response(exc.code, str(exc), 404, req_id)
+    return _json_response({"outcome": outcome}, req_id=req_id)
 
 
 @app.route("/responses/artifacts/<artifact_id>", methods=["GET"])
