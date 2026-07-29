@@ -14,7 +14,7 @@ import os
 import sqlite3
 import time
 
-DEFAULT_LIMITS = {"codex": 100}
+DEFAULT_LIMITS = {"codex": 100, "deep_research": 5}
 
 
 def check_and_count(db_path, name: str) -> str | None:

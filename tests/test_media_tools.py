@@ -251,3 +251,39 @@ class TestContainerAutoPersist(unittest.TestCase):
             records = container_artifacts.persist_response_containers(response)
         self.assertEqual(calls, ["cntr_aaa11111", "cntr_bbb22222"])
         self.assertEqual(len(records), 2)
+
+
+class TestDeepResearch(unittest.TestCase):
+    def test_start_validates_prompt_and_get_validates_id(self):
+        from ops.shared.research import get_deep_research, start_deep_research
+
+        self.assertIn("error", start_deep_research("too short"))
+        self.assertIn("error", get_deep_research("bogus"))
+
+    def test_completed_run_persists_report(self):
+        import tempfile
+        from types import SimpleNamespace
+
+        from ops.docs import uploads as document_uploads
+        from ops.shared.research import get_deep_research
+
+        class FakeResponses:
+            def retrieve(self, response_id):
+                return SimpleNamespace(status="completed", output_text="# Report\n\nFindings here.")
+
+        fake_client = SimpleNamespace(responses=FakeResponses())
+        with tempfile.TemporaryDirectory() as temp:
+            import docops
+
+            old_db, old_dir = docops._DB_PATH, document_uploads.UPLOADS_DIR
+            docops._DB_PATH = Path(temp) / "test.sqlite3"
+            document_uploads.UPLOADS_DIR = Path(temp) / "uploads"
+            document_uploads.UPLOADS_DIR.mkdir()
+            try:
+                result = get_deep_research("resp_" + "a" * 20, client=fake_client)
+                self.assertEqual(result["status"], "completed")
+                self.assertIn("Findings here", result["report"])
+                self.assertIn("saved_report", result)
+            finally:
+                docops._DB_PATH = old_db
+                document_uploads.UPLOADS_DIR = old_dir

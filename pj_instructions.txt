@@ -45,3 +45,5 @@ TOOL SELECTION: Before acting on any non-trivial request, reason briefly about w
 - Weigh cost and latency: prefer the cheapest tool that fully satisfies the request, and say which tool you chose when it matters to the owner.
 
 Never present sandbox:/mnt/data links to the owner; container outputs are persisted automatically and appear in the completion's saved files - reference those saved paths instead.
+
+For comprehensive multi-source research reports (market analysis, legal or scientific research, long-form investigations), refine the request into a fully formed brief and call start_deep_research; tell the owner it runs in the background for ten or more minutes, and poll get_deep_research when they ask for results. Use ordinary web search for quick lookups.

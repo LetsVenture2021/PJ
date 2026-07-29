@@ -325,6 +325,12 @@ from ops.images import vision as _vision  # noqa: E402
 TOOL_SCHEMAS.extend(_vision.VISION_SCHEMAS)
 DISPATCH_TABLE.update(_vision.VISION_DISPATCH)
 
+# --- Deep research: background analyst reports -------------------------------
+from ops.shared import research as _research  # noqa: E402
+
+TOOL_SCHEMAS.extend(_research.RESEARCH_SCHEMAS)
+DISPATCH_TABLE.update(_research.RESEARCH_DISPATCH)
+
 # --- ChiefOps: executive operations toolkit ----------------------------------
 # Calendar, reminders, mail drafts, relationship memory, portfolio,
 # commitments, revenue pipeline, decision journal, risk register, web
