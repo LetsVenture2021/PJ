@@ -21,6 +21,12 @@ _SENSITIVE_KEYS = {
     "cookie",
     "credentials",
     "password",
+    "prompt",
+    "document_body",
+    "request_body",
+    "tool_arguments",
+    "tool_args",
+    "result",
     "proxy_authorization",
     "set_cookie",
 }
@@ -29,6 +35,7 @@ _SENSITIVE_SUFFIXES = (
     "_password",
     "_secret",
     "_token",
+    "_body",
 )
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)(['\"]?\b("
