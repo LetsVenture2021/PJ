@@ -130,6 +130,7 @@ RESERVED_NAMES = {
     "search_decisions",
     "log_risk",
     "fetch_url",
+    "scrape_metadata",
     "check_website",
     "daily_brief",
     "create_goal_contract",
