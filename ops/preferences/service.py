@@ -52,6 +52,8 @@ class Proposal:
     value: Any
     scope: PreferenceScope
     sensitive: bool
+    project_id: str | None = None
+    status: str = "pending"
 
 
 class PreferenceStore:
@@ -85,6 +87,12 @@ class PreferenceStore:
             raise ValueError("inferred values must be submitted as proposals")
         if preference.scope == PreferenceScope.PROJECT and not preference.project_id:
             raise ValueError("project preferences require project_id")
+        if preference.scope != PreferenceScope.PROJECT and preference.project_id:
+            raise ValueError("project_id is only valid for project preferences")
+        if preference.scope == PreferenceScope.CONVERSATION:
+            raise ValueError("conversation preferences must be supplied at request time")
+        if preference.version < 1:
+            raise ValueError("preference version must be positive")
         with self._connect() as db:
             db.execute(
                 "INSERT OR REPLACE INTO preferences VALUES(?,?,?,?,?,?,?,?)",
@@ -113,6 +121,10 @@ class PreferenceStore:
             raise ValueError("sensitive preferences cannot be inferred")
         if scope == PreferenceScope.GLOBAL:
             raise ValueError("inferred project or conversation style cannot become global")
+        if scope == PreferenceScope.PROJECT and not project_id:
+            raise ValueError("project proposals require project_id")
+        if scope != PreferenceScope.PROJECT and project_id:
+            raise ValueError("project_id is only valid for project proposals")
         with self._connect() as db:
             cursor = db.execute(
                 "INSERT INTO preference_proposals(category,value_json,scope,project_id,sensitive) VALUES(?,?,?,?,0)",
@@ -121,12 +133,16 @@ class PreferenceStore:
             return int(cursor.lastrowid)
 
     def approve(self, proposal_id: int, *, version: int = 1) -> None:
+        if version < 1:
+            raise ValueError("preference version must be positive")
         with self._connect() as db:
             row = db.execute(
                 "SELECT * FROM preference_proposals WHERE id=? AND status='pending'", (proposal_id,)
             ).fetchone()
             if row is None:
                 raise KeyError(proposal_id)
+            if row["scope"] == PreferenceScope.CONVERSATION:
+                raise ValueError("conversation proposals cannot be persisted")
             db.execute(
                 "INSERT OR REPLACE INTO preferences VALUES(?,?,?,?,?,?,?,NULL)",
                 (
@@ -142,6 +158,37 @@ class PreferenceStore:
             db.execute(
                 "UPDATE preference_proposals SET status='approved' WHERE id=?", (proposal_id,)
             )
+
+    def proposals(self, *, status: str = "pending") -> list[Proposal]:
+        """Return inspectable proposals without making them effective."""
+        if status not in {"pending", "approved", "rejected"}:
+            raise ValueError("invalid proposal status")
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM preference_proposals WHERE status=? ORDER BY id", (status,)
+            ).fetchall()
+        return [
+            Proposal(
+                proposal_id=row["id"],
+                category=row["category"],
+                value=json.loads(row["value_json"]),
+                scope=PreferenceScope(row["scope"]),
+                sensitive=bool(row["sensitive"]),
+                project_id=row["project_id"] or None,
+                status=row["status"],
+            )
+            for row in rows
+        ]
+
+    def reject(self, proposal_id: int) -> None:
+        """Reject a pending proposal; approved proposals cannot be rewritten."""
+        with self._connect() as db:
+            cursor = db.execute(
+                "UPDATE preference_proposals SET status='rejected' WHERE id=? AND status='pending'",
+                (proposal_id,),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError(proposal_id)
 
     def effective(
         self,

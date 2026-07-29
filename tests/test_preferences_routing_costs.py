@@ -49,6 +49,32 @@ class PreferenceTests(unittest.TestCase):
                 "health", True, scope=PreferenceScope.PROJECT, project_id="a", sensitive=True
             )
 
+    def test_proposals_are_inspectable_and_require_an_explicit_decision(self):
+        proposal_id = self.store.propose(
+            "tone", "concise", scope=PreferenceScope.PROJECT, project_id="a"
+        )
+        proposal = self.store.proposals()[0]
+        self.assertEqual(proposal.proposal_id, proposal_id)
+        self.assertEqual(proposal.project_id, "a")
+        self.assertIsNone(self.store.effective("tone", project_id="a"))
+
+        self.store.approve(proposal_id, version=2)
+        self.assertEqual(self.store.effective("tone", project_id="a"), "concise")
+        self.assertEqual(self.store.proposals(status="approved")[0].status, "approved")
+
+    def test_rejected_and_invalid_proposals_cannot_be_approved(self):
+        proposal_id = self.store.propose(
+            "format", "markdown", scope=PreferenceScope.PROJECT, project_id="a"
+        )
+        self.store.reject(proposal_id)
+        self.assertEqual(self.store.proposals(status="rejected")[0].value, "markdown")
+        with self.assertRaises(KeyError):
+            self.store.approve(proposal_id)
+        with self.assertRaises(ValueError):
+            self.store.propose("tone", "short", scope=PreferenceScope.PROJECT)
+        with self.assertRaises(ValueError):
+            self.store.approve(999, version=0)
+
 
 class RoutingTests(unittest.TestCase):
     def test_deterministic_route_and_private_refusal(self):
