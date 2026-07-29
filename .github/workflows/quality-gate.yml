@@ -60,6 +60,7 @@ jobs:
         run: python -m ruff check .
 
       - name: Audit governed documents (advisory)
+        continue-on-error: true
         run: python scripts/audit_document_library.py
 
       - name: Check changed Python formatting
