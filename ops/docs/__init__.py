@@ -16,6 +16,7 @@ from .service import (
     resolve_export_artifact,
     revise_document,
     revise_presentation,
+    validate_document,
 )
 
 __all__ = [
@@ -34,4 +35,5 @@ __all__ = [
     "resolve_export_artifact",
     "revise_document",
     "revise_presentation",
+    "validate_document",
 ]
