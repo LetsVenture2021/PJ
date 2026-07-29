@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-realtime_server.py — signaling/webhook server that connects PJ to voice.
+realtime_server.py — signaling server that connects PJ to voice.
 
 Provides:
   POST /session    - browser WebRTC signaling (SDP offer in, SDP answer out)
   POST /execute-tool - executes local PJ tools for browser function calls
-  POST /webhook    - SIP webhook for inbound phone calls
+
+The legacy local-only POST /webhook SIP handler is unsupported and must not be
+exposed publicly because webhook signatures are not verified.
 """
 
 import hashlib
@@ -690,7 +692,6 @@ def health():
                 "/responses/sessions/<id>/realtime-messages",
                 "/responses/sessions/<id>/approvals/<id>",
                 "/responses/artifacts/<artifact-id>",
-                "/webhook",
                 "/health",
             ],
         },
@@ -1898,7 +1899,7 @@ def execute_tool():
 
 @app.route("/webhook", methods=["POST"])
 def sip_webhook():
-    """Handle OpenAI realtime.call.incoming webhook events for SIP calls."""
+    """Legacy local-only SIP handler; unsupported for public deployment."""
     req_id = _request_id()
     event = request.get_json(force=True, silent=True) or {}
     event_type = event.get("type")

@@ -403,6 +403,13 @@ Access identity. Full local tools and Full Power routes also require a reachable
 private runtime and matching bridge token; without it the Worker remains useful
 only for its direct Realtime path and reports degraded capability in `/health`.
 
+`POST /webhook` is **not a supported or deployed API**. A legacy local-only
+Flask handler remains for reference, but it does not verify OpenAI webhook
+signatures. The route is intentionally absent from the Wrangler manifest and
+must not be exposed publicly. Supporting inbound SIP would require a dedicated
+public ingress with signature verification and an OpenAI SIP provisioning
+workflow.
+
 ### Browser frontend
 
 The repository contains the static client (`webrtc_client.html` and `assets/`)
@@ -432,9 +439,10 @@ there is no repository-backed production frontend deployment command to run.
   Full Power Voice delegates advanced work to the text Responses runtime.
 - The Worker cannot execute local tools by itself. Its bridge URLs and token
   must target a separately operated private runtime.
-- SIP webhook handling exists at `POST /webhook`, but the Wrangler manifest
-  does not route or deploy that endpoint and the repository contains no SIP
-  provisioning artifact.
+- Inbound SIP is unsupported. The legacy local-only `POST /webhook` handler is
+  intentionally excluded from the Worker deployment because it lacks webhook
+  signature verification; the repository also contains no SIP provisioning
+  artifact.
 - Several entries in the checked-in MCP configuration are enabled while their
   authorization values remain placeholders; those integrations are not ready
   until valid environment-backed headers are configured.
