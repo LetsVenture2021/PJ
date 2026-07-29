@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pj.local/contracts/extensions/manifest-v1.schema.json",
+  "title": "PJ signed extension manifest", "type": "object", "additionalProperties": false,
+  "required": ["schema_version", "identifier", "publisher", "version", "minimum_pj_protocol", "entry_points", "tools", "permissions", "network_domains", "filesystem_scope", "secrets", "costs", "approval_modes", "data_retention", "files"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "identifier": {"type": "string", "pattern": "^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)+$", "maxLength": 128},
+    "publisher": {"type": "string", "pattern": "^[a-z0-9][a-z0-9.-]{1,127}$"},
+    "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"},
+    "minimum_pj_protocol": {"type": "integer", "minimum": 1},
+    "entry_points": {"type": "object", "minProperties": 1, "additionalProperties": {"type": "string", "pattern": "^[^/].*\\.json$"}},
+    "tools": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/tool"}},
+    "permissions": {"type": "array", "uniqueItems": true, "items": {"enum": ["local_read", "approval_action", "connector", "artifact_write", "event_subscribe", "execute_code"]}},
+    "network_domains": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^(?:[a-z0-9-]+\\.)+[a-z]{2,}$"}},
+    "filesystem_scope": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^(?:artifacts|workspace)(?:/[^.][^/]*)*$"}},
+    "secrets": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"}},
+    "costs": {"type": "object", "additionalProperties": false, "required": ["model", "maximum_usd_per_call"], "properties": {"model": {"enum": ["free", "metered"]}, "maximum_usd_per_call": {"type": "number", "minimum": 0}}},
+    "approval_modes": {"type": "array", "uniqueItems": true, "items": {"enum": ["none", "per_call", "per_session", "install"]}},
+    "data_retention": {"type": "object", "additionalProperties": false, "required": ["mode", "maximum_days"], "properties": {"mode": {"enum": ["none", "local", "provider"]}, "maximum_days": {"type": "integer", "minimum": 0}}},
+    "files": {"type": "object", "minProperties": 1, "propertyNames": {"pattern": "^[^/](?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\]*$"}, "additionalProperties": {"type": "string", "pattern": "^[a-f0-9]{64}$"}},
+    "code": {"type": "boolean", "default": false}, "dependencies": {"type": "object", "additionalProperties": {"type": "string"}},
+    "ui": {"$ref": "ui-metadata-v1.schema.json"}
+  },
+  "$defs": {"tool": {"type": "object", "additionalProperties": false, "required": ["name", "contract", "approval"], "properties": {"name": {"type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$"}, "contract": {"enum": ["local-readonly-v1", "approval-action-v1", "connector-transport-v1", "workflow-template-v1", "artifact-renderer-v1", "artifact-validator-v1", "event-source-v1"]}, "approval": {"enum": ["none", "required"]}}}}
+}
