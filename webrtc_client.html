@@ -504,6 +504,20 @@
       <button id="refreshCapabilitiesBtn" class="muted-btn full-width-btn">Refresh Capabilities</button>
       <div id="capabilityStatus" class="note">Capability mode: checking...</div>
       <div id="toolSummary" class="note">Tool catalog not loaded yet.</div>
+      <details id="memoryPanel" class="structured-output">
+        <summary>Memory controls</summary>
+        <div class="button-row">
+          <button id="memoryRefreshBtn" class="muted-btn" type="button">Review proposals</button>
+          <button id="memoryExportBtn" class="muted-btn" type="button">Export</button>
+        </div>
+        <label><input id="memoryEnabled" type="checkbox" checked> Durable memory enabled</label>
+        <div class="field">
+          <label for="memoryDisabledCategories">Disabled categories (comma separated)</label>
+          <input id="memoryDisabledCategories" type="text" placeholder="location, employer">
+        </div>
+        <button id="memorySettingsBtn" class="muted-btn full-width-btn" type="button">Save memory settings</button>
+        <div id="memoryItems" class="note">Open review to load pending proposals.</div>
+      </details>
     </aside>
 
     <main class="card chat">
@@ -2839,6 +2853,52 @@
     setPhase(PHASE.IDLE, "Idle");
     appendBubble("system", "Ready. Click Start Session to connect to PJ.");
     refreshCurrentCapabilities({ forceRefresh: false });
+    const memoryItems = document.getElementById("memoryItems");
+    async function memoryRequest(path, options = {}) {
+      const base = document.getElementById("apiBase").value.replace(/\/$/, "");
+      const response = await fetch(base + path, {
+        credentials: "include",
+        headers: {"Content-Type": "application/json"},
+        ...options,
+      });
+      if (!response.ok) throw new Error(`Memory request failed (${response.status})`);
+      return response.json();
+    }
+    async function reviewMemories() {
+      try {
+        const data = await memoryRequest("/memories?status=proposed");
+        memoryItems.replaceChildren();
+        if (!data.memories.length) memoryItems.textContent = "No pending proposals.";
+        for (const memory of data.memories) {
+          const row = document.createElement("div");
+          const input = document.createElement("input");
+          input.value = memory.content;
+          input.setAttribute("aria-label", "Edit memory before accepting");
+          const accept = document.createElement("button");
+          accept.textContent = "Accept";
+          accept.onclick = async () => { await memoryRequest(`/memories/${memory.id}/accept`, {method: "POST", body: JSON.stringify({content: input.value})}); await reviewMemories(); };
+          const reject = document.createElement("button");
+          reject.textContent = "Reject / forget";
+          reject.onclick = async () => { await memoryRequest(`/memories/${memory.id}/reject`, {method: "POST", body: "{}"}); await reviewMemories(); };
+          row.append(input, accept, reject);
+          memoryItems.append(row);
+        }
+      } catch (error) { memoryItems.textContent = error.message; }
+    }
+    document.getElementById("memoryRefreshBtn").onclick = reviewMemories;
+    document.getElementById("memoryExportBtn").onclick = async () => {
+      const data = await memoryRequest("/memories/export");
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], {type: "application/json"}));
+      link.download = "pj-memory-export.json";
+      link.click();
+      URL.revokeObjectURL(link.href);
+    };
+    document.getElementById("memorySettingsBtn").onclick = async () => {
+      const categories = document.getElementById("memoryDisabledCategories").value.split(",").map(value => value.trim()).filter(Boolean);
+      await memoryRequest("/memories/settings", {method: "POST", body: JSON.stringify({enabled: document.getElementById("memoryEnabled").checked, disabled_categories: categories})});
+      memoryItems.textContent = "Memory settings saved.";
+    };
   </script>
 </body>
 </html>

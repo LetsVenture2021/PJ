@@ -49,6 +49,7 @@ import promptops
 import skills
 from ops.docs import formats as upload_formats
 from ops.docs import uploads as document_uploads
+from ops.memory import MemoryService
 from pj_contract import CONTRACT_VERSION, PROTOCOL_VERSION
 from ops.shared.logging import (
     bind_log_context,
@@ -142,7 +143,90 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Strict",
 )
 app.config.setdefault("UPLOAD_SCANNER", None)
+app.config.setdefault("MEMORY_SERVICE", MemoryService(BASE_DIR / "pj_data.sqlite3"))
 CORS(app)  # allow local browser origins when running on localhost
+
+
+def _memory_service():
+    return app.config["MEMORY_SERVICE"]
+
+
+@app.route("/memories", methods=["GET"])
+def list_memories():
+    denied = _check_bridge_auth(_request_id(), required=True)
+    if denied:
+        return denied
+    return {
+        "memories": _memory_service().store.list(
+            status=request.args.get("status"), project_scope=request.args.get("project_scope")
+        )
+    }
+
+
+@app.route("/memories/<memory_id>/<action>", methods=["POST"])
+def memory_action(memory_id, action):
+    denied = _check_bridge_auth(_request_id(), required=True)
+    if denied:
+        return denied
+    body = request.get_json(silent=True) or {}
+    service = _memory_service()
+    try:
+        if action == "accept":
+            result = service.accept(memory_id, edited_content=body.get("content"))
+        elif action == "reject":
+            result = service.reject(memory_id)
+        elif action == "pin":
+            result = service.pin(memory_id, body.get("pinned", True))
+        elif action == "expire":
+            result = service.expire(memory_id, body.get("expires_at"))
+        elif action == "forget":
+            result = {"deleted": service.forget(memory_id)}
+        elif action == "correct":
+            result = service.correct(memory_id, body.get("content", ""))
+        else:
+            return {"error": "unknown memory action"}, 404
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+    return {"memory": result}
+
+
+@app.route("/memories/bulk-delete", methods=["POST"])
+def memory_bulk_delete():
+    denied = _check_bridge_auth(_request_id(), required=True)
+    if denied:
+        return denied
+    ids = (request.get_json(silent=True) or {}).get("ids", [])
+    if not isinstance(ids, list):
+        return {"error": "ids must be an array"}, 400
+    return {"deleted": _memory_service().bulk_delete(ids)}
+
+
+@app.route("/memories/export", methods=["GET"])
+def memory_export():
+    denied = _check_bridge_auth(_request_id(), required=True)
+    if denied:
+        return denied
+    return _memory_service().export()
+
+
+@app.route("/memories/settings", methods=["POST"])
+def memory_settings():
+    denied = _check_bridge_auth(_request_id(), required=True)
+    if denied:
+        return denied
+    body = request.get_json(silent=True) or {}
+    if set(body) - {"enabled", "disabled_categories"}:
+        return {"error": "unknown setting"}, 400
+    if "enabled" in body and not isinstance(body["enabled"], bool):
+        return {"error": "enabled must be boolean"}, 400
+    if "disabled_categories" in body and (
+        not isinstance(body["disabled_categories"], list)
+        or not all(isinstance(x, str) for x in body["disabled_categories"])
+    ):
+        return {"error": "disabled_categories must be an array of strings"}, 400
+    for key, value in body.items():
+        _memory_service().store.set_setting(key, value)
+    return {"updated": sorted(body)}
 
 
 @app.before_request
