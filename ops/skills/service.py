@@ -43,6 +43,7 @@ import requests
 from ops.shared.providers import RequestsHttpProvider
 from ops.shared.retry import RetryPolicy, get_with_retry
 from runtime_config import load_runtime_config
+from .website_learning import WEBSITE_LEARNING_SCHEMA, learn_from_website
 
 _ROOT = Path(__file__).resolve().parents[2]
 _DB_PATH = _ROOT / "pj_data.sqlite3"
@@ -102,7 +103,7 @@ RESERVED_NAMES = {
     "search_decisions", "log_risk", "fetch_url", "check_website",
     "daily_brief", "create_goal_contract", "update_goal_contract",
     "list_goal_contracts", "build_evidence_bundle", "timeline_replay",
-    "weekly_operating_review",
+    "weekly_operating_review", "learn_from_website",
 }
 
 # Lifecycle policy (governed thresholds, tunable in one place).
@@ -4922,6 +4923,8 @@ SKILLOPS_SCHEMAS = [
          "reason": {"type": "string"}}, "required": ["name"]}},
 ]
 
+SKILLOPS_SCHEMAS.append(WEBSITE_LEARNING_SCHEMA)
+
 SKILLOPS_DISPATCH = {
     "observe_pattern": observe_pattern,
     "list_observations": list_observations,
@@ -4935,4 +4938,5 @@ SKILLOPS_DISPATCH = {
     "list_n8n_capabilities": list_n8n_capabilities,
     "get_n8n_corpus_status": get_n8n_corpus_status,
     "deprecate_skill": deprecate_skill,
+    "learn_from_website": learn_from_website,
 }
