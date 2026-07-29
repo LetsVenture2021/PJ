@@ -16,6 +16,7 @@ from .service import (
     resolve_export_artifact,
     revise_document,
     revise_presentation,
+    validate_document,
 )
 from .quality import (
     calculate_scorecard,
@@ -42,6 +43,7 @@ __all__ = [
     "resolve_export_artifact",
     "revise_document",
     "revise_presentation",
+    "validate_document",
     "calculate_scorecard",
     "generate_monthly_scorecard",
     "record_control_calibration",

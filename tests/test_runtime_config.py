@@ -3,10 +3,19 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from runtime_config import ConfigError, load_runtime_config
+from runtime_config import ConfigError, load_mcp_config, load_runtime_config
 
 
 class TestRuntimeConfig(unittest.TestCase):
+    def test_mcp_url_can_be_supplied_by_environment_reference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "mcp.json"
+            path.write_text(json.dumps([{"label": "tenant", "url": "${TENANT_MCP_URL}"}]))
+
+            servers = load_mcp_config(path, environ={})
+
+        self.assertEqual(servers[0]["url"], "${TENANT_MCP_URL}")
+
     def _project(self, root: Path) -> None:
         (root / "instructions.txt").write_text("Project instructions")
         (root / "config.json").write_text(

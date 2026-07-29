@@ -6,6 +6,7 @@ voice, a local browser client, and an optional Cloudflare Worker edge proxy.
 
 ## Documentation
 
+- [Document quality standard](docs/document-quality-standard.md)
 - [Architecture and technology-stack assessment (July 29, 2026)](docs/architecture-stack-assessment-2026-07-29.md)
 - [Market-competitive capability gaps](docs/market-competitive-capabilities-2026-07-29.md)
   prioritizes the additional product capabilities PJ needs for parity and
@@ -196,7 +197,7 @@ Do not commit secrets. Both `.env` and runtime files (`*.sqlite3`, `state.json`,
 - `config.json`: model, instructions, vector stores, prompt refinement, and
   built-in OpenAI tool toggles.
 - `mcp_servers.json`: MCP URLs, enablement, and approval policy. Header values
-  can reference `$NAME` or `${NAME}` environment variables. The checked-in
+  and the entire URL can reference `$NAME` or `${NAME}` environment variables. The checked-in
   `******` values are placeholders, not credentials.
 - `tool_policy.json`: local tools that require explicit approval.
 - `pj_instructions.txt`: assistant instructions.
@@ -207,6 +208,26 @@ Dependabot, secret scanning, and push protection.
 
 The checked-in `config.json` contains project-specific model and vector-store
 IDs; access to those resources is not provisioned by this repository.
+
+#### Optional SaaS MCP servers
+
+The MCP catalog includes disabled templates for Microsoft Outlook, Google
+Workspace, Zillow, Zoom, Adobe, n8n, and suggested business tools (Slack,
+Microsoft 365, Atlassian, Salesforce, HubSpot, and an automation hub such as
+Zapier or Pipedream). Twenty additional templates cover Dropbox, Box, DocuSign,
+Asana, monday.com, Trello, Airtable, Linear, GitLab, Sentry, Datadog, AWS, Azure,
+Google Cloud, Shopify, QuickBooks, Xero, ServiceNow, Workday, and Figma. Most SaaS
+MCP endpoints are tenant- or provider-specific, so PJ deliberately does not
+guess an endpoint or embed OAuth credentials.
+
+To configure one, obtain its HTTPS MCP endpoint from a trusted provider or your
+self-hosted deployment, put it in the matching environment variable documented
+in `mcp_servers.json`, and then change only that entry's `enabled` field to
+`true`. Keep `require_approval` set to `always` for tools that read private data,
+send messages, modify records, start paid jobs, or trigger workflows. Limit the
+OAuth scopes and provider-side tool allowlist to the minimum needed. An absent
+URL variable leaves the server unavailable rather than sending a placeholder to
+the Responses API.
 
 ### Structured logging and redaction
 
