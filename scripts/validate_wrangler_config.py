@@ -16,11 +16,13 @@ REQUIRED_ROUTES = {
     "pj-assistant.ai/session",
     "pj-assistant.ai/token",
     "pj-assistant.ai/tool-schemas",
+    "pj-assistant.ai/upload/*",
 }
 REQUIRED_VARS = {
     "CF_ACCESS_AUD",
     "CF_ACCESS_TEAM_DOMAIN",
     "PJ_ALLOWED_ORIGINS",
+    "PJ_MAX_UPLOAD_BYTES",
     "PJ_TOOL_BRIDGE_URL",
     "PJ_TOOL_SCHEMAS_URL",
 }
@@ -63,6 +65,12 @@ def validate_manifest(manifest: dict[str, Any]) -> None:
         raise ConfigValidationError("wrangler.vars must be a TOML table")
     for key in sorted(REQUIRED_VARS):
         _require_nonempty_string(variables, key, "wrangler.vars")
+    try:
+        max_upload_bytes = int(str(variables["PJ_MAX_UPLOAD_BYTES"]))
+    except ValueError as exc:
+        raise ConfigValidationError("wrangler.vars.PJ_MAX_UPLOAD_BYTES must be an integer") from exc
+    if max_upload_bytes <= 0:
+        raise ConfigValidationError("wrangler.vars.PJ_MAX_UPLOAD_BYTES must be greater than zero")
 
     committed_secrets = sorted(SECRET_VARS.intersection(variables))
     if committed_secrets:

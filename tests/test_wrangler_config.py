@@ -13,6 +13,8 @@ from scripts.validate_wrangler_config import (
 
 
 def valid_manifest() -> dict:
+    vars_payload = {key: f"example-{key.lower()}" for key in REQUIRED_VARS}
+    vars_payload["PJ_MAX_UPLOAD_BYTES"] = "104857600"
     return {
         "name": "pj-realtime-backend",
         "main": "pj_realtime_backend_worker.js",
@@ -24,7 +26,7 @@ def valid_manifest() -> dict:
             }
             for pattern in sorted(REQUIRED_ROUTES)
         ],
-        "vars": {key: f"example-{key.lower()}" for key in REQUIRED_VARS},
+        "vars": vars_payload,
     }
 
 
@@ -59,6 +61,25 @@ class TestWranglerConfig(unittest.TestCase):
         manifest["vars"]["OPENAI_API_KEY"] = "must-not-be-committed"
 
         with self.assertRaisesRegex(ConfigValidationError, "must not contain secret keys"):
+            validate_manifest(manifest)
+
+    def test_missing_upload_route_is_rejected(self):
+        manifest = valid_manifest()
+        manifest["routes"] = [
+            route for route in manifest["routes"] if route["pattern"] != "pj-assistant.ai/upload/*"
+        ]
+
+        with self.assertRaisesRegex(ConfigValidationError, "missing: pj-assistant.ai/upload/\\*"):
+            validate_manifest(manifest)
+
+    def test_upload_limit_must_be_positive_integer(self):
+        manifest = valid_manifest()
+        manifest["vars"]["PJ_MAX_UPLOAD_BYTES"] = "0"
+        with self.assertRaisesRegex(ConfigValidationError, "must be greater than zero"):
+            validate_manifest(manifest)
+
+        manifest["vars"]["PJ_MAX_UPLOAD_BYTES"] = "not-a-number"
+        with self.assertRaisesRegex(ConfigValidationError, "must be an integer"):
             validate_manifest(manifest)
 
 
