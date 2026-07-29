@@ -10,6 +10,7 @@ PJ (the model) decides when to call a skill; dispatch() runs the matching
 Python function and returns the result, which is fed back into the
 conversation.
 """
+
 import json
 import os
 import sqlite3
@@ -24,8 +25,7 @@ from runtime_config import ConfigError, load_tool_policy
 
 _DB_PATH = Path(__file__).resolve().parent / "pj_data.sqlite3"
 _TOOL_POLICY_PATH = Path(
-    os.getenv("PJ_TOOL_POLICY_PATH",
-              str(Path(__file__).resolve().parent / "tool_policy.json"))
+    os.getenv("PJ_TOOL_POLICY_PATH", str(Path(__file__).resolve().parent / "tool_policy.json"))
 )
 
 
@@ -71,8 +71,7 @@ def add_task(title: str, notes: str = "", priority: str = "P2") -> dict:
             "INSERT INTO tasks (id, title, notes, priority) VALUES (?,?,?,?)",
             (task_id, title, notes, priority),
         )
-    return {"status": "logged", "task_id": task_id, "title": title,
-            "priority": priority}
+    return {"status": "logged", "task_id": task_id, "title": title, "priority": priority}
 
 
 def list_tasks(status: str = "open") -> dict:
@@ -83,26 +82,36 @@ def list_tasks(status: str = "open") -> dict:
             "WHERE status = ? OR ? = 'all' ORDER BY priority, created_at",
             (status, status),
         ).fetchall()
-    return {"count": len(rows), "tasks": [
-        {"id": r[0], "title": r[1], "notes": r[2], "priority": r[3],
-         "status": r[4], "created_at": r[5]} for r in rows]}
+    return {
+        "count": len(rows),
+        "tasks": [
+            {
+                "id": r[0],
+                "title": r[1],
+                "notes": r[2],
+                "priority": r[3],
+                "status": r[4],
+                "created_at": r[5],
+            }
+            for r in rows
+        ],
+    }
 
 
 def complete_task(task_id: str) -> dict:
     """Mark a task as done by its id."""
     with _db() as conn:
-        cur = conn.execute(
-            "UPDATE tasks SET status='done' WHERE id=?", (task_id,))
-    return {"task_id": task_id,
-            "status": "done" if cur.rowcount else "not_found"}
+        cur = conn.execute("UPDATE tasks SET status='done' WHERE id=?", (task_id,))
+    return {"task_id": task_id, "status": "done" if cur.rowcount else "not_found"}
 
 
 def save_note(topic: str, content: str) -> dict:
     """Persist a note/memory under a topic for later recall."""
     note_id = str(uuid.uuid4())[:8]
     with _db() as conn:
-        conn.execute("INSERT INTO notes (id, topic, content) VALUES (?,?,?)",
-                     (note_id, topic, content))
+        conn.execute(
+            "INSERT INTO notes (id, topic, content) VALUES (?,?,?)", (note_id, topic, content)
+        )
     return {"status": "saved", "note_id": note_id, "topic": topic}
 
 
@@ -113,19 +122,22 @@ def search_notes(query: str) -> dict:
         rows = conn.execute(
             "SELECT id, topic, content, created_at FROM notes "
             "WHERE topic LIKE ? OR content LIKE ? ORDER BY created_at DESC "
-            "LIMIT 20", (like, like)).fetchall()
-    return {"count": len(rows), "notes": [
-        {"id": r[0], "topic": r[1], "content": r[2], "created_at": r[3]}
-        for r in rows]}
+            "LIMIT 20",
+            (like, like),
+        ).fetchall()
+    return {
+        "count": len(rows),
+        "notes": [{"id": r[0], "topic": r[1], "content": r[2], "created_at": r[3]} for r in rows],
+    }
 
 
 def get_active_browser_tab() -> dict:
     """Read the URL and title of the active Google Chrome tab (macOS)."""
-    script = ('tell application "Google Chrome" to get '
-              '{URL, title} of active tab of front window')
+    script = 'tell application "Google Chrome" to get {URL, title} of active tab of front window'
     try:
-        out = subprocess.run(["osascript", "-e", script],
-                             capture_output=True, text=True, timeout=10)
+        out = subprocess.run(
+            ["osascript", "-e", script], capture_output=True, text=True, timeout=10
+        )
         if out.returncode != 0:
             return {"error": out.stderr.strip() or "Chrome not available"}
         url, _, title = out.stdout.strip().partition(", ")
@@ -138,11 +150,13 @@ def run_shortcut(name: str, input_text: str = "") -> dict:
     """Run a macOS Shortcuts automation by name, optionally passing input."""
     cmd = ["shortcuts", "run", name]
     try:
-        out = subprocess.run(cmd, input=input_text, capture_output=True,
-                             text=True, timeout=120)
-        return {"shortcut": name, "exit_code": out.returncode,
-                "output": out.stdout.strip()[:2000],
-                "error": out.stderr.strip()[:500] or None}
+        out = subprocess.run(cmd, input=input_text, capture_output=True, text=True, timeout=120)
+        return {
+            "shortcut": name,
+            "exit_code": out.returncode,
+            "output": out.stdout.strip()[:2000],
+            "error": out.stderr.strip()[:500] or None,
+        }
     except Exception as exc:
         return {"error": str(exc)}
 
@@ -188,8 +202,11 @@ TOOL_SCHEMAS = [
         "parameters": {
             "type": "object",
             "properties": {
-                "status": {"type": "string", "enum": ["open", "done", "all"],
-                            "description": "Which tasks to list"},
+                "status": {
+                    "type": "string",
+                    "enum": ["open", "done", "all"],
+                    "description": "Which tasks to list",
+                },
             },
             "required": [],
         },
@@ -245,7 +262,10 @@ TOOL_SCHEMAS = [
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Exact Shortcut name"},
-                "input_text": {"type": "string", "description": "Optional input passed to the shortcut"},
+                "input_text": {
+                    "type": "string",
+                    "description": "Optional input passed to the shortcut",
+                },
             },
             "required": ["name"],
         },
@@ -328,9 +348,7 @@ def get_pj_capability_snapshot() -> dict:
     from pj_contract import CONTRACT_VERSION
     from realtime_config import realtime_tool_schemas
 
-    manifest = _responses_runtime.capability_manifest(
-        _responses_runtime.load_config()
-    )
+    manifest = _responses_runtime.capability_manifest(_responses_runtime.load_config())
     docops_inventory = _docops.docops_inventory_summary()
     coding = _skillops.list_coding_capabilities(limit=100)
     n8n = _skillops.get_n8n_corpus_status(include_census=False)
@@ -387,21 +405,23 @@ def get_pj_capability_snapshot() -> dict:
     }
 
 
-TOOL_SCHEMAS.append({
-    "type": "function",
-    "name": "get_pj_capability_snapshot",
-    "description": (
-        "Return a current, bounded, secret-safe PJ capability and corpus "
-        "inventory for evidence-grounded briefs and presentations. Use this "
-        "instead of inferring production facts from the protected homepage."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {},
-        "required": [],
-        "additionalProperties": False,
-    },
-})
+TOOL_SCHEMAS.append(
+    {
+        "type": "function",
+        "name": "get_pj_capability_snapshot",
+        "description": (
+            "Return a current, bounded, secret-safe PJ capability and corpus "
+            "inventory for evidence-grounded briefs and presentations. Use this "
+            "instead of inferring production facts from the protected homepage."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "additionalProperties": False,
+        },
+    }
+)
 DISPATCH_TABLE["get_pj_capability_snapshot"] = get_pj_capability_snapshot
 
 _gen_schemas, _gen_dispatch = _skillops.load_generated_skills()
@@ -463,9 +483,7 @@ def dispatch(name: str, arguments: dict, *, approval_granted: bool = False):
     args = dict(arguments)
     untrusted_approval = bool(args.pop("_approved", False))
     if untrusted_approval:
-        _skillops.record_invocation(
-            name, False, 0, "blocked_untrusted_approval_argument"
-        )
+        _skillops.record_invocation(name, False, 0, "blocked_untrusted_approval_argument")
         return {
             "error": (
                 "Tool approval cannot be supplied through model or HTTP "
@@ -486,8 +504,23 @@ def dispatch(name: str, arguments: dict, *, approval_granted: bool = False):
             )
         }
     start = _time.monotonic()
+    timeout_s = float(os.getenv("PJ_TOOL_TIMEOUT_SECONDS", "120"))
     try:
-        result = fn(**args)
+        # error_as_result timeout semantics: a hung tool returns a
+        # model-visible error instead of stalling the whole turn.
+        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import TimeoutError as _FutureTimeout
+
+        with ThreadPoolExecutor(max_workers=1) as _pool:
+            try:
+                result = _pool.submit(lambda: fn(**args)).result(timeout=timeout_s)
+            except _FutureTimeout:
+                result = {
+                    "error": (
+                        f"tool_timeout: '{name}' exceeded {int(timeout_s)}s "
+                        "and was abandoned; the operation may still be running."
+                    )
+                }
     except TypeError as exc:
         result = {"error": f"tool_argument_error: {exc}"}
     except ValueError as exc:
