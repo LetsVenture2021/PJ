@@ -553,7 +553,7 @@ class TestRealtimeSessionLifecycle(unittest.TestCase):
         self.assertNotIn("state.activeSessionId = null", stop)
 
         item_create = send.index('type: "conversation.item.create"')
-        response_create = send.index('type: "response.create"')
+        response_create = send.index("requestResponse()")
         self.assertLess(item_create, response_create)
 
 
