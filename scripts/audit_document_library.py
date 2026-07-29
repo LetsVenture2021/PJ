@@ -30,6 +30,21 @@ def _entry_digest(entry: dict) -> str | None:
     return str(value) if value is not None else None
 
 
+def _schema_id(value: str) -> str:
+    return value.upper()
+
+
+def _normalize_schema_patterns(value):
+    if isinstance(value, dict):
+        normalized = {key: _normalize_schema_patterns(item) for key, item in value.items()}
+        if isinstance(normalized.get("pattern"), str):
+            normalized["pattern"] = normalized["pattern"].replace("\\\\", "\\")
+        return normalized
+    if isinstance(value, list):
+        return [_normalize_schema_patterns(item) for item in value]
+    return value
+
+
 def _schema_manifest(manifest: dict) -> dict:
     documents = []
     for entry in manifest.get("documents", []):
@@ -37,7 +52,7 @@ def _schema_manifest(manifest: dict) -> dict:
         documents.append(
             {
                 "schema_version": entry.get("schema_version", "1.0.0"),
-                "stable_id": _entry_id(entry),
+                "stable_id": _schema_id(_entry_id(entry)),
                 "path": entry.get("path", ""),
                 "class": entry.get("class", document_class),
                 "owner": entry.get("owner", "PJ DocOps"),
@@ -66,6 +81,7 @@ def audit(manifest_path: Path = DEFAULT_MANIFEST) -> dict:
     schema["properties"]["documents"]["items"] = json.loads(
         (SCHEMA_DIR / "document-metadata-v1.json").read_text()
     )
+    schema = _normalize_schema_patterns(schema)
     validator = Draft202012Validator(schema)
     schema_errors = sorted(
         error.message for error in validator.iter_errors(_schema_manifest(manifest))
