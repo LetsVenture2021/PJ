@@ -809,9 +809,14 @@
           (sum, file) => sum + (file.size || 0),
           0,
         );
+        const skippedFiles = parsed.skipped || [];
         statusBubble.textContent =
           `Uploaded ${parsed.count} document${parsed.count === 1 ? "" : "s"} ` +
-          `(${formatBytes(totalBytes)}) to DocOps.`;
+          `(${formatBytes(totalBytes)}) to DocOps.` +
+          (skippedFiles.length
+            ? ` Skipped ${skippedFiles.length} file${skippedFiles.length === 1 ? "" : "s"}` +
+              ` (${skippedFiles[0].code}).`
+            : "");
       } catch (error) {
         statusBubble.textContent = shorten(String(error), 300);
       } finally {

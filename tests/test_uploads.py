@@ -136,16 +136,100 @@ class TestDocumentUploads(unittest.TestCase):
         for saved_path in saved_paths:
             self.assertTrue((docops.DOCS_DIR / saved_path).is_file())
 
-    def test_disallowed_file_type_is_rejected(self):
+    def test_shell_script_is_accepted_as_source_code(self):
         response = self._upload(
             "/upload/files",
-            [("payload.sh", b"#!/bin/sh\necho unsafe\n", "application/x-sh")],
-            ["payload.sh"],
+            [("deploy.sh", b"#!/bin/sh\necho hello\n", "application/x-sh")],
+            ["deploy.sh"],
+        )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        self.assertEqual(payload["count"], 1)
+        classification = payload["files"][0]["classification"]
+        self.assertEqual(classification["family"], "code")
+        self.assertEqual(classification["handling"], "extract")
+        preview = document_uploads.get_uploaded_document(payload["upload_id"])
+        self.assertIn("echo hello", preview["content"])
+
+    def test_executable_binary_is_rejected(self):
+        response = self._upload(
+            "/upload/files",
+            [("tool.bin", b"\x7fELF\x02\x01\x01" + b"\x00" * 64, "application/octet-stream")],
+            ["tool.bin"],
         )
 
         self.assertEqual(response.status_code, 415)
-        self.assertEqual(response.get_json()["error"]["code"], "disallowed_file_type")
+        self.assertEqual(response.get_json()["error"]["code"], "executable_content")
         self.assertEqual(self._persisted_files(), [])
+
+    def test_secret_named_file_is_skipped_in_folder_batch(self):
+        response = self._upload(
+            "/upload/folder",
+            [
+                ("notes.md", b"# Notes\n", "text/markdown"),
+                (".env", b"OPENAI_API_KEY=sk-secret\n", "application/octet-stream"),
+            ],
+            ["project/notes.md", "project/.env"],
+        )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(len(payload["skipped"]), 1)
+        self.assertEqual(payload["skipped"][0]["code"], "upload_rejected_probable_secret")
+        self.assertEqual(payload["skipped"][0]["path"], "project/.env")
+        persisted_names = {path.name for path in self._persisted_files()}
+        self.assertNotIn(".env", persisted_names)
+
+    def test_pickle_checkpoint_is_registered_without_parsing(self):
+        response = self._upload(
+            "/upload/files",
+            [("model.pt", b"\x80\x04\x95weights", "application/octet-stream")],
+            ["model.pt"],
+        )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        classification = payload["files"][0]["classification"]
+        self.assertEqual(classification["family"], "ml_pickle")
+        self.assertEqual(classification["handling"], "register_only")
+        preview = document_uploads.get_uploaded_document(payload["upload_id"])
+        self.assertIsNone(preview["content"])
+
+    def test_html_preview_is_sanitized(self):
+        response = self._upload(
+            "/upload/files",
+            [
+                (
+                    "page.html",
+                    b"<html><head><script>alert('evil')</script></head>"
+                    b"<body><h1>Title</h1><p>Body text</p></body></html>",
+                    "text/html",
+                )
+            ],
+            ["page.html"],
+        )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        preview = document_uploads.get_uploaded_document(payload["upload_id"])
+        self.assertIn("Title", preview["content"])
+        self.assertIn("Body text", preview["content"])
+        self.assertNotIn("alert", preview["content"])
+
+    def test_unknown_binary_is_registered_opaque(self):
+        response = self._upload(
+            "/upload/files",
+            [("data.xyz", b"\x00\x01\x02\x03binaryblob", "application/octet-stream")],
+            ["data.xyz"],
+        )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        classification = payload["files"][0]["classification"]
+        self.assertEqual(classification["family"], "opaque")
+        self.assertEqual(classification["handling"], "register_only")
 
     def test_disguised_binary_document_is_rejected(self):
         response = self._upload(
@@ -155,7 +239,7 @@ class TestDocumentUploads(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 415)
-        self.assertEqual(response.get_json()["error"]["code"], "invalid_document_content")
+        self.assertEqual(response.get_json()["error"]["code"], "upload_rejected_media_mismatch")
         self.assertEqual(self._persisted_files(), [])
 
     def test_binary_content_after_text_prefix_is_rejected(self):

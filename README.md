@@ -52,6 +52,13 @@ voice, a local browser client, and an optional Cloudflare Worker edge proxy.
   files and a **folder** icon uploads a directory tree via `/upload/files` and
   `/upload/folder`. Selection uploads immediately, and progress, completion,
   and errors are reported as system bubbles in the conversation.
+- Uploads accept broadly and parse narrowly (`ops/docs/formats.py`): every
+  accepted file is registered as an immutable artifact, but only an explicit
+  allowlist of text-like formats is ever parsed into sanitized Markdown
+  previews (`ops/docs/extraction.py`). ML weights are read header-only,
+  pickle-family checkpoints are never deserialized, executables and
+  credential-shaped filenames are refused, and multi-file batches skip
+  individually unacceptable files instead of failing wholesale.
 - A Cloudflare Worker proxies the same API surfaces, obtains Realtime sessions
   from OpenAI, validates Cloudflare Access identity, and bridges privileged
   tool/Responses calls to the private Flask runtime.
