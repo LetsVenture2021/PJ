@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ingest Emails"
+  short_description: "Safely normalize email exports for PJ"
+  default_prompt: "Use $ingest-emails to safely normalize this email export for ingestion."
