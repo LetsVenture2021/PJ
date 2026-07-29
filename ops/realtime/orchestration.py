@@ -128,6 +128,10 @@ def build_tools(cfg, *, mcp_servers=None, environ=None):
     tools = []
     if cfg.get("code_interpreter_enabled", True):
         tools.append({"type": "code_interpreter", "container": {"type": "auto"}})
+    # Hosted shell runs in an OpenAI-managed container, never on this host.
+    # Fail-closed: off unless explicitly enabled, and no network access.
+    if cfg.get("shell_enabled", False):
+        tools.append({"type": "shell", "environment": {"type": "container_auto"}})
     if cfg.get("web_search_enabled", True):
         tools.append({"type": "web_search"})
     if cfg.get("image_generation_enabled", True):
