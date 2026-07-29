@@ -313,6 +313,12 @@ from ops.shared import codexops as _codexops  # noqa: E402
 TOOL_SCHEMAS.extend(_codexops.CODEXOPS_SCHEMAS)
 DISPATCH_TABLE.update(_codexops.CODEXOPS_DISPATCH)
 
+# --- Container artifacts: pull hosted-shell outputs into DocOps --------------
+from ops.docs import container_artifacts as _container_artifacts  # noqa: E402
+
+TOOL_SCHEMAS.extend(_container_artifacts.CONTAINER_ARTIFACT_SCHEMAS)
+DISPATCH_TABLE.update(_container_artifacts.CONTAINER_ARTIFACT_DISPATCH)
+
 # --- ChiefOps: executive operations toolkit ----------------------------------
 # Calendar, reminders, mail drafts, relationship memory, portfolio,
 # commitments, revenue pipeline, decision journal, risk register, web
