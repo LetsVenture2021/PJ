@@ -9,6 +9,7 @@ EXPECTED_ROUTES=(
   "/tool-schemas"
   "/execute-tool"
   "/responses/*"
+  "/upload/*"
 )
 
 REQUIRED_VARS=(
@@ -17,6 +18,7 @@ REQUIRED_VARS=(
   "CF_ACCESS_AUD"
   "PJ_TOOL_BRIDGE_URL"
   "PJ_TOOL_SCHEMAS_URL"
+  "PJ_MAX_UPLOAD_BYTES"
 )
 
 REQUIRED_SECRETS=(

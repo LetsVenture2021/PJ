@@ -426,6 +426,15 @@
 
     .upload-item-status.success { color: var(--ok); }
     .upload-item-status.error { color: #fca5a5; }
+    .upload-item-status.warning { color: var(--warn); }
+    .upload-item-status.muted { color: var(--muted); }
+    .upload-retry-btn {
+      width: fit-content;
+      margin-top: 4px;
+      font-size: 11px;
+      padding: 4px 8px;
+      border-radius: 7px;
+    }
 
     .upload-progress {
       width: 100%;
@@ -680,6 +689,7 @@
       uploadItems: [],
       uploadBusy: false,
       uploadSessionId: `upload_${createRequestId().replace(/[^A-Za-z0-9_-]/g, "_")}`,
+      uploadPolls: new Map(),
     };
 
     const savedBase = localStorage.getItem(STORAGE_KEY);
@@ -712,11 +722,34 @@
         row.className = "upload-item";
         const name = document.createElement("span");
         name.className = "upload-item-name";
-        name.textContent = item.path;
+        const duplicateBadge = item.reused ? " (duplicate)" : "";
+        name.textContent = `${item.path || item.savedPath || item.name || "uploaded document"}${duplicateBadge}`;
         const status = document.createElement("span");
-        status.className = `upload-item-status ${item.resultKind || ""}`.trim();
-        status.textContent = item.status || `${formatBytes(item.file.size)} · ready`;
+        const queueState = item.queueState || item.processing?.queue_state || "";
+        const warningState = queueState === "failed" || queueState === "unavailable";
+        status.className = `upload-item-status ${item.resultKind || (warningState ? "error" : "muted")}`.trim();
+        const summary = item.summary ? ` · ${shorten(item.summary, 120)}` : "";
+        const tags = Array.isArray(item.classification) && item.classification.length
+          ? ` · ${item.classification.slice(0, 3).join(", ")}`
+          : "";
+        status.textContent = item.status
+          || `${queueState || "ready"}${summary}${tags}`;
         row.append(name, status);
+        if (Array.isArray(item.warnings) && item.warnings.length) {
+          const warning = document.createElement("span");
+          warning.className = "upload-item-status warning";
+          warning.textContent = shorten(item.warnings[0], 180);
+          row.appendChild(warning);
+        }
+        if (warningState && item.documentId && state.activeSessionId) {
+          const retryBtn = document.createElement("button");
+          retryBtn.type = "button";
+          retryBtn.className = "muted-btn upload-retry-btn";
+          retryBtn.textContent = "Retry processing";
+          retryBtn.disabled = state.uploadBusy;
+          retryBtn.addEventListener("click", () => retryUploadProcessing(item.documentId));
+          row.appendChild(retryBtn);
+        }
         el.uploadList.appendChild(row);
       }
       const count = state.uploadItems.length;
@@ -730,7 +763,7 @@
 
     function selectUploadItems(fileList, mode) {
       state.uploadMode = mode;
-      state.uploadItems = Array.from(fileList).map((file) => ({
+      state.uploadItems = Array.from(fileList).slice(0, 200).map((file) => ({
         file,
         path: mode === "folder" ? file.webkitRelativePath : file.name,
         status: "",
@@ -742,6 +775,132 @@
 
     function uploadSessionId() {
       return state.activeSessionId || state.fullPowerSessionId || state.uploadSessionId;
+    }
+
+    function clearUploadPolls() {
+      for (const timer of state.uploadPolls.values()) {
+        clearTimeout(timer);
+      }
+      state.uploadPolls.clear();
+    }
+
+    function scheduleUploadPoll(sessionId, documentId, attempt = 0) {
+      const key = `${sessionId}:${documentId}`;
+      const previous = state.uploadPolls.get(key);
+      if (previous) clearTimeout(previous);
+      const delay = Math.min(15000, 1200 * Math.max(1, attempt + 1));
+      const timer = setTimeout(async () => {
+        try {
+          const payload = await fetchJson(
+            `${apiBase()}/responses/sessions/${encodeURIComponent(sessionId)}/uploads/documents/${encodeURIComponent(documentId)}/status`,
+            { headers: requestHeaders(createRequestId()) },
+            12000,
+          );
+          const doc = payload.document || {};
+          const item = state.uploadItems.find((candidate) => candidate.documentId === documentId);
+          if (item) {
+            item.queueState = doc.processing?.queue_state || "queued";
+            item.status = `${item.queueState}`;
+            item.summary = doc.summary || "";
+            item.classification = doc.classification || [];
+            item.warnings = doc.warnings || [];
+            item.previewAvailable = Boolean(doc.preview_available);
+            item.reused = Boolean(doc.reused);
+            item.resultKind = item.queueState === "failed" ? "error" : "success";
+          }
+          renderUploadItems();
+          if (!["failed", "unavailable", "complete"].includes(doc.processing?.queue_state || "")) {
+            scheduleUploadPoll(sessionId, documentId, attempt + 1);
+            return;
+          }
+        } catch (_) {
+          scheduleUploadPoll(sessionId, documentId, attempt + 1);
+          return;
+        }
+        state.uploadPolls.delete(key);
+      }, delay);
+      state.uploadPolls.set(key, timer);
+    }
+
+    async function retryUploadProcessing(documentId) {
+      if (!state.activeSessionId || !documentId) return;
+      try {
+        const payload = await fetchJson(
+          `${apiBase()}/responses/sessions/${encodeURIComponent(state.activeSessionId)}/uploads/documents/${encodeURIComponent(documentId)}/retry`,
+          {
+            method: "POST",
+            headers: requestHeaders(createRequestId(), "application/json"),
+            body: JSON.stringify(protocolMessage({})),
+          },
+        );
+        const item = state.uploadItems.find((candidate) => candidate.documentId === documentId);
+        if (item) {
+          item.queueState = payload.queue_state || "queued";
+          item.status = `${item.queueState}`;
+          item.resultKind = "muted";
+        }
+        renderUploadItems();
+        scheduleUploadPoll(state.activeSessionId, documentId, 0);
+      } catch (error) {
+        appendBubble("system", `Retry failed: ${shorten(String(error), 220)}`);
+      }
+    }
+
+    async function syncLinkedUploadsForSession(sessionId) {
+      if (!sessionId || !apiBase()) return;
+      try {
+        const payload = await fetchJson(
+          `${apiBase()}/responses/sessions/${encodeURIComponent(sessionId)}/uploads?limit=100`,
+          { headers: requestHeaders(createRequestId()) },
+          12000,
+        );
+        clearUploadPolls();
+        state.uploadItems = (payload.documents || []).slice(0, 200).map((doc) => ({
+          file: null,
+          path: doc.saved_path,
+          savedPath: doc.saved_path,
+          name: doc.name,
+          documentId: doc.document_id,
+          queueState: doc.processing?.queue_state || "queued",
+          status: `${doc.processing?.queue_state || "queued"}`,
+          resultKind: doc.processing?.queue_state === "failed" ? "error" : "success",
+          reused: Boolean(doc.reused),
+          summary: doc.summary || "",
+          classification: doc.classification || [],
+          warnings: doc.warnings || [],
+          previewAvailable: Boolean(doc.preview_available),
+        }));
+        renderUploadItems();
+        for (const item of state.uploadItems) {
+          if (
+            item.documentId
+            && !["failed", "unavailable", "complete"].includes(item.queueState)
+          ) {
+            scheduleUploadPoll(sessionId, item.documentId, 0);
+          }
+        }
+      } catch (_) {
+        // Keep current upload list when sync is unavailable.
+      }
+    }
+
+    async function linkAnonymousUploadsIfNeeded(sessionId) {
+      if (!sessionId || !state.uploadSessionId || !state.uploadSessionId.startsWith("upload_")) return;
+      if (sessionId === state.uploadSessionId) return;
+      try {
+        await fetchJson(
+          `${apiBase()}/responses/sessions/${encodeURIComponent(sessionId)}/uploads/link`,
+          {
+            method: "POST",
+            headers: requestHeaders(createRequestId(), "application/json"),
+            body: JSON.stringify(protocolMessage({ source_session_id: state.uploadSessionId })),
+          },
+          12000,
+        );
+        state.uploadSessionId = sessionId;
+      } catch (_) {
+        // Linking is best effort and can be retried on next session sync.
+      }
     }
 
     async function uploadSelectedDocuments() {
@@ -812,12 +971,29 @@
           const result = (parsed.files || []).find(
             (file) => file.saved_path === `${prefix}${item.path}`,
           );
-          item.status = result
-            ? `Uploaded · ${formatBytes(result.size)} · ${result.saved_path}`
-            : "Uploaded";
+          if (!result) continue;
+          item.documentId = result.document_id;
+          item.savedPath = result.saved_path;
+          item.reused = Boolean(result.reused);
+          item.queueState = result.queue_state || result.processing?.job_status || "queued";
+          item.summary = result.processing?.summary || "";
+          item.classification = result.processing?.classification || [];
+          item.warnings = result.processing?.warnings || [];
+          item.previewAvailable = Boolean(result.preview_url);
+          item.status = `Uploaded · ${item.queueState} · ${formatBytes(result.size)}`;
           item.resultKind = "success";
+          if (state.activeSessionId && item.documentId) {
+            scheduleUploadPoll(state.activeSessionId, item.documentId, 0);
+          }
         }
         el.uploadProgress.value = 100;
+        if (parsed.session_id?.startsWith("upload_")) {
+          state.uploadSessionId = parsed.session_id;
+        }
+        if (state.activeSessionId) {
+          await linkAnonymousUploadsIfNeeded(state.activeSessionId);
+          await syncLinkedUploadsForSession(state.activeSessionId);
+        }
         appendBubble(
           "system",
           `Uploaded ${parsed.count} document${parsed.count === 1 ? "" : "s"} to DocOps.`,
@@ -1326,6 +1502,8 @@
       for (const artifact of session.artifacts || []) {
         renderArtifactCard(artifact);
       }
+      await linkAnonymousUploadsIfNeeded(session.id);
+      await syncLinkedUploadsForSession(session.id);
       return session;
     }
 
@@ -1547,6 +1725,8 @@
         await refreshCapabilities(apiBase, requestId, { health, forceRefresh: false });
         const hadSession = Boolean(state.activeSessionId);
         const sessionId = await ensureActiveSession("realtime");
+        await linkAnonymousUploadsIfNeeded(sessionId);
+        await syncLinkedUploadsForSession(sessionId);
         if (hadSession) {
           await loadSharedSessionHistory(sessionId, { clear: true });
         }
@@ -1682,6 +1862,7 @@
       state.pendingCalls = {};
       state.liveAnnounced = false;
       state.activePlaybackStartSeconds = null;
+      clearUploadPolls();
       finalizeAssistantBubble();
 
       setPhase(PHASE.IDLE, "Idle");
@@ -1802,6 +1983,8 @@
           el.messages.innerHTML = "";
           resetFullPowerRenderState();
           finalizeAssistantBubble();
+          await linkAnonymousUploadsIfNeeded(state.fullPowerSessionId);
+          await syncLinkedUploadsForSession(state.fullPowerSessionId);
           setPhase(PHASE.LIVE, "Full Power live");
           appendBubble("system", "Full Power conversation started.");
           await refreshFullPowerSessions();
@@ -1830,6 +2013,7 @@
         state.fullPowerBusy = false;
         state.pendingApprovals = {};
         resetFullPowerRenderState();
+        clearUploadPolls();
         finalizeAssistantBubble();
         setPhase(PHASE.IDLE, "Full Power idle");
         el.sessionSelect.value = "";
@@ -1870,6 +2054,8 @@
           for (const artifact of session.artifacts || []) {
             renderArtifactCard(artifact);
           }
+          await linkAnonymousUploadsIfNeeded(session.id);
+          await syncLinkedUploadsForSession(session.id);
           setPhase(PHASE.LIVE, "Full Power live");
           appendBubble("system", `Resumed: ${session.title || "(untitled)"}`);
           el.sessionSelect.value = session.id;
@@ -2664,6 +2850,7 @@
     function clearTranscript() {
       el.messages.innerHTML = "";
       resetFullPowerRenderState();
+      clearUploadPolls();
       finalizeAssistantBubble();
     }
 

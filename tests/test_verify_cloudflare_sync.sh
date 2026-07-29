@@ -18,6 +18,7 @@ routes = [
   { pattern = "example.com/tool-schemas", zone_name = "example.com" },
   { pattern = "example.com/execute-tool", zone_name = "example.com" },
   { pattern = "example.com/responses/*", zone_name = "example.com" },
+  { pattern = "example.com/upload/*", zone_name = "example.com" },
 ]
 
 [vars]
@@ -26,6 +27,7 @@ CF_ACCESS_TEAM_DOMAIN = "example.cloudflareaccess.com"
 CF_ACCESS_AUD = "test-audience"
 PJ_TOOL_BRIDGE_URL = "https://runtime.example.com/execute-tool"
 PJ_TOOL_SCHEMAS_URL = "https://runtime.example.com/tool-schemas"
+PJ_MAX_UPLOAD_BYTES = "104857600"
 EOF
 
 cat >"$test_dir/wrangler" <<'EOF'

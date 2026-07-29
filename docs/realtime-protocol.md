@@ -4,6 +4,20 @@ PJ's browser, realtime Flask server, and Cloudflare Worker use protocol version 
 The release-oriented `contract_version` is separate and may change without changing
 the wire format.
 
+## Session upload synchronization (layer 2)
+
+Layer 2 adds bounded upload metadata synchronization for chat sessions:
+
+- Upload creation remains `POST /upload/files` and `POST /upload/folder`.
+- Session-scoped upload introspection is exposed under
+  `/responses/sessions/<id>/uploads*`.
+- Responses include bounded metadata (`document_id`, upload path/name/type,
+  reuse flag, local processing state, summary/classification/warnings,
+  preview availability, timestamps) without injecting full extracted content
+  into default session payloads.
+- Uploads created before a durable chat session (`upload_*` session IDs) are
+  linked explicitly via `POST /responses/sessions/<id>/uploads/link`.
+
 ## Message envelope
 
 Every PJ JSON message sent by the browser includes a top-level integer `version`:

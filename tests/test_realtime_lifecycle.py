@@ -555,6 +555,12 @@ class TestRealtimeSessionLifecycle(unittest.TestCase):
         item_create = send.index('type: "conversation.item.create"')
         response_create = send.index('type: "response.create"')
         self.assertLess(item_create, response_create)
+        self.assertIn("uploadPolls: new Map()", source)
+        self.assertIn("async function linkAnonymousUploadsIfNeeded(sessionId)", source)
+        self.assertIn("async function syncLinkedUploadsForSession(sessionId)", source)
+        self.assertIn("Math.min(15000, 1200 * Math.max(1, attempt + 1))", source)
+        self.assertIn("/uploads/documents/", source)
+        self.assertIn("/uploads/link", source)
 
 
 if __name__ == "__main__":

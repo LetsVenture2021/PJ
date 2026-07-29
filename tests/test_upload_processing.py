@@ -43,15 +43,31 @@ class TestUploadProcessing(unittest.TestCase):
         document_uploads.DERIVED_DIR = self.old_derived_dir
         self.temp_dir.cleanup()
 
-    def _managed_file(self, upload_id: str, relative_path: str, payload: bytes) -> tuple[Path, str]:
-        session_id = "session-upload-123"
+    def _managed_file(
+        self,
+        upload_id: str,
+        relative_path: str,
+        payload: bytes,
+        *,
+        session_id: str = "session-upload-123",
+    ) -> tuple[Path, str]:
         path = document_uploads.UPLOADS_DIR / session_id / upload_id / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(payload)
         return path, session_id
 
-    def _register(self, upload_id: str, relative_path: str, payload: bytes, mime: str) -> dict:
-        path, session_id = self._managed_file(upload_id, relative_path, payload)
+    def _register(
+        self,
+        upload_id: str,
+        relative_path: str,
+        payload: bytes,
+        mime: str,
+        *,
+        session_id: str = "session-upload-123",
+    ) -> dict:
+        path, session_id = self._managed_file(
+            upload_id, relative_path, payload, session_id=session_id
+        )
         sha = hashlib.sha256(payload).hexdigest()
         return document_uploads.register_uploaded_documents(
             upload_id,
@@ -249,6 +265,48 @@ class TestUploadProcessing(unittest.TestCase):
         ):
             result = document_uploads.run_upload_processor_once("worker-network")
         self.assertEqual(result["completed"], 1)
+
+    def test_retry_failed_processing_job_is_idempotent(self):
+        registered = self._register(
+            "UPL-56565656565656565656565656565656",
+            "retry.txt",
+            b"retry me",
+            "text/plain",
+            session_id="upload_anon_56565656",
+        )
+        document_id = registered["documents"][0]["document_id"]
+        with document_uploads._db() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS chat_sessions (id TEXT PRIMARY KEY, title TEXT, channel TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO chat_sessions (id, title, channel) VALUES (?,?,?)",
+                ("session-real-123", "session", "web"),
+            )
+        link = document_uploads.link_upload_session_to_chat_session(
+            chat_session_id="session-real-123",
+            source_session_id=registered["documents"][0]["session_id"],
+            limit=20,
+        )
+        self.assertGreaterEqual(link["linked"], 1)
+        with document_uploads._db() as conn:
+            conn.execute(
+                "UPDATE docops_upload_jobs SET status='failed', attempts=max_attempts, last_error='fail' "
+                "WHERE document_id=?",
+                (document_id,),
+            )
+        first = document_uploads.retry_uploaded_document_processing(
+            session_id="session-real-123",
+            document_id=document_id,
+        )
+        self.assertTrue(first["retried"])
+        self.assertEqual(first["queue_state"], "queued")
+        second = document_uploads.retry_uploaded_document_processing(
+            session_id="session-real-123",
+            document_id=document_id,
+        )
+        self.assertFalse(second["retried"])
+        self.assertEqual(second["queue_state"], "queued")
 
 
 if __name__ == "__main__":

@@ -82,6 +82,8 @@ SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 ARTIFACT_ID_PATTERN = re.compile(r"^ART-[a-f0-9]{32}$")
 SCHEMA_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 ARTIFACT_ID_PATTERN = re.compile(r"^ART-[a-f0-9]{32}$")
+SESSION_UPLOADS_DEFAULT_LIMIT = 50
+SESSION_UPLOADS_SUMMARY_LIMIT = 8
 OPENAI_CLIENT_FACTORY = OpenAI
 DEFAULT_MAX_UPLOAD_FILE_BYTES = 25 * 1024 * 1024
 DEFAULT_MAX_UPLOAD_TOTAL_BYTES = 100 * 1024 * 1024
@@ -730,6 +732,10 @@ def _session_detail_with_artifacts(sid):
         artifact = docops.resolve_export_artifact(artifact_id)
         if artifact.get("status") == "ready":
             detail["artifacts"].append(artifact)
+    document_uploads.attach_session_upload_metadata(
+        [detail],
+        per_session_limit=SESSION_UPLOADS_SUMMARY_LIMIT,
+    )
     return detail
 
 
@@ -767,6 +773,15 @@ def _result_with_linked_artifacts(sid, result):
 def _execute_durable_tool(
     session, *, execution_key, approval_id, name, arguments, approval_granted
 ):
+    upload_scoped_tools = {
+        "list_uploaded_documents",
+        "search_uploaded_documents",
+        "get_uploaded_document_processing_status",
+        "retry_uploaded_document_processing",
+        "get_uploaded_document",
+    }
+    if name in upload_scoped_tools and "session_id" not in arguments:
+        arguments = {**arguments, "session_id": session["id"]}
     started_at = perf_counter()
     log_fields = {
         "approval_granted": approval_granted,
@@ -993,6 +1008,12 @@ def health():
                 "/responses/sessions/<id>/resume",
                 "/responses/sessions/<id>/turns",
                 "/responses/sessions/<id>/realtime-messages",
+                "/responses/sessions/<id>/uploads",
+                "/responses/sessions/<id>/uploads/status",
+                "/responses/sessions/<id>/uploads/link",
+                "/responses/sessions/<id>/uploads/documents/<id>/status",
+                "/responses/sessions/<id>/uploads/documents/<id>/preview",
+                "/responses/sessions/<id>/uploads/documents/<id>/retry",
                 "/responses/sessions/<id>/approvals/<id>",
                 "/responses/artifacts/<artifact-id>",
                 "/upload/files",
@@ -1142,6 +1163,10 @@ def list_responses_sessions():
     if error:
         return error
     sessions = chatlog.list_sessions(limit)
+    document_uploads.attach_session_upload_metadata(
+        sessions,
+        per_session_limit=3,
+    )
     return _json_response(
         {"ok": True, "count": len(sessions), "sessions": sessions},
         req_id=req_id,
@@ -1169,6 +1194,10 @@ def search_responses_sessions():
             detail=", ".join(extras) if extras else None,
         )
     matches = chatlog.search(query.strip(), limit)
+    document_uploads.attach_session_upload_metadata(
+        matches,
+        per_session_limit=2,
+    )
     return _json_response(
         {"ok": True, "count": len(matches), "matches": matches},
         req_id=req_id,
@@ -1385,6 +1414,22 @@ def _handle_document_upload(*, folder_mode):
         registered = document_uploads.register_uploaded_documents(
             upload_id, session_id, indexed_files
         )
+        status_urls = {
+            "session_uploads": f"/responses/sessions/{session_id}/uploads",
+            "batch_status": f"/responses/sessions/{session_id}/uploads/status",
+        }
+        for item in registered["documents"]:
+            document_id = str(item.get("document_id") or "")
+            item["status_url"] = (
+                f"/responses/sessions/{session_id}/uploads/documents/{document_id}/status"
+            )
+            item["preview_url"] = (
+                f"/responses/sessions/{session_id}/uploads/documents/{document_id}/preview"
+            )
+            item["retry_url"] = (
+                f"/responses/sessions/{session_id}/uploads/documents/{document_id}/retry"
+            )
+            item["queue_status_url"] = status_urls["batch_status"]
     except UploadValidationError as exc:
         shutil.rmtree(staging_dir, ignore_errors=True)
         shutil.rmtree(final_dir, ignore_errors=True)
@@ -1430,6 +1475,7 @@ def _handle_document_upload(*, folder_mode):
             "count": registered["count"],
             "total_size": total_size,
             "files": registered["documents"],
+            "status_urls": status_urls,
         },
         status=201,
         req_id=req_id,
@@ -1444,6 +1490,186 @@ def upload_files():
 @app.route("/upload/folder", methods=["POST"])
 def upload_folder():
     return _handle_document_upload(folder_mode=True)
+
+
+@app.route("/responses/sessions/<session_id>/uploads", methods=["GET"])
+def list_responses_session_uploads(session_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    session, error = _validated_session(session_id, req_id)
+    if error:
+        return error
+    extras = sorted(set(request.args) - {"limit", "q"})
+    if extras:
+        return _error_response(
+            "invalid_query",
+            "Unexpected query parameters.",
+            400,
+            req_id,
+            detail=", ".join(extras),
+        )
+    raw_limit = request.args.get("limit", str(SESSION_UPLOADS_DEFAULT_LIMIT))
+    query = str(request.args.get("q", "") or "")
+    try:
+        limit = int(raw_limit)
+    except ValueError:
+        limit = 0
+    if not 1 <= limit <= 100:
+        return _error_response("invalid_limit", "limit must be between 1 and 100.", 400, req_id)
+    try:
+        uploads = document_uploads.list_session_uploaded_documents(
+            session["id"],
+            query=query,
+            limit=limit,
+        )
+    except ValueError as exc:
+        return _error_response("invalid_query", str(exc), 400, req_id)
+    return _json_response({"ok": True, **uploads}, req_id=req_id)
+
+
+@app.route("/responses/sessions/<session_id>/uploads/status", methods=["GET"])
+def batch_responses_session_upload_status(session_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    session, error = _validated_session(session_id, req_id)
+    if error:
+        return error
+    limit, error = _validated_limit(req_id, default=SESSION_UPLOADS_DEFAULT_LIMIT, maximum=100)
+    if error:
+        return error
+    try:
+        payload = document_uploads.get_session_upload_batch_status(session["id"], limit=limit)
+    except ValueError as exc:
+        return _error_response("invalid_query", str(exc), 400, req_id)
+    return _json_response({"ok": True, **payload}, req_id=req_id)
+
+
+@app.route("/responses/sessions/<session_id>/uploads/link", methods=["POST"])
+def link_responses_session_uploads(session_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    session, error = _validated_session(session_id, req_id)
+    if error:
+        return error
+    payload, error = _validated_json(
+        req_id,
+        allowed={"source_session_id", "limit"},
+        required={"source_session_id"},
+    )
+    if error:
+        return error
+    source_session_id = str(payload.get("source_session_id") or "")
+    limit = payload.get("limit", 500)
+    if not isinstance(limit, int):
+        return _error_response("invalid_limit", "limit must be an integer.", 400, req_id)
+    try:
+        linked = document_uploads.link_upload_session_to_chat_session(
+            chat_session_id=session["id"],
+            source_session_id=source_session_id,
+            limit=limit,
+        )
+    except ValueError as exc:
+        return _error_response("invalid_upload_link", str(exc), 400, req_id)
+    if linked.get("error"):
+        return _error_response("invalid_upload_link", linked["error"], 400, req_id)
+    return _json_response({"ok": True, **linked}, req_id=req_id)
+
+
+@app.route(
+    "/responses/sessions/<session_id>/uploads/documents/<document_id>/status", methods=["GET"]
+)
+def get_responses_session_upload_document_status(session_id, document_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    session, error = _validated_session(session_id, req_id)
+    if error:
+        return error
+    if request.args:
+        return _error_response("invalid_query", "Unexpected query parameters.", 400, req_id)
+    try:
+        status = document_uploads.get_session_uploaded_document_status(session["id"], document_id)
+    except ValueError as exc:
+        return _error_response("invalid_document_id", str(exc), 400, req_id)
+    if status.get("error"):
+        return _error_response("upload_not_found", status["error"], 404, req_id)
+    return _json_response({"ok": True, "document": status}, req_id=req_id)
+
+
+@app.route(
+    "/responses/sessions/<session_id>/uploads/documents/<document_id>/preview", methods=["GET"]
+)
+def get_responses_session_upload_document_preview(session_id, document_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    session, error = _validated_session(session_id, req_id)
+    if error:
+        return error
+    extras = sorted(set(request.args) - {"max_chars"})
+    if extras:
+        return _error_response(
+            "invalid_query",
+            "Unexpected query parameters.",
+            400,
+            req_id,
+            detail=", ".join(extras),
+        )
+    try:
+        max_chars = int(request.args.get("max_chars", "4000"))
+    except ValueError:
+        max_chars = 0
+    if not 100 <= max_chars <= 20000:
+        return _error_response(
+            "invalid_query", "max_chars must be between 100 and 20000.", 400, req_id
+        )
+    try:
+        preview = document_uploads.get_session_uploaded_document_preview(
+            session["id"],
+            document_id,
+            max_chars=max_chars,
+        )
+    except ValueError as exc:
+        return _error_response("invalid_document_id", str(exc), 400, req_id)
+    if preview.get("error"):
+        return _error_response("upload_not_found", preview["error"], 404, req_id)
+    return _json_response({"ok": True, **preview}, req_id=req_id)
+
+
+@app.route(
+    "/responses/sessions/<session_id>/uploads/documents/<document_id>/retry", methods=["POST"]
+)
+def retry_responses_session_upload_document(session_id, document_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    session, error = _validated_session(session_id, req_id)
+    if error:
+        return error
+    payload, error = _validated_json(req_id, allowed=set(), required=set())
+    if error:
+        return error
+    if payload:
+        return _error_response("invalid_request_body", "Request body must be empty.", 400, req_id)
+    try:
+        result = document_uploads.retry_uploaded_document_processing(
+            session_id=session["id"],
+            document_id=document_id,
+        )
+    except ValueError as exc:
+        return _error_response("invalid_document_id", str(exc), 400, req_id)
+    if result.get("error"):
+        return _error_response("upload_not_found", result["error"], 404, req_id)
+    return _json_response({"ok": True, **result}, req_id=req_id)
 
 
 @app.route(
@@ -2404,6 +2630,15 @@ def execute_tool():
             400,
             req_id,
         )
+    upload_scoped_tools = {
+        "list_uploaded_documents",
+        "search_uploaded_documents",
+        "get_uploaded_document_processing_status",
+        "retry_uploaded_document_processing",
+        "get_uploaded_document",
+    }
+    if session_id and name in upload_scoped_tools and "session_id" not in arguments:
+        arguments = {**arguments, "session_id": session_id}
 
     try:
         result = dispatch_realtime_function(name, arguments)

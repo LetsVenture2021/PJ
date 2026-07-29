@@ -42,7 +42,7 @@ SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 DOCUMENT_ID_PATTERN = re.compile(r"^DOC-[a-f0-9]{32}$")
 
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 CURRENT_EXTRACTOR_VERSION = "local-v1"
 MAX_TEXT_CHARS = 120_000
 MAX_MARKDOWN_CHARS = 120_000
@@ -51,6 +51,8 @@ MAX_ERROR_CHARS = 800
 DEFAULT_JOB_MAX_ATTEMPTS = 5
 DEFAULT_JOB_RETRY_SECONDS = 60
 DEFAULT_LEASE_SECONDS = 120
+MAX_LINKED_UPLOADS_PER_SESSION = 100
+MAX_LINKED_UPLOADS_IN_SESSION_DETAIL = 8
 
 TEXT_EXTENSIONS = {
     ".txt",
@@ -220,6 +222,38 @@ def _ensure_upload_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_upload_jobs_ready "
         "ON docops_upload_jobs(status, next_attempt_at, lease_expires_at)"
     )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS docops_chat_session_upload_documents (
+            session_id TEXT NOT NULL,
+            document_id TEXT NOT NULL,
+            source_session_id TEXT NOT NULL,
+            linked_at TEXT NOT NULL,
+            PRIMARY KEY (session_id, document_id),
+            FOREIGN KEY (document_id) REFERENCES docops_upload_documents(document_id)
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_session_upload_documents_session "
+        "ON docops_chat_session_upload_documents(session_id, linked_at)"
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS docops_chat_session_upload_instances (
+            session_id TEXT NOT NULL,
+            instance_id TEXT NOT NULL,
+            document_id TEXT NOT NULL,
+            upload_id TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            source_session_id TEXT NOT NULL,
+            linked_at TEXT NOT NULL,
+            PRIMARY KEY (session_id, instance_id),
+            FOREIGN KEY (instance_id) REFERENCES docops_upload_instances(instance_id),
+            FOREIGN KEY (document_id) REFERENCES docops_upload_documents(document_id)
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chat_session_upload_instances_session "
+        "ON docops_chat_session_upload_instances(session_id, linked_at)"
+    )
 
     current = conn.execute(
         "SELECT value FROM docops_upload_meta WHERE key='schema_version'"
@@ -335,6 +369,56 @@ def _validate_registration_inputs(upload_id: str, session_id: str, files: list[d
         raise ValueError("at least one uploaded file is required")
 
 
+def _chat_session_exists_conn(conn: sqlite3.Connection, session_id: str) -> bool:
+    table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='chat_sessions'"
+    ).fetchone()
+    if table is None:
+        return False
+    return (
+        conn.execute("SELECT 1 FROM chat_sessions WHERE id=?", (session_id,)).fetchone() is not None
+    )
+
+
+def _link_upload_instances_to_chat_session_conn(
+    conn: sqlite3.Connection,
+    *,
+    target_session_id: str,
+    source_session_id: str,
+    rows: list[dict[str, Any]],
+    linked_at: str,
+) -> int:
+    linked_instances = 0
+    for item in rows:
+        conn.execute(
+            "INSERT OR IGNORE INTO docops_chat_session_upload_documents "
+            "(session_id, document_id, source_session_id, linked_at) VALUES (?,?,?,?)",
+            (
+                target_session_id,
+                item["document_id"],
+                source_session_id,
+                linked_at,
+            ),
+        )
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO docops_chat_session_upload_instances "
+            "(session_id, instance_id, document_id, upload_id, relative_path, source_session_id, linked_at) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (
+                target_session_id,
+                _instance_id(item["upload_id"], item["relative_path"]),
+                item["document_id"],
+                item["upload_id"],
+                item["relative_path"],
+                source_session_id,
+                linked_at,
+            ),
+        )
+        if cur.rowcount:
+            linked_instances += 1
+    return linked_instances
+
+
 def register_uploaded_documents(upload_id: str, session_id: str, files: list[dict]) -> dict:
     """Register persisted upload files, dedupe by SHA-256, and enqueue processing."""
     _validate_registration_inputs(upload_id, session_id, files)
@@ -376,6 +460,7 @@ def register_uploaded_documents(upload_id: str, session_id: str, files: list[dic
     registered_rows: list[dict[str, Any]] = []
     enqueue_pairs: dict[str, str] = {}
     with _db() as conn:
+        should_link_chat_session = _chat_session_exists_conn(conn, session_id)
         for row in rows:
             existing_doc = conn.execute(
                 "SELECT document_id FROM docops_upload_documents WHERE sha256=?",
@@ -452,6 +537,20 @@ def register_uploaded_documents(upload_id: str, session_id: str, files: list[dic
                 document_sha256=sha256_hex,
                 extractor_version=CURRENT_EXTRACTOR_VERSION,
             )
+        if should_link_chat_session:
+            _link_upload_instances_to_chat_session_conn(
+                conn,
+                target_session_id=session_id,
+                source_session_id=session_id,
+                rows=registered_rows,
+                linked_at=now,
+            )
+        job_rows = conn.execute(
+            "SELECT document_id, status, attempts, max_attempts, updated_at, completed_at "
+            "FROM docops_upload_jobs WHERE extractor_version=?",
+            (CURRENT_EXTRACTOR_VERSION,),
+        ).fetchall()
+        jobs_by_document = {row["document_id"]: dict(row) for row in job_rows}
 
     registered_rows.sort(key=lambda item: item["relative_path"])
     return {
@@ -468,7 +567,24 @@ def register_uploaded_documents(upload_id: str, session_id: str, files: list[dic
                 "sha256": item["sha256"],
                 "created_at": item["created_at"],
                 "document_id": item["document_id"],
+                "canonical_document_id": item["document_id"],
                 "reused": item["reused"],
+                "queue_state": (
+                    jobs_by_document.get(item["document_id"], {}).get("status") or "queued"
+                ),
+                "processing": {
+                    "job_status": jobs_by_document.get(item["document_id"], {}).get("status")
+                    or "queued",
+                    "attempts": jobs_by_document.get(item["document_id"], {}).get("attempts") or 0,
+                    "max_attempts": jobs_by_document.get(item["document_id"], {}).get(
+                        "max_attempts"
+                    )
+                    or DEFAULT_JOB_MAX_ATTEMPTS,
+                    "updated_at": jobs_by_document.get(item["document_id"], {}).get("updated_at"),
+                    "completed_at": jobs_by_document.get(item["document_id"], {}).get(
+                        "completed_at"
+                    ),
+                },
             }
             for item in registered_rows
         ],
@@ -483,7 +599,9 @@ def list_uploaded_documents(session_id: str = "", query: str = "", limit: int = 
     with _db() as conn:
         rows = conn.execute(
             "SELECT i.upload_id, i.session_id, i.relative_path, i.name, i.path, i.mime_type, "
-            "i.byte_size, i.sha256, i.created_at, i.document_id, 1 AS reused "
+            "i.byte_size, i.sha256, i.created_at, i.document_id, "
+            "(SELECT COUNT(*) FROM docops_upload_instances all_i WHERE all_i.document_id=i.document_id) > 1 "
+            "AS reused "
             "FROM docops_upload_instances i "
             "WHERE (? = '' OR i.session_id = ?) "
             "AND (i.name LIKE ? OR i.relative_path LIKE ? OR i.upload_id LIKE ?) "
@@ -493,20 +611,36 @@ def list_uploaded_documents(session_id: str = "", query: str = "", limit: int = 
     return {"count": len(rows), "documents": [_public_upload_from_row(row) for row in rows]}
 
 
-def _load_single_upload(upload_id: str, saved_path: str) -> list[sqlite3.Row]:
+def _load_single_upload(upload_id: str, saved_path: str, session_id: str = "") -> list[sqlite3.Row]:
+    if session_id:
+        _validate_session_scope(session_id)
     with _db() as conn:
+        if session_id:
+            return conn.execute(
+                "SELECT i.upload_id, i.session_id, i.relative_path, i.name, i.path, i.mime_type, "
+                "i.byte_size, i.sha256, i.created_at, i.document_id, "
+                "(SELECT COUNT(*) FROM docops_upload_instances all_i WHERE all_i.document_id=i.document_id) > 1 "
+                "AS reused "
+                "FROM docops_chat_session_upload_instances l "
+                "JOIN docops_upload_instances i ON i.instance_id=l.instance_id "
+                "WHERE l.session_id=? AND i.upload_id=? AND (? = '' OR i.relative_path=?) "
+                "ORDER BY i.relative_path",
+                (session_id, upload_id, saved_path, saved_path),
+            ).fetchall()
         return conn.execute(
             "SELECT i.upload_id, i.session_id, i.relative_path, i.name, i.path, i.mime_type, "
-            "i.byte_size, i.sha256, i.created_at, i.document_id, 1 AS reused "
+            "i.byte_size, i.sha256, i.created_at, i.document_id, "
+            "(SELECT COUNT(*) FROM docops_upload_instances all_i WHERE all_i.document_id=i.document_id) > 1 "
+            "AS reused "
             "FROM docops_upload_instances i "
             "WHERE i.upload_id=? AND (? = '' OR i.relative_path=?) ORDER BY i.relative_path",
             (upload_id, saved_path, saved_path),
         ).fetchall()
 
 
-def get_uploaded_document(upload_id: str, saved_path: str = "") -> dict:
+def get_uploaded_document(upload_id: str, saved_path: str = "", session_id: str = "") -> dict:
     """Resolve an uploaded source document and return metadata with bounded preview."""
-    rows = _load_single_upload(upload_id, saved_path)
+    rows = _load_single_upload(upload_id, saved_path, session_id=session_id)
     if not rows:
         return {"error": f"unknown uploaded document '{upload_id}'"}
     if len(rows) > 1:
@@ -562,6 +696,435 @@ def get_uploaded_document(upload_id: str, saved_path: str = "") -> dict:
             "provenance": json.loads(extraction["provenance_json"]),
         }
     return metadata
+
+
+def _validate_session_scope(session_id: str) -> None:
+    if not SESSION_ID_PATTERN.fullmatch(session_id or ""):
+        raise ValueError("invalid session_id")
+
+
+def _document_processing_snapshot_conn(
+    conn: sqlite3.Connection, document_id: str
+) -> dict[str, Any]:
+    extraction = conn.execute(
+        "SELECT extractor_version, status, tags_json, summary_text, warnings_json, provenance_json, "
+        "updated_at, created_at FROM docops_upload_extractions WHERE document_id=? "
+        "ORDER BY updated_at DESC LIMIT 1",
+        (document_id,),
+    ).fetchone()
+    job = conn.execute(
+        "SELECT job_id, status, attempts, max_attempts, last_error, next_attempt_at, "
+        "updated_at, created_at, completed_at "
+        "FROM docops_upload_jobs WHERE document_id=? AND extractor_version=? LIMIT 1",
+        (document_id, CURRENT_EXTRACTOR_VERSION),
+    ).fetchone()
+    return {
+        "queue_state": (job["status"] if job else "queued"),
+        "job": (
+            {
+                "job_id": job["job_id"],
+                "status": job["status"],
+                "attempts": int(job["attempts"]),
+                "max_attempts": int(job["max_attempts"]),
+                "last_error": job["last_error"],
+                "next_attempt_at": job["next_attempt_at"],
+                "updated_at": job["updated_at"],
+                "created_at": job["created_at"],
+                "completed_at": job["completed_at"],
+            }
+            if job
+            else None
+        ),
+        "extraction": (
+            {
+                "extractor_version": extraction["extractor_version"],
+                "status": extraction["status"],
+                "tags": json.loads(extraction["tags_json"] or "[]"),
+                "summary": extraction["summary_text"] or "",
+                "warnings": json.loads(extraction["warnings_json"] or "[]"),
+                "provenance": json.loads(extraction["provenance_json"] or "{}"),
+                "updated_at": extraction["updated_at"],
+                "created_at": extraction["created_at"],
+            }
+            if extraction
+            else None
+        ),
+    }
+
+
+def _session_upload_rows(
+    conn: sqlite3.Connection, session_id: str, *, query: str = "", limit: int = 50
+) -> list[sqlite3.Row]:
+    like = f"%{query}%"
+    return conn.execute(
+        "SELECT i.instance_id, i.document_id, i.upload_id, i.session_id AS upload_session_id, "
+        "i.relative_path, i.name, i.path, i.mime_type, i.byte_size, i.sha256, i.created_at AS upload_created_at, "
+        "l.linked_at, l.source_session_id, "
+        "(SELECT COUNT(*) FROM docops_upload_instances all_i WHERE all_i.document_id = i.document_id) > 1 AS reused "
+        "FROM docops_chat_session_upload_instances l "
+        "JOIN docops_upload_instances i ON i.instance_id = l.instance_id "
+        "WHERE l.session_id=? "
+        "AND (? = '' OR i.name LIKE ? OR i.relative_path LIKE ? OR i.upload_id LIKE ? OR i.document_id LIKE ?) "
+        "ORDER BY l.linked_at DESC, i.relative_path ASC LIMIT ?",
+        (session_id, query, like, like, like, like, limit),
+    ).fetchall()
+
+
+def list_session_uploaded_documents(
+    session_id: str, query: str = "", limit: int = 50
+) -> dict[str, Any]:
+    _validate_session_scope(session_id)
+    if not isinstance(limit, int) or not 1 <= limit <= MAX_LINKED_UPLOADS_PER_SESSION:
+        raise ValueError("limit must be an integer from 1 to 100")
+    with _db() as conn:
+        rows = _session_upload_rows(conn, session_id, query=query, limit=limit)
+        documents = []
+        for row in rows:
+            status = _document_processing_snapshot_conn(conn, row["document_id"])
+            documents.append(
+                {
+                    "session_id": session_id,
+                    "document_id": row["document_id"],
+                    "upload_id": row["upload_id"],
+                    "upload_session_id": row["upload_session_id"],
+                    "saved_path": row["relative_path"],
+                    "name": row["name"],
+                    "mime": row["mime_type"],
+                    "size": row["byte_size"],
+                    "sha256": row["sha256"],
+                    "reused": bool(row["reused"]),
+                    "linked_at": row["linked_at"],
+                    "source_session_id": row["source_session_id"],
+                    "created_at": row["upload_created_at"],
+                    "processing": status,
+                    "summary": (status["extraction"] or {}).get("summary")
+                    if status["extraction"]
+                    else "",
+                    "classification": (status["extraction"] or {}).get("tags")
+                    if status["extraction"]
+                    else [],
+                    "warnings": (status["extraction"] or {}).get("warnings")
+                    if status["extraction"]
+                    else [],
+                    "preview_available": bool(
+                        status["extraction"] and status["extraction"]["status"] == "complete"
+                    ),
+                }
+            )
+    return {"count": len(documents), "documents": documents}
+
+
+def get_session_uploaded_document_status(session_id: str, document_id: str) -> dict[str, Any]:
+    _validate_session_scope(session_id)
+    if not DOCUMENT_ID_PATTERN.fullmatch(document_id or ""):
+        raise ValueError("invalid document_id")
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT i.document_id, i.upload_id, i.relative_path, i.name, i.mime_type, i.byte_size, "
+            "i.sha256, i.created_at AS upload_created_at, l.linked_at, l.source_session_id, "
+            "(SELECT COUNT(*) FROM docops_upload_instances all_i WHERE all_i.document_id = i.document_id) > 1 AS reused "
+            "FROM docops_chat_session_upload_instances l "
+            "JOIN docops_upload_instances i ON i.instance_id = l.instance_id "
+            "WHERE l.session_id=? AND i.document_id=? "
+            "ORDER BY l.linked_at DESC LIMIT 1",
+            (session_id, document_id),
+        ).fetchone()
+        if row is None:
+            return {"error": f"document '{document_id}' is not linked to session '{session_id}'"}
+        status = _document_processing_snapshot_conn(conn, document_id)
+    return {
+        "session_id": session_id,
+        "document_id": row["document_id"],
+        "upload_id": row["upload_id"],
+        "saved_path": row["relative_path"],
+        "name": row["name"],
+        "mime": row["mime_type"],
+        "size": row["byte_size"],
+        "sha256": row["sha256"],
+        "reused": bool(row["reused"]),
+        "linked_at": row["linked_at"],
+        "source_session_id": row["source_session_id"],
+        "created_at": row["upload_created_at"],
+        "processing": status,
+        "summary": (status["extraction"] or {}).get("summary") if status["extraction"] else "",
+        "classification": (status["extraction"] or {}).get("tags") if status["extraction"] else [],
+        "warnings": (status["extraction"] or {}).get("warnings") if status["extraction"] else [],
+        "preview_available": bool(
+            status["extraction"] and status["extraction"]["status"] == "complete"
+        ),
+    }
+
+
+def get_session_uploaded_document_preview(
+    session_id: str, document_id: str, max_chars: int = 4000
+) -> dict[str, Any]:
+    _validate_session_scope(session_id)
+    if not DOCUMENT_ID_PATTERN.fullmatch(document_id or ""):
+        raise ValueError("invalid document_id")
+    if not isinstance(max_chars, int) or not 100 <= max_chars <= 20000:
+        raise ValueError("max_chars must be an integer from 100 to 20000")
+    with _db() as conn:
+        linked = conn.execute(
+            "SELECT 1 FROM docops_chat_session_upload_documents WHERE session_id=? AND document_id=?",
+            (session_id, document_id),
+        ).fetchone()
+        if linked is None:
+            return {"error": f"document '{document_id}' is not linked to session '{session_id}'"}
+        extraction = conn.execute(
+            "SELECT normalized_text, markdown_text, status, updated_at FROM docops_upload_extractions "
+            "WHERE document_id=? AND extractor_version=?",
+            (document_id, CURRENT_EXTRACTOR_VERSION),
+        ).fetchone()
+    if extraction is None:
+        return {
+            "session_id": session_id,
+            "document_id": document_id,
+            "preview_available": False,
+            "preview": "",
+            "preview_truncated": False,
+        }
+    text = extraction["normalized_text"] or extraction["markdown_text"] or ""
+    return {
+        "session_id": session_id,
+        "document_id": document_id,
+        "status": extraction["status"],
+        "updated_at": extraction["updated_at"],
+        "preview_available": extraction["status"] == "complete",
+        "preview": text[:max_chars],
+        "preview_truncated": len(text) > max_chars,
+    }
+
+
+def get_session_upload_batch_status(session_id: str, limit: int = 50) -> dict[str, Any]:
+    listing = list_session_uploaded_documents(session_id, limit=limit)
+    return {
+        "session_id": session_id,
+        "count": listing["count"],
+        "documents": [
+            {
+                "document_id": item["document_id"],
+                "upload_id": item["upload_id"],
+                "saved_path": item["saved_path"],
+                "name": item["name"],
+                "mime": item["mime"],
+                "reused": item["reused"],
+                "queue_state": item["processing"]["queue_state"],
+                "summary": item["summary"],
+                "classification": item["classification"],
+                "warnings": item["warnings"],
+                "preview_available": item["preview_available"],
+                "linked_at": item["linked_at"],
+                "created_at": item["created_at"],
+            }
+            for item in listing["documents"]
+        ],
+    }
+
+
+def retry_uploaded_document_processing(
+    *,
+    session_id: str,
+    document_id: str = "",
+    upload_id: str = "",
+    saved_path: str = "",
+) -> dict[str, Any]:
+    _validate_session_scope(session_id)
+    now = _utc_now_sql()
+    with _db() as conn:
+        if document_id:
+            if not DOCUMENT_ID_PATTERN.fullmatch(document_id):
+                raise ValueError("invalid document_id")
+            linked = conn.execute(
+                "SELECT 1 FROM docops_chat_session_upload_documents "
+                "WHERE session_id=? AND document_id=?",
+                (session_id, document_id),
+            ).fetchone()
+        else:
+            if not UPLOAD_ID_PATTERN.fullmatch(upload_id or ""):
+                raise ValueError("invalid upload_id")
+            linked = conn.execute(
+                "SELECT i.document_id FROM docops_chat_session_upload_instances l "
+                "JOIN docops_upload_instances i ON i.instance_id=l.instance_id "
+                "WHERE l.session_id=? AND i.upload_id=? AND (? = '' OR i.relative_path=?) "
+                "ORDER BY l.linked_at DESC LIMIT 1",
+                (session_id, upload_id, saved_path, saved_path),
+            ).fetchone()
+            if linked is not None:
+                document_id = linked["document_id"]
+        if linked is None:
+            return {"error": "uploaded document is not linked to this session"}
+
+        extraction = conn.execute(
+            "SELECT status FROM docops_upload_extractions WHERE document_id=? AND extractor_version=?",
+            (document_id, CURRENT_EXTRACTOR_VERSION),
+        ).fetchone()
+        job = conn.execute(
+            "SELECT job_id, status FROM docops_upload_jobs WHERE document_id=? AND extractor_version=?",
+            (document_id, CURRENT_EXTRACTOR_VERSION),
+        ).fetchone()
+        if extraction and extraction["status"] == "complete":
+            return {"document_id": document_id, "queue_state": "complete", "retried": False}
+        if job is None:
+            conn.execute(
+                "INSERT INTO docops_upload_jobs "
+                "(job_id, document_id, document_sha256, extractor_version, status, attempts, max_attempts, "
+                "next_attempt_at, created_at, updated_at, lease_owner, lease_expires_at, heartbeat_at, last_error, completed_at) "
+                "SELECT ?, d.document_id, d.sha256, ?, 'queued', 0, ?, ?, ?, ?, NULL, NULL, NULL, '', NULL "
+                "FROM docops_upload_documents d WHERE d.document_id=?",
+                (
+                    _job_id(
+                        conn.execute(
+                            "SELECT sha256 FROM docops_upload_documents WHERE document_id=?",
+                            (document_id,),
+                        ).fetchone()["sha256"],
+                        CURRENT_EXTRACTOR_VERSION,
+                    ),
+                    CURRENT_EXTRACTOR_VERSION,
+                    DEFAULT_JOB_MAX_ATTEMPTS,
+                    now,
+                    now,
+                    now,
+                    document_id,
+                ),
+            )
+            return {"document_id": document_id, "queue_state": "queued", "retried": True}
+        if job["status"] in {"queued", "running", "complete"}:
+            return {"document_id": document_id, "queue_state": job["status"], "retried": False}
+        conn.execute(
+            "UPDATE docops_upload_jobs SET status='queued', attempts=0, "
+            "next_attempt_at=?, lease_owner=NULL, lease_expires_at=NULL, heartbeat_at=NULL, "
+            "last_error='', completed_at=NULL, updated_at=? WHERE job_id=?",
+            (now, now, job["job_id"]),
+        )
+    return {"document_id": document_id, "queue_state": "queued", "retried": True}
+
+
+def link_upload_session_to_chat_session(
+    *, chat_session_id: str, source_session_id: str, limit: int = 500
+) -> dict[str, Any]:
+    _validate_session_scope(chat_session_id)
+    _validate_session_scope(source_session_id)
+    if source_session_id != chat_session_id and not source_session_id.startswith("upload_"):
+        return {
+            "error": (
+                "source_session_id must match the target chat session or be an anonymous "
+                "upload_* session."
+            )
+        }
+    if not isinstance(limit, int) or not 1 <= limit <= 1000:
+        raise ValueError("limit must be an integer from 1 to 1000")
+    linked_at = _utc_now_sql()
+    with _db() as conn:
+        if not _chat_session_exists_conn(conn, chat_session_id):
+            return {"error": f"chat session '{chat_session_id}' was not found"}
+        source_rows = conn.execute(
+            "SELECT document_id, upload_id, relative_path FROM docops_upload_instances "
+            "WHERE session_id=? ORDER BY created_at DESC LIMIT ?",
+            (source_session_id, limit),
+        ).fetchall()
+        if not source_rows:
+            return {
+                "chat_session_id": chat_session_id,
+                "source_session_id": source_session_id,
+                "matched": 0,
+                "linked": 0,
+            }
+        rows = [dict(row) for row in source_rows]
+        linked = _link_upload_instances_to_chat_session_conn(
+            conn,
+            target_session_id=chat_session_id,
+            source_session_id=source_session_id,
+            rows=rows,
+            linked_at=linked_at,
+        )
+    return {
+        "chat_session_id": chat_session_id,
+        "source_session_id": source_session_id,
+        "matched": len(source_rows),
+        "linked": linked,
+    }
+
+
+def attach_session_upload_metadata(
+    sessions: list[dict[str, Any]],
+    *,
+    per_session_limit: int = MAX_LINKED_UPLOADS_IN_SESSION_DETAIL,
+) -> list[dict[str, Any]]:
+    if not sessions:
+        return sessions
+    with _db() as conn:
+        for item in sessions:
+            session_id = str(item.get("id") or item.get("session_id") or "")
+            if not SESSION_ID_PATTERN.fullmatch(session_id):
+                item["linked_uploads"] = []
+                item["linked_upload_count"] = 0
+                continue
+            rows = _session_upload_rows(conn, session_id, query="", limit=per_session_limit)
+            linked = []
+            for row in rows:
+                status = _document_processing_snapshot_conn(conn, row["document_id"])
+                linked.append(
+                    {
+                        "document_id": row["document_id"],
+                        "upload_id": row["upload_id"],
+                        "saved_path": row["relative_path"],
+                        "name": row["name"],
+                        "mime": row["mime_type"],
+                        "reused": bool(row["reused"]),
+                        "queue_state": status["queue_state"],
+                        "summary": (
+                            status["extraction"]["summary"] if status["extraction"] else ""
+                        ),
+                        "classification": (
+                            status["extraction"]["tags"] if status["extraction"] else []
+                        ),
+                        "warnings": (
+                            status["extraction"]["warnings"] if status["extraction"] else []
+                        ),
+                        "preview_available": bool(
+                            status["extraction"] and status["extraction"]["status"] == "complete"
+                        ),
+                        "linked_at": row["linked_at"],
+                        "created_at": row["upload_created_at"],
+                    }
+                )
+            count_row = conn.execute(
+                "SELECT COUNT(*) FROM docops_chat_session_upload_instances WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            item["linked_uploads"] = linked
+            item["linked_upload_count"] = int(count_row[0]) if count_row else 0
+    return sessions
+
+
+def search_uploaded_documents(session_id: str, query: str = "", limit: int = 50) -> dict[str, Any]:
+    """Search uploaded documents linked to a chat session with bounded metadata."""
+    return list_session_uploaded_documents(session_id, query=query, limit=limit)
+
+
+def get_uploaded_document_processing_status(
+    session_id: str,
+    document_id: str = "",
+    upload_id: str = "",
+    saved_path: str = "",
+) -> dict[str, Any]:
+    """Get processing state for one linked uploaded document."""
+    if document_id:
+        return get_session_uploaded_document_status(session_id, document_id)
+    _validate_session_scope(session_id)
+    if not UPLOAD_ID_PATTERN.fullmatch(upload_id or ""):
+        raise ValueError("invalid upload_id")
+    with _db() as conn:
+        row = conn.execute(
+            "SELECT i.document_id FROM docops_chat_session_upload_instances l "
+            "JOIN docops_upload_instances i ON i.instance_id=l.instance_id "
+            "WHERE l.session_id=? AND i.upload_id=? AND (? = '' OR i.relative_path=?) "
+            "ORDER BY l.linked_at DESC LIMIT 1",
+            (session_id, upload_id, saved_path, saved_path),
+        ).fetchone()
+    if row is None:
+        return {"error": "uploaded document is not linked to this session"}
+    return get_session_uploaded_document_status(session_id, row["document_id"])
 
 
 def upload_inventory_count() -> int:
@@ -1339,6 +1902,23 @@ UPLOAD_SCHEMAS = [
     },
     {
         "type": "function",
+        "name": "search_uploaded_documents",
+        "description": (
+            "Search uploaded documents linked to a chat session, including "
+            "local processing/classification status."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+            },
+            "required": ["session_id"],
+        },
+    },
+    {
+        "type": "function",
         "name": "get_uploaded_document",
         "description": (
             "Read metadata for an uploaded source document. Text-based formats "
@@ -1348,6 +1928,7 @@ UPLOAD_SCHEMAS = [
             "type": "object",
             "properties": {
                 "upload_id": {"type": "string"},
+                "session_id": {"type": "string"},
                 "saved_path": {
                     "type": "string",
                     "description": "Specific saved path when an upload contains multiple files",
@@ -1356,9 +1937,48 @@ UPLOAD_SCHEMAS = [
             "required": ["upload_id"],
         },
     },
+    {
+        "type": "function",
+        "name": "get_uploaded_document_processing_status",
+        "description": (
+            "Inspect local processing status, summary, classification, and warnings "
+            "for a document linked to the chat session."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "document_id": {"type": "string"},
+                "upload_id": {"type": "string"},
+                "saved_path": {"type": "string"},
+            },
+            "required": ["session_id"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "retry_uploaded_document_processing",
+        "description": (
+            "Retry eligible failed local-processing jobs for an uploaded "
+            "document linked to the chat session."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "document_id": {"type": "string"},
+                "upload_id": {"type": "string"},
+                "saved_path": {"type": "string"},
+            },
+            "required": ["session_id"],
+        },
+    },
 ]
 
 UPLOAD_DISPATCH = {
     "list_uploaded_documents": list_uploaded_documents,
+    "search_uploaded_documents": search_uploaded_documents,
     "get_uploaded_document": get_uploaded_document,
+    "get_uploaded_document_processing_status": get_uploaded_document_processing_status,
+    "retry_uploaded_document_processing": retry_uploaded_document_processing,
 }

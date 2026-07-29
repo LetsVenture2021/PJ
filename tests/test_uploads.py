@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import chatlog
 import docops
 import realtime_server
 from ops.docs import uploads as document_uploads
@@ -23,7 +24,9 @@ class TestDocumentUploads(unittest.TestCase):
         }
         self.old_uploads_dir = document_uploads.UPLOADS_DIR
         self.old_derived_dir = document_uploads.DERIVED_DIR
+        self.old_chatlog_db_path = chatlog._DB_PATH
         docops._DB_PATH = root / "test.sqlite3"
+        chatlog._DB_PATH = root / "test.sqlite3"
         docops.DOCS_DIR = root / "documents"
         document_uploads.UPLOADS_DIR = docops.DOCS_DIR / "uploads"
         document_uploads.DERIVED_DIR = document_uploads.UPLOADS_DIR / ".derived"
@@ -64,19 +67,21 @@ class TestDocumentUploads(unittest.TestCase):
             setattr(docops, name, value)
         document_uploads.UPLOADS_DIR = self.old_uploads_dir
         document_uploads.DERIVED_DIR = self.old_derived_dir
+        chatlog._DB_PATH = self.old_chatlog_db_path
         self.temp_dir.cleanup()
 
-    def _upload(self, endpoint, files, paths=None):
+    def _upload(self, endpoint, files, paths=None, session_id="session-test-123"):
         data = {
-            "session_id": "session-test-123",
+            "session_id": session_id,
             "files": [(io.BytesIO(content), name, mime) for name, content, mime in files],
         }
         if paths is not None:
             data["paths"] = paths
+        headers = {**self.auth, "x-pj-session-id": session_id}
         return self.client.post(
             endpoint,
             data=data,
-            headers=self.auth,
+            headers=headers,
             content_type="multipart/form-data",
         )
 
@@ -124,6 +129,31 @@ class TestDocumentUploads(unittest.TestCase):
         self.assertEqual(first_doc["document_id"], second_doc["document_id"])
         self.assertFalse(first_doc["reused"])
         self.assertTrue(second_doc["reused"])
+        self.assertIn("status_url", first_doc)
+        self.assertIn("preview_url", first_doc)
+        self.assertIn("retry_url", first_doc)
+        self.assertEqual(first_doc["canonical_document_id"], first_doc["document_id"])
+        self.assertIn(
+            first_doc["queue_state"], {"queued", "running", "retry", "failed", "complete"}
+        )
+
+    def test_upload_response_includes_status_urls(self):
+        response = self._upload(
+            "/upload/files",
+            [("brief.md", b"# Brief\n\nUploaded source.", "text/markdown")],
+            ["brief.md"],
+        )
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        self.assertIn("status_urls", payload)
+        self.assertTrue(
+            payload["status_urls"]["session_uploads"].startswith("/responses/sessions/")
+        )
+        first = payload["files"][0]
+        self.assertIn("/status", first["status_url"])
+        self.assertIn("/preview", first["preview_url"])
+        self.assertIn("/retry", first["retry_url"])
+        self.assertEqual(first["queue_status_url"], payload["status_urls"]["batch_status"])
 
     def test_multiple_file_upload(self):
         response = self._upload(
@@ -297,6 +327,123 @@ class TestDocumentUploads(unittest.TestCase):
         audit.assert_called_once()
         self.assertEqual(audit.call_args.args[0], "upload.rejected")
         self.assertEqual(audit.call_args.kwargs["error_code"], "missing_upload_files")
+
+    def test_session_upload_linking_status_preview_and_retry(self):
+        anonymous_session = "upload_anon_12345678"
+        uploaded = self._upload(
+            "/upload/files",
+            [("draft.md", b"# Local Draft\n\nSummary body.", "text/markdown")],
+            ["draft.md"],
+            session_id=anonymous_session,
+        )
+        self.assertEqual(uploaded.status_code, 201)
+        uploaded_payload = uploaded.get_json()
+        document_id = uploaded_payload["files"][0]["document_id"]
+
+        created = self.client.post(
+            "/responses/sessions",
+            json={"title": "linked uploads", "channel": "web"},
+            headers=self.auth,
+        )
+        self.assertEqual(created.status_code, 201)
+        chat_session_id = created.get_json()["session"]["id"]
+
+        linked = self.client.post(
+            f"/responses/sessions/{chat_session_id}/uploads/link",
+            json={"source_session_id": anonymous_session},
+            headers=self.auth,
+        )
+        self.assertEqual(linked.status_code, 200)
+        self.assertGreaterEqual(linked.get_json()["linked"], 1)
+
+        uploads = self.client.get(
+            f"/responses/sessions/{chat_session_id}/uploads?limit=20",
+            headers=self.auth,
+        )
+        self.assertEqual(uploads.status_code, 200)
+        documents = uploads.get_json()["documents"]
+        self.assertEqual(len(documents), 1)
+        self.assertEqual(documents[0]["document_id"], document_id)
+
+        status = self.client.get(
+            f"/responses/sessions/{chat_session_id}/uploads/documents/{document_id}/status",
+            headers=self.auth,
+        )
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(status.get_json()["document"]["document_id"], document_id)
+        self.assertIn(
+            status.get_json()["document"]["processing"]["queue_state"],
+            {"queued", "running", "retry", "failed", "complete"},
+        )
+
+        preview = self.client.get(
+            f"/responses/sessions/{chat_session_id}/uploads/documents/{document_id}/preview?max_chars=1200",
+            headers=self.auth,
+        )
+        self.assertEqual(preview.status_code, 200)
+        self.assertIn("preview", preview.get_json())
+
+        with document_uploads._db() as conn:
+            conn.execute(
+                "UPDATE docops_upload_jobs SET status='failed', attempts=max_attempts, last_error='boom' WHERE document_id=?",
+                (document_id,),
+            )
+        retry = self.client.post(
+            f"/responses/sessions/{chat_session_id}/uploads/documents/{document_id}/retry",
+            json={},
+            headers=self.auth,
+        )
+        self.assertEqual(retry.status_code, 200)
+        self.assertTrue(retry.get_json()["retried"])
+        retry_again = self.client.post(
+            f"/responses/sessions/{chat_session_id}/uploads/documents/{document_id}/retry",
+            json={},
+            headers=self.auth,
+        )
+        self.assertEqual(retry_again.status_code, 200)
+        self.assertFalse(retry_again.get_json()["retried"])
+
+        resumed = self.client.post(
+            f"/responses/sessions/{chat_session_id}/resume",
+            json={},
+            headers=self.auth,
+        )
+        self.assertEqual(resumed.status_code, 200)
+        linked_uploads = resumed.get_json()["session"]["linked_uploads"]
+        self.assertEqual(len(linked_uploads), 1)
+        self.assertEqual(linked_uploads[0]["document_id"], document_id)
+        listed = self.client.get("/responses/sessions?limit=10", headers=self.auth)
+        self.assertEqual(listed.status_code, 200)
+        listed_sessions = listed.get_json()["sessions"]
+        matched = [item for item in listed_sessions if item["id"] == chat_session_id][0]
+        self.assertIn("linked_uploads", matched)
+        self.assertGreaterEqual(matched["linked_upload_count"], 1)
+
+        searched = self.client.get(
+            "/responses/sessions/search?q=linked&limit=10", headers=self.auth
+        )
+        self.assertEqual(searched.status_code, 200)
+        if searched.get_json()["matches"]:
+            self.assertIn("linked_uploads", searched.get_json()["matches"][0])
+
+    def test_upload_linking_rejects_cross_session_real_session_source(self):
+        source = self.client.post(
+            "/responses/sessions",
+            json={"title": "source", "channel": "web"},
+            headers=self.auth,
+        ).get_json()["session"]["id"]
+        target = self.client.post(
+            "/responses/sessions",
+            json={"title": "target", "channel": "web"},
+            headers=self.auth,
+        ).get_json()["session"]["id"]
+        rejected = self.client.post(
+            f"/responses/sessions/{target}/uploads/link",
+            json={"source_session_id": source},
+            headers=self.auth,
+        )
+        self.assertEqual(rejected.status_code, 400)
+        self.assertEqual(rejected.get_json()["error"]["code"], "invalid_upload_link")
 
 
 if __name__ == "__main__":

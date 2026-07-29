@@ -158,6 +158,30 @@ test("Full Power routes and bridge URL derivation are narrowly scoped", () => {
   assert.equal(isResponsesRoute("GET", "/responses/sessions/search"), true);
   assert.equal(isResponsesRoute("POST", "/responses/sessions/example_123/resume"), true);
   assert.equal(isResponsesRoute("POST", "/responses/sessions/example_123/turns"), true);
+  assert.equal(isResponsesRoute("GET", "/responses/sessions/example_123/uploads"), true);
+  assert.equal(isResponsesRoute("GET", "/responses/sessions/example_123/uploads/status"), true);
+  assert.equal(
+    isResponsesRoute(
+      "GET",
+      "/responses/sessions/example_123/uploads/documents/DOC-0123456789abcdef0123456789abcdef/status",
+    ),
+    true,
+  );
+  assert.equal(
+    isResponsesRoute(
+      "GET",
+      "/responses/sessions/example_123/uploads/documents/DOC-0123456789abcdef0123456789abcdef/preview",
+    ),
+    true,
+  );
+  assert.equal(
+    isResponsesRoute(
+      "POST",
+      "/responses/sessions/example_123/uploads/documents/DOC-0123456789abcdef0123456789abcdef/retry",
+    ),
+    true,
+  );
+  assert.equal(isResponsesRoute("POST", "/responses/sessions/example_123/uploads/link"), true);
   assert.equal(isResponsesRoute("GET", `/responses/artifacts/ART-${"a".repeat(32)}`), true);
   assert.equal(isResponsesRoute("GET", "/responses/sessions/example_123/artifacts"), true);
   assert.equal(
@@ -171,6 +195,10 @@ test("Full Power routes and bridge URL derivation are narrowly scoped", () => {
   );
   assert.equal(isResponsesRoute("DELETE", "/responses/sessions/example_123"), false);
   assert.equal(isResponsesRoute("POST", "/responses/arbitrary"), false);
+  assert.equal(
+    isResponsesRoute("GET", "/responses/sessions/example_123/uploads/documents/invalid/status"),
+    false,
+  );
   assert.equal(isResponsesRoute("GET", "/responses/artifacts/../../secret"), false);
   assert.equal(
     deriveResponsesBridgeBaseUrl({
@@ -257,6 +285,21 @@ test("upload proxy rejects missing or oversized content lengths", async () => {
     "request-upload-large",
   );
   assert.equal(oversized.status, 413);
+
+  const wrongRoute = await handleUploadProxy(
+    new Request("https://pj-assistant.ai/upload/status", {
+      method: "POST",
+      headers: {
+        "content-type": "multipart/form-data; boundary=boundary",
+        "content-length": "4",
+      },
+      body: "body",
+    }),
+    proxyEnv,
+    "https://pj-assistant.ai",
+    "request-upload-wrong-route",
+  );
+  assert.equal(wrongRoute.status, 404);
 });
 
 test("voice policies keep Fast Voice automatic and Full Power Voice explicit", () => {

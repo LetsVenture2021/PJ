@@ -12,6 +12,9 @@ unavailable, slow, unsafe, or returning unexpected policy decisions.
 - The private runtime (`pj-realtime-server`) owns Responses sessions, durable
   local tool execution, approvals, and local state. The Worker cannot execute
   local tools without its authenticated bridge to this runtime.
+- Layer-2 upload sync routes (`/upload/*` ingestion plus
+  `/responses/sessions/<id>/uploads*` status/link/preview/retry) are private
+  runtime responsibilities and are mirrored through the Worker with Access auth.
 - Fast Voice uses OpenAI Realtime directly. Full Power Voice delegates advanced
   work to the Responses runtime. Approval-sensitive and long-running tools are
   deliberately excluded from Realtime.

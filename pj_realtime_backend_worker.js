@@ -671,7 +671,15 @@ function isResponsesRoute(method, pathname) {
   if (
     method === "GET" &&
     (/^\/responses\/artifacts\/ART-[a-f0-9]{32}$/.test(pathname) ||
-      /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/artifacts$/.test(pathname))
+      /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/artifacts$/.test(pathname) ||
+      /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/uploads$/.test(pathname) ||
+      /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/uploads\/status$/.test(pathname) ||
+      /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/uploads\/documents\/DOC-[a-f0-9]{32}\/status$/.test(
+        pathname,
+      ) ||
+      /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/uploads\/documents\/DOC-[a-f0-9]{32}\/preview$/.test(
+        pathname,
+      ))
   ) {
     return true;
   }
@@ -680,6 +688,10 @@ function isResponsesRoute(method, pathname) {
     (/^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/resume$/.test(pathname) ||
       /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/turns$/.test(pathname) ||
       /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/realtime-messages$/.test(pathname) ||
+      /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/uploads\/link$/.test(pathname) ||
+      /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/uploads\/documents\/DOC-[a-f0-9]{32}\/retry$/.test(
+        pathname,
+      ) ||
       /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/approvals\/[A-Za-z0-9_-]{8,128}$/.test(
         pathname,
       ))
@@ -1818,6 +1830,12 @@ export default {
             "/responses/sessions/<id>/resume",
             "/responses/sessions/<id>/turns",
             "/responses/sessions/<id>/realtime-messages",
+            "/responses/sessions/<id>/uploads",
+            "/responses/sessions/<id>/uploads/status",
+            "/responses/sessions/<id>/uploads/link",
+            "/responses/sessions/<id>/uploads/documents/<id>/status",
+            "/responses/sessions/<id>/uploads/documents/<id>/preview",
+            "/responses/sessions/<id>/uploads/documents/<id>/retry",
             "/responses/sessions/<id>/artifacts",
             "/responses/sessions/<id>/approvals/<id>",
             "/responses/artifacts/<artifact-id>",
