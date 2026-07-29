@@ -56,6 +56,16 @@ _URL_IN_TEXT = re.compile(r"https?://[^\s<>'\"]+")
 _delegation_active = contextvars.ContextVar("pj_delegation_active", default=False)
 
 
+_CITATION_MARKERS = re.compile("\ue200[^\ue201]*\ue201")
+
+
+def strip_citation_markers(text):
+    """Remove raw private-use citation glyphs models sometimes emit in text."""
+    if not isinstance(text, str) or "\ue200" not in text:
+        return text
+    return _CITATION_MARKERS.sub("", text)
+
+
 def _get(value, key, default=None):
     if isinstance(value, dict):
         return value.get(key, default)
@@ -1019,6 +1029,7 @@ class ResponsesOrchestrator:
                 from ops.images.persist_generated import persist_generated_images
 
                 generated_images = persist_generated_images(final_response)
+                output_text = strip_citation_markers(output_text)
                 completion = {
                     "type": "completion",
                     "text": output_text,
@@ -1266,7 +1277,7 @@ def delegate_advanced_task(prompt, *, client=None, cfg=None):
             }
         if completion is None:
             raise RuntimeError("Delegated Responses turn did not complete")
-        detailed_text = completion["text"]
+        detailed_text = strip_citation_markers(completion["text"])
         truncated = len(detailed_text) > MAX_DELEGATION_DETAIL_LENGTH
         if truncated:
             detailed_text = detailed_text[:MAX_DELEGATION_DETAIL_LENGTH]
