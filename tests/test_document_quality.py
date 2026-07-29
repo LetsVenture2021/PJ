@@ -25,6 +25,16 @@ class DocumentQualityTests(unittest.TestCase):
             {"DOC-COMPLETE-001", "DOC-LINK-001"},
         )
 
+    def test_merge_conflict_markers_block_release_without_exposing_content(self):
+        confidential = "internal resolution details"
+        report = validate_content(
+            "# Draft\n\n## Work\n\n<<<<<<< HEAD\n"
+            f"{confidential}\n=======\nother version\n>>>>>>> topic\n"
+        )
+        self.assertEqual(report["status"], "fail")
+        self.assertIn("DOC-COMPLETE-002", {item["rule_id"] for item in report["findings"]})
+        self.assertNotIn(confidential, str(report))
+
     def test_security_finding_does_not_echo_matched_value(self):
         secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
         report = validate_content(f"# Draft\n\n## Value\n\n{secret}\n")

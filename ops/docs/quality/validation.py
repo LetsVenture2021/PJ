@@ -55,6 +55,7 @@ _SENSITIVE = (
 )
 _EMPTY_LINK = re.compile(r"\[[^\]]*\]\(\s*\)")
 _HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
+_MERGE_CONFLICT_MARKER = re.compile(r"^(?:<{7}|={7}|>{7})(?:\s.*)?$", re.MULTILINE)
 
 
 def _line_number(content: str, offset: int) -> int:
@@ -84,6 +85,16 @@ def validate_content(content: str, *, profile: str = "governed") -> dict:
         )
         if finding:
             findings.append(finding)
+
+    merge_conflict = _finding(
+        _MERGE_CONFLICT_MARKER,
+        content,
+        rule_id="DOC-COMPLETE-002",
+        severity=Severity.BLOCKER,
+        message="An unresolved merge-conflict marker is present.",
+    )
+    if merge_conflict:
+        findings.append(merge_conflict)
 
     for pattern in _SENSITIVE:
         finding = _finding(

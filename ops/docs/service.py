@@ -71,7 +71,7 @@ ARTIFACTS_DIR = EXPORTS_DIR / ".artifacts"
 ARTIFACTS_DIR.mkdir(exist_ok=True)
 
 # Markers that block finalization (unresolved facts / legal checks).
-BLOCKING_MARKERS = ["[TBD", "[VERIFY CURRENT]", "{{", "TODO:"]
+BLOCKING_MARKERS = ["[TBD", "[VERIFY CURRENT]", "{{", "TODO:", "<<<<<<<", "=======", ">>>>>>>"]
 
 REVIEW_ROLES = frozenset(
     {
