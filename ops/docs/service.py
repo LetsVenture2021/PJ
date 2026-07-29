@@ -50,6 +50,7 @@ from pathlib import Path
 import fcntl
 import presentationops
 from ops.shared.io import atomic_copy, sha256_file
+from ops.docs.quality import validate_content
 
 try:
     import markdown as _markdown
@@ -278,17 +279,41 @@ def _db():
             doc_id TEXT NOT NULL,
             version INTEGER NOT NULL,
             source_sha256 TEXT NOT NULL,
-            report_digest TEXT NOT NULL,
-            quality_profile TEXT NOT NULL,
-            template_version INTEGER NOT NULL,
-            governing_policy_version TEXT NOT NULL,
-            material_sources_digest TEXT NOT NULL,
-            valid INTEGER NOT NULL,
-            checklist_json TEXT NOT NULL,
+            report_digest TEXT NOT NULL DEFAULT '',
+            quality_profile TEXT NOT NULL DEFAULT 'standard',
+            template_version INTEGER NOT NULL DEFAULT 1,
+            governing_policy_version TEXT NOT NULL DEFAULT '1',
+            material_sources_digest TEXT NOT NULL DEFAULT '',
+            valid INTEGER NOT NULL DEFAULT 0,
+            checklist_json TEXT NOT NULL DEFAULT '[]',
             visual_preview_inspected INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            PRIMARY KEY (doc_id, version, report_digest)
+            report_sha256 TEXT NOT NULL DEFAULT '',
+            validator_version TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '',
+            report_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (doc_id, version, report_digest),
+            UNIQUE (doc_id, version, source_sha256)
         )""")
+        quality_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(docops_quality_reports)").fetchall()
+        }
+        for column, definition in (
+            ("report_digest", "TEXT NOT NULL DEFAULT ''"),
+            ("quality_profile", "TEXT NOT NULL DEFAULT 'standard'"),
+            ("template_version", "INTEGER NOT NULL DEFAULT 1"),
+            ("governing_policy_version", "TEXT NOT NULL DEFAULT '1'"),
+            ("material_sources_digest", "TEXT NOT NULL DEFAULT ''"),
+            ("valid", "INTEGER NOT NULL DEFAULT 0"),
+            ("checklist_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("visual_preview_inspected", "INTEGER NOT NULL DEFAULT 0"),
+            ("report_sha256", "TEXT NOT NULL DEFAULT ''"),
+            ("validator_version", "TEXT NOT NULL DEFAULT ''"),
+            ("status", "TEXT NOT NULL DEFAULT ''"),
+            ("report_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ):
+            if column not in quality_columns:
+                conn.execute(f"ALTER TABLE docops_quality_reports ADD COLUMN {column} {definition}")
         conn.execute("""CREATE TABLE IF NOT EXISTS docops_review_decisions (
             decision_id TEXT PRIMARY KEY,
             doc_id TEXT NOT NULL,
@@ -1596,7 +1621,11 @@ def record_quality_report(
         checklist = _quality_checklist(row[1], bool(row[5]))
         effective_valid = bool(valid) and (not row[5] or bool(visual_preview_inspected))
         conn.execute(
-            "INSERT OR REPLACE INTO docops_quality_reports VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO docops_quality_reports "
+            "(doc_id, version, source_sha256, report_digest, quality_profile, "
+            "template_version, governing_policy_version, material_sources_digest, "
+            "valid, checklist_json, visual_preview_inspected, status, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 doc_id,
                 version,
@@ -1609,6 +1638,7 @@ def record_quality_report(
                 int(effective_valid),
                 json.dumps(checklist),
                 int(bool(visual_preview_inspected)),
+                "pass" if effective_valid else "fail",
                 _now(),
             ),
         )
@@ -1788,6 +1818,34 @@ def finalize_document(doc_id: str) -> dict:
                     "file was modified outside DocOps; use revise_document to issue a new version"
                 ),
             }
+        markers = sorted({marker for marker in BLOCKING_MARKERS if marker in content})
+        if markers:
+            return {
+                "status": "blocked",
+                "unresolved_markers": markers,
+                "reason": "resolve markers via revise_document first",
+            }
+        quality = validate_content(content)
+        conn.execute(
+            "INSERT OR REPLACE INTO docops_quality_reports "
+            "(doc_id, version, source_sha256, report_sha256, validator_version, "
+            "status, report_json) VALUES (?,?,?,?,?,?,?)",
+            (
+                doc_id,
+                version,
+                sha,
+                quality["report_sha256"],
+                quality["validator_version"],
+                quality["status"],
+                json.dumps(quality, sort_keys=True),
+            ),
+        )
+        if quality["status"] != "pass":
+            return {
+                "status": "blocked",
+                "reason": "document quality gate failed",
+                "quality": quality,
+            }
         spec_row = conn.execute(
             "SELECT spec_json, spec_sha256 "
             "FROM docops_presentation_specs "
@@ -1824,13 +1882,6 @@ def finalize_document(doc_id: str) -> dict:
                 "path": path,
             }
         else:
-            markers = sorted({marker for marker in BLOCKING_MARKERS if marker in content})
-            if markers:
-                return {
-                    "status": "blocked",
-                    "unresolved_markers": markers,
-                    "reason": "resolve markers via revise_document first",
-                }
             content = content.replace("**Status:** DRAFT", "**Status:** FINAL", 1)
             p.write_text(content)
             new_sha = _hash(content)
@@ -1845,6 +1896,21 @@ def finalize_document(doc_id: str) -> dict:
                 "FROM docops_documents WHERE doc_id=? AND version=?",
                 (doc_id, version),
             ).fetchone()
+            final_quality = validate_content(content)
+            conn.execute(
+                "INSERT OR REPLACE INTO docops_quality_reports "
+                "(doc_id, version, source_sha256, report_sha256, validator_version, "
+                "status, report_json) VALUES (?,?,?,?,?,?,?)",
+                (
+                    doc_id,
+                    version,
+                    new_sha,
+                    final_quality["report_sha256"],
+                    final_quality["validator_version"],
+                    final_quality["status"],
+                    json.dumps(final_quality, sort_keys=True),
+                ),
+            )
             # For low-risk notes, the explicit finalization action is the author's
             # self-check. Higher-risk documents always require separately recorded humans.
             if governance[1] == "low" and not governance[6]:
@@ -1852,7 +1918,12 @@ def finalize_document(doc_id: str) -> dict:
                 checklist = _quality_checklist(governance[2], False)
                 decided_at = _now()
                 conn.execute(
-                    "INSERT OR REPLACE INTO docops_quality_reports VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT OR REPLACE INTO docops_quality_reports "
+                    "(doc_id, version, source_sha256, report_digest, quality_profile, "
+                    "template_version, governing_policy_version, material_sources_digest, "
+                    "valid, checklist_json, visual_preview_inspected, report_sha256, "
+                    "validator_version, status, report_json, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         doc_id,
                         version,
@@ -1865,6 +1936,10 @@ def finalize_document(doc_id: str) -> dict:
                         1,
                         json.dumps(checklist),
                         0,
+                        final_quality["report_sha256"],
+                        final_quality["validator_version"],
+                        final_quality["status"],
+                        json.dumps(final_quality, sort_keys=True),
                         decided_at,
                     ),
                 )
@@ -1899,6 +1974,43 @@ def finalize_document(doc_id: str) -> dict:
                 "path": path,
             }
     return _attach_source_artifact(result)
+
+
+def validate_document(doc_id: str, version: int = 0) -> dict:
+    """Run and retain the deterministic quality report for a governed version."""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT version, path, sha256 FROM docops_documents WHERE doc_id=? ORDER BY version",
+            (doc_id,),
+        ).fetchall()
+        if not rows:
+            return {"error": f"unknown doc_id '{doc_id}'"}
+        row = next((item for item in rows if item[0] == version), None) if version else rows[-1]
+        if row is None:
+            return {"error": f"document version {version} not found"}
+        selected_version, path, expected_sha = row
+        source = Path(path)
+        if not source.is_file():
+            return {"error": f"file missing: {path}"}
+        content = source.read_text()
+        if _hash(content) != expected_sha:
+            return {"status": "blocked", "reason": "document integrity mismatch"}
+        report = validate_content(content)
+        conn.execute(
+            "INSERT OR REPLACE INTO docops_quality_reports "
+            "(doc_id, version, source_sha256, report_sha256, validator_version, "
+            "status, report_json) VALUES (?,?,?,?,?,?,?)",
+            (
+                doc_id,
+                selected_version,
+                expected_sha,
+                report["report_sha256"],
+                report["validator_version"],
+                report["status"],
+                json.dumps(report, sort_keys=True),
+            ),
+        )
+    return {"doc_id": doc_id, "version": selected_version, **report}
 
 
 def list_documents(status: str = "all", query: str = "") -> dict:
@@ -2937,6 +3049,16 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
     with _db() as conn:
         approval = _approval_status(conn, doc_id, ver)
     is_final = status == "final" and approval["audience_ready"]
+    if status == "final":
+        from ops.docs.governance import evaluate_document
+
+        governance = evaluate_document(p)
+        if governance["status"] == "blocked":
+            return {
+                "status": "blocked",
+                "reason": "document evidence governance failed",
+                "governance": governance,
+            }
     stem = f"{doc_id}-{_slug(title)}-v{ver}" + ("" if is_final else "-DRAFT")
     if format == "md":
         try:
@@ -3153,6 +3275,16 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
 
 # ------------------------------------------------------------ tool schemas
 DOCOPS_SCHEMAS = [
+    {
+        "type": "function",
+        "name": "validate_document",
+        "description": "Run deterministic completeness, security, structure, and accessibility quality gates.",
+        "parameters": {
+            "type": "object",
+            "properties": {"doc_id": {"type": "string"}, "version": {"type": "integer"}},
+            "required": ["doc_id"],
+        },
+    },
     {
         "type": "function",
         "name": "list_doc_templates",
@@ -3502,6 +3634,7 @@ DOCOPS_DISPATCH = {
     "list_export_artifacts": list_export_artifacts,
     "list_documents": list_documents,
     "get_document": get_document,
+    "validate_document": validate_document,
 }
 
 

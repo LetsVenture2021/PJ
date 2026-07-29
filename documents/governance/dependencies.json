@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "dependencies": [
+    {"area": "runtime configuration", "path_patterns": ["runtime_config\\.py"], "documents": ["docs/architecture.md", "docs/runbook.md", "docs/security-controls.md"]},
+    {"area": "Worker routes", "path_patterns": ["pj_realtime_backend_worker\\.js", "wrangler\\.toml\\.example"], "documents": ["docs/architecture.md", "docs/realtime-protocol.md", "docs/security-controls.md"]},
+    {"area": "tool policy and schemas", "path_patterns": ["tool_policy\\.json", ".*schemas.*", "ops/.*/service\\.py"], "documents": ["docs/architecture.md", "documents/DOC-1cc579c8-pj-capability-overview-v1.md"]},
+    {"area": "provider adapters", "path_patterns": ["ops/shared/providers/.*"], "documents": ["docs/architecture.md", "docs/security-controls.md"]},
+    {"area": "upload handling", "path_patterns": ["ops/docs/(uploads|formats|extraction)\\.py", "realtime_server\\.py"], "documents": ["docs/architecture.md", "docs/security-controls.md", "docs/runbook.md"]},
+    {"area": "artifact formats", "path_patterns": ["ops/docs/service\\.py", "ops/presentations/.*"], "documents": ["docs/architecture.md", "documents/DOC-1cc579c8-pj-capability-overview-v1.md"]},
+    {"area": "public tool schemas", "path_patterns": ["pj_contract\\.py", "ops/.*/service\\.py"], "documents": ["docs/architecture.md", "documents/DOC-1cc579c8-pj-capability-overview-v1.md"]}
+  ]
+}
