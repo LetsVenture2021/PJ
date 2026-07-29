@@ -3,63 +3,69 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>PJ Web App</title>
+  <title>PJ Desktop</title>
   <style>
     :root {
-      --bg: #0b1220;
-      --panel: #111a2b;
-      --panel-2: #172338;
-      --text: #e6edf7;
-      --muted: #9fb1c9;
-      --line: #243149;
+      color-scheme: dark;
+      --bg: #07090d;
+      --panel: #101318;
+      --panel-2: #171b22;
+      --text: #f4f6f8;
+      --muted: #9098a5;
+      --line: #252a32;
       --ok: #22c55e;
       --warn: #f59e0b;
       --danger: #ef4444;
-      --brand: #3b82f6;
+      --brand: #6c5ce7;
+      --brand-soft: rgba(108, 92, 231, .16);
+      --radius: 12px;
     }
 
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; }
     body {
-      background: radial-gradient(circle at top, #15233a 0%, var(--bg) 42%);
+      background: var(--bg);
       color: var(--text);
       font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     }
 
     .app {
-      max-width: 1100px;
-      margin: 0 auto;
-      padding: 24px 16px;
+      width: 100%;
+      height: 100vh;
+      padding: 0;
       display: grid;
-      grid-template-columns: 280px 1fr;
-      gap: 16px;
-      min-height: 100%;
+      grid-template-columns: 280px minmax(420px, 1fr) 320px;
+      gap: 0;
+      min-height: 720px;
     }
 
     .card {
-      background: linear-gradient(180deg, var(--panel) 0%, #0f1828 100%);
+      background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 14px;
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+      border-radius: 0;
+      box-shadow: none;
     }
 
     .sidebar {
-      padding: 16px;
+      padding: 22px 18px;
       display: flex;
       flex-direction: column;
       gap: 14px;
-      height: fit-content;
-      position: sticky;
-      top: 16px;
+      height: 100vh;
+      overflow-y: auto;
+      border-width: 0 1px 0 0;
     }
 
     .title {
       margin: 0;
-      font-size: 20px;
+      font-size: 19px;
       font-weight: 700;
       letter-spacing: 0.2px;
     }
 
+    .brand-lockup { display: flex; align-items: center; gap: 11px; }
+    .brand-mark { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; background: linear-gradient(145deg, #8777f2, #5142c6); font-weight: 800; box-shadow: 0 8px 24px rgba(108,92,231,.28); }
+    .eyebrow { color: #7065dd; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .12em; margin: 0 0 5px; }
     .sub {
       margin: 4px 0 0;
       font-size: 13px;
@@ -70,7 +76,11 @@
       display: flex;
       align-items: center;
       gap: 8px;
-      margin-top: 10px;
+      margin: 2px 0 4px;
+      padding: 9px 11px;
+      border: 1px solid var(--line);
+      background: #0b0e12;
+      border-radius: 9px;
       font-size: 13px;
       color: var(--muted);
     }
@@ -80,12 +90,12 @@
       height: 9px;
       border-radius: 999px;
       background: var(--danger);
-      box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.12);
+      box-shadow: none;
     }
 
     .dot.live {
       background: var(--ok);
-      box-shadow: 0 0 0 6px rgba(34, 197, 94, 0.13);
+      box-shadow: 0 0 8px rgba(34,197,94,.5);
     }
 
     .field {
@@ -110,9 +120,9 @@
 
     input[type="text"], select {
       width: 100%;
-      background: #0d1524;
+      background: #0b0e12;
       border: 1px solid var(--line);
-      border-radius: 10px;
+      border-radius: 8px;
       padding: 10px 12px;
       color: var(--text);
       outline: none;
@@ -124,24 +134,25 @@
 
     .mode-switch {
       display: grid;
-      grid-template-columns: repeat(3, 1fr);
+      grid-template-columns: 1fr;
       gap: 6px;
       padding: 4px;
       border: 1px solid var(--line);
-      border-radius: 12px;
-      background: #0d1524;
+      border-radius: 10px;
+      background: #0b0e12;
     }
 
     .mode-switch button {
-      padding: 8px 6px;
+      padding: 9px 10px;
+      text-align: left;
       background: transparent;
       color: var(--muted);
     }
 
     .mode-switch button.active {
-      background: #1f4f87;
+      background: var(--brand-soft);
       color: #fff;
-      border-color: #3b82f6;
+      border-color: rgba(108,92,231,.5);
     }
 
     .button-row {
@@ -156,27 +167,28 @@
       border-radius: 10px;
       padding: 10px 12px;
       cursor: pointer;
-      background: #1a2941;
+      background: #1a1f27;
       transition: 120ms ease;
     }
-    button:hover { transform: translateY(-1px); }
+    button:hover { background-color: #242a34; }
     button:disabled {
       opacity: 0.45;
       cursor: not-allowed;
       transform: none;
     }
 
-    .primary { background: var(--brand); color: #fff; border-color: #4f93ff; }
+    .primary { background: var(--brand); color: #fff; border-color: #8072ec; }
+    .primary:hover { background: #7a6bea; }
     .danger { background: #3a1a20; color: #fecaca; border-color: #7f1d1d; }
-    .muted-btn { background: #102036; border-color: var(--line); color: #d8e5f8; }
+    .muted-btn { background: #171b21; border-color: var(--line); color: #d8dde5; }
 
     .note {
       font-size: 12px;
       line-height: 1.35;
       color: var(--muted);
-      background: #0d1524;
+      background: #0b0e12;
       border: 1px solid var(--line);
-      border-radius: 10px;
+      border-radius: 8px;
       padding: 10px;
     }
 
@@ -197,7 +209,7 @@
     details.structured-output {
       border: 1px solid var(--line);
       border-radius: 10px;
-      background: #0d1524;
+      background: #0b0e12;
       padding: 9px 10px;
     }
 
@@ -226,26 +238,64 @@
       width: 100%;
     }
 
+    .codex-module {
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+      padding: 12px;
+      border: 1px solid rgba(108, 92, 231, .42);
+      border-radius: 10px;
+      background: linear-gradient(145deg, rgba(108, 92, 231, .14), rgba(11, 14, 18, .96));
+    }
+
+    .codex-module-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .codex-module-header strong { font-size: 13px; }
+    .codex-badge {
+      color: #c9c3ff;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .codex-module textarea {
+      width: 100%;
+      min-height: 84px;
+      resize: vertical;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0b0e12;
+      color: var(--text);
+    }
+
     .chat {
       display: grid;
       grid-template-rows: auto 1fr auto;
-      min-height: 72vh;
+      height: 100vh;
       overflow: hidden;
     }
 
     .chat-head {
-      padding: 16px 18px;
+      min-height: 66px;
+      padding: 12px 24px;
       border-bottom: 1px solid var(--line);
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 12px;
-      background: linear-gradient(180deg, #172338, #152136);
+      background: rgba(16,19,24,.96);
     }
 
     .chat-head h2 {
       margin: 0;
-      font-size: 18px;
+      font-size: 15px;
       font-weight: 700;
     }
 
@@ -256,21 +306,19 @@
     }
 
     .messages {
-      padding: 18px;
+      padding: 34px max(28px, calc((100% - 760px) / 2));
       overflow: auto;
       display: flex;
       flex-direction: column;
       gap: 10px;
-      background:
-        linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0)),
-        #0c1526;
+      background: #0c0f13;
     }
 
     .bubble {
       max-width: 85%;
       border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 10px 12px;
+      border-radius: 14px;
+      padding: 12px 15px;
       line-height: 1.4;
       white-space: pre-wrap;
       word-break: break-word;
@@ -279,13 +327,13 @@
 
     .bubble.user {
       align-self: flex-end;
-      background: #12355f;
-      border-color: #2b5d95;
+      background: #27213e;
+      border-color: #4b3f7b;
     }
 
     .bubble.assistant {
       align-self: flex-start;
-      background: #15243b;
+      background: #171b21;
     }
 
     .bubble.system {
@@ -333,7 +381,7 @@
       padding: 14px;
       border: 1px solid #2b5d95;
       border-radius: 12px;
-      background: linear-gradient(135deg, #142a47, #102036);
+      background: linear-gradient(135deg, #1d1a31, #151922);
       display: grid;
       gap: 9px;
     }
@@ -359,7 +407,7 @@
       word-break: break-all;
     }
 
-    .artifact-download {
+    .artifact-download, .canvas-open {
       width: fit-content;
       color: #fff;
       background: var(--brand);
@@ -371,14 +419,92 @@
       font-size: 13px;
     }
 
+    .canvas-open { border-color: #52e5ee; background: #12323a; color: #b9fbff; }
+    .canvas-dialog {
+      width: min(1180px, calc(100vw - 32px));
+      height: min(860px, calc(100vh - 32px));
+      padding: 0;
+      border: 1px solid #444842;
+      border-radius: 16px;
+      overflow: hidden;
+      color: #f4f5f2;
+      background: #191a18;
+      box-shadow: 0 30px 90px #000c;
+    }
+    .canvas-dialog::backdrop { background: #050606b8; backdrop-filter: blur(4px); }
+    .canvas-shell { display: grid; grid-template-rows: 58px 1fr; height: 100%; }
+    .canvas-toolbar {
+      display: flex; align-items: center; gap: 10px; padding: 9px 14px;
+      border-bottom: 1px solid #30312e; background: #252623;
+    }
+    .canvas-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .canvas-title strong { display: block; overflow: hidden; text-overflow: ellipsis; }
+    .canvas-title small { color: #999d96; }
+    .canvas-view-toggle { display: flex; padding: 3px; border-radius: 9px; background: #151614; }
+    .canvas-view-toggle button, .canvas-icon-btn {
+      border: 0; border-radius: 7px; padding: 8px 10px; color: #c5c8c1; background: transparent; cursor: pointer;
+    }
+    .canvas-view-toggle button[aria-pressed="true"] { color: white; background: #3b3d38; }
+    .canvas-icon-btn:hover { color: white; background: #3b3d38; }
+    .canvas-stage { min-height: 0; background: #070a13; }
+    .canvas-frame { width: 100%; height: 100%; border: 0; background: white; }
+    .canvas-source { box-sizing: border-box; width: 100%; height: 100%; margin: 0; padding: 22px; overflow: auto; color: #d4d9d0; background: #0c0e0d; font: 13px/1.6 ui-monospace, monospace; white-space: pre-wrap; }
+    .canvas-loading { display: grid; place-items: center; height: 100%; color: #a7aaa3; }
+
+    .artifact-panel {
+      padding: 16px;
+      height: calc(100vh - 48px);
+      position: sticky;
+      top: 16px;
+      overflow: auto;
+    }
+
+    .artifact-panel h2 { margin: 0 0 4px; font-size: 17px; }
+    .artifact-panel-list { display: grid; gap: 12px; margin-top: 14px; }
+    .artifact-panel .artifact-card { width: 100%; }
+    .artifact-actions button { padding: 6px 8px; font-size: 11px; }
+    .outcome-card { border-left: 3px solid var(--ok); padding: 12px; background: var(--panel-2); border-radius: 8px; }
+    .validation-badge { color: var(--ok); font-size: 12px; font-weight: 700; }
+
     .upload-input {
       display: none;
     }
 
+    .capture-panel {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+    }
+    .capture-indicator {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      font-size: 13px;
+    }
+    .capture-indicator::before {
+      content: "";
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: #64748b;
+    }
+    .capture-indicator.live::before { background: #ef4444; }
+    .capture-indicator.paused::before { background: #f59e0b; }
+    .capture-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .capture-actions button { flex: 1; min-width: 70px; }
+    .capture-panel textarea { min-height: 54px; }
+    .capture-preview { position: relative; display: none; }
+    .capture-preview.active { display: block; }
+    .capture-preview video { width: 100%; max-height: 160px; background: #05080d; }
+    .capture-overlay { position: absolute; inset: 0; pointer-events: none; }
+    .capture-overlay > span { position: absolute; border: 2px solid #f59e0b; }
+
     .composer {
-      padding: 14px 16px;
+      padding: 14px max(24px, calc((100% - 800px) / 2)) 18px;
       border-top: 1px solid var(--line);
-      background: #101b2e;
+      background: #101318;
       display: flex;
       gap: 10px;
       align-items: flex-end;
@@ -389,9 +515,9 @@
       min-height: 52px;
       max-height: 160px;
       resize: vertical;
-      background: #0d1524;
+      background: #171b21;
       border: 1px solid var(--line);
-      border-radius: 10px;
+      border-radius: 13px;
       padding: 10px 12px;
       color: var(--text);
       outline: none;
@@ -402,8 +528,9 @@
     }
 
     .composer button {
-      min-width: 120px;
-      align-self: stretch;
+      min-width: 84px;
+      align-self: flex-end;
+      height: 44px;
     }
 
     .composer .composer-icon-btn {
@@ -416,7 +543,7 @@
       align-items: center;
       justify-content: center;
       padding: 0;
-      background: #0d1524;
+      background: #171b21;
       border: 1px solid var(--line);
       border-radius: 10px;
       color: var(--muted);
@@ -431,15 +558,26 @@
       cursor: not-allowed;
     }
 
+    .workspace-heading { display: flex; align-items: center; gap: 10px; }
+    .workspace-icon { width: 30px; height: 30px; border-radius: 8px; display: grid; place-items: center; color: #b9b1ff; background: var(--brand-soft); }
+    .keyboard-hint { color: #69717d; font-size: 11px; border: 1px solid var(--line); padding: 3px 7px; border-radius: 6px; }
+    .welcome { margin: auto; max-width: 610px; text-align: center; padding: 36px 20px; }
+    .welcome-mark { width: 56px; height: 56px; margin: 0 auto 18px; display: grid; place-items: center; border-radius: 17px; color: #c9c3ff; background: linear-gradient(145deg, rgba(108,92,231,.28), rgba(108,92,231,.08)); border: 1px solid rgba(130,116,238,.3); font-size: 24px; }
+    .welcome h3 { font-size: 27px; letter-spacing: -.03em; margin: 0 0 9px; }
+    .welcome p { color: var(--muted); margin: 0 auto 24px; line-height: 1.6; }
+    .suggestions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: left; }
+    .suggestion { padding: 13px; border: 1px solid var(--line); border-radius: 11px; background: #11151a; color: #cdd2da; font-size: 13px; }
+    .suggestion strong { display: block; color: #f1f3f6; margin-bottom: 4px; }
     @media (max-width: 940px) {
       .app {
         grid-template-columns: 1fr;
       }
       .sidebar {
-        position: static;
+        height: auto;
       }
+      .artifact-panel { position: static; height: auto; }
       .chat {
-        min-height: 65vh;
+        height: 70vh;
       }
       .bubble { max-width: 94%; }
     }
@@ -448,9 +586,12 @@
 <body>
   <div class="app">
     <aside class="card sidebar">
-      <div>
-        <h1 class="title">PJ Web App</h1>
-        <p class="sub">Realtime voice and full-power PJ workspace</p>
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true">P</div>
+        <div>
+          <h1 class="title">PJ Desktop</h1>
+          <p class="sub">Personal intelligence workspace</p>
+        </div>
       </div>
 
       <div class="status">
@@ -459,8 +600,7 @@
       </div>
 
       <div class="mode-switch" aria-label="Assistant mode">
-        <button id="realtimeModeBtn" class="active" type="button">Fast Voice</button>
-        <button id="fullPowerVoiceModeBtn" type="button">Full Power Voice</button>
+        <button id="fullPowerVoiceModeBtn" class="active" type="button">Full Force Voice</button>
         <button id="fullPowerModeBtn" type="button">Full Power Text</button>
       </div>
 
@@ -475,9 +615,48 @@
       </div>
 
       <div id="modeNote" class="note">
-        Voice mode requires microphone permission. You can still send text
-        messages once the realtime session is connected.
+        Full Force Voice refines every completed thought, then uses PJ's full
+        Responses runtime for tools, research, artifacts, and governed actions.
       </div>
+
+      <section class="codex-module" aria-labelledby="codexTitle">
+        <div class="codex-module-header">
+          <strong id="codexTitle">Codex</strong>
+          <span class="codex-badge">Coding agent</span>
+        </div>
+        <label for="codexAction">Task mode</label>
+        <select id="codexAction">
+          <option value="analyze">Analyze safely</option>
+          <option value="delegate">Implement with approval</option>
+          <option value="artifact">Create an artifact</option>
+        </select>
+        <label for="codexPrompt">Coding task</label>
+        <textarea id="codexPrompt" placeholder="Review a repository, debug an issue, or describe what Codex should build."></textarea>
+        <button id="runCodexBtn" class="primary full-width-btn" type="button">Open in Codex</button>
+        <small class="sub">Codex runs through Full Power. Write access remains owner-approval gated.</small>
+      </section>
+
+      <section class="capture-panel" aria-labelledby="captureTitle">
+        <strong id="captureTitle">Visual context (read-only)</strong>
+        <div id="captureIndicator" class="capture-indicator" role="status" aria-live="polite">
+          Not capturing · ephemeral
+        </div>
+        <div class="capture-actions">
+          <button id="cameraBtn" class="muted-btn" type="button">Camera</button>
+          <button id="screenBtn" class="muted-btn" type="button">Share screen</button>
+          <button id="capturePauseBtn" class="muted-btn" type="button" disabled>Pause</button>
+          <button id="captureStopBtn" class="danger" type="button" disabled>Stop</button>
+        </div>
+        <label><input id="retainCapture" type="checkbox"> Retain sampled frames</label>
+        <label><input id="visualTaskActive" type="checkbox"> Current task requires visual analysis</label>
+        <label for="visualEquivalent">Text equivalent / accessibility description</label>
+        <textarea id="visualEquivalent" placeholder="Describe the relevant visual content without sharing media."></textarea>
+        <div id="capturePreview" class="capture-preview" aria-hidden="true">
+          <video id="captureVideo" autoplay muted playsinline></video>
+          <div id="captureOverlay" class="capture-overlay"></div>
+        </div>
+        <small class="note">Frames are sampled at most once every 2 seconds and scaled to 1280×720. Nothing is sent unless the current task requires it.</small>
+      </section>
 
       <div id="fullPowerControls" class="full-power-controls hidden">
         <div class="field">
@@ -508,13 +687,32 @@
 
     <main class="card chat">
       <div class="chat-head">
-        <h2>Conversation</h2>
+        <div class="workspace-heading">
+          <span class="workspace-icon" aria-hidden="true">✦</span>
+          <div>
+            <p class="eyebrow">Private workspace</p>
+            <h2>New conversation</h2>
+          </div>
+        </div>
         <div class="head-actions">
+          <span class="keyboard-hint">⌘ K</span>
           <button id="copyBtn" class="muted-btn">Copy Transcript</button>
           <button id="clearBtn" class="muted-btn">Clear</button>
         </div>
       </div>
-      <div id="messages" class="messages"></div>
+      <div id="messages" class="messages">
+        <section class="welcome" aria-label="Get started">
+          <div class="welcome-mark" aria-hidden="true">✦</div>
+          <h3>What can I help you make?</h3>
+          <p>Think, research, create, and get work done with your private assistant. Choose a mode, start a session, or attach context below.</p>
+          <div class="suggestions">
+            <button class="suggestion" type="button" data-prompt="Help me plan a project with clear milestones and next steps."><strong>Plan a project</strong>Turn an idea into clear milestones and next steps</button>
+            <button class="suggestion" type="button" data-prompt="Help me summarize and compare my documents."><strong>Work with documents</strong>Summarize, compare, or transform your files</button>
+            <button class="suggestion" type="button" data-prompt="Help me create a polished brief from an idea."><strong>Create something</strong>Draft a presentation, image, or polished brief</button>
+            <button class="suggestion" type="button" data-prompt="I'd like to talk through an idea."><strong>Talk it through</strong>Use Full Force Voice for a natural, tool-enabled conversation</button>
+          </div>
+        </section>
+      </div>
       <div class="composer">
         <input id="filePicker" class="upload-input" type="file" multiple>
         <input
@@ -551,9 +749,31 @@
         <button id="sendBtn" class="primary" disabled>Send</button>
       </div>
     </main>
+    <aside class="card artifact-panel" aria-label="Artifacts and outcomes">
+      <h2>Artifacts</h2>
+      <div class="sub">Verified deliverables and outcome evidence</div>
+      <div id="artifactPanelList" class="artifact-panel-list" aria-live="polite"></div>
+      <div id="outcomePanelList" class="artifact-panel-list" aria-live="polite"></div>
+    </aside>
   </div>
 
   <audio id="pjAudio" autoplay></audio>
+
+  <dialog id="canvasDialog" class="canvas-dialog" aria-labelledby="canvasTitle">
+    <div class="canvas-shell">
+      <header class="canvas-toolbar">
+        <div class="canvas-view-toggle" aria-label="Canvas view">
+          <button id="canvasPreviewBtn" type="button" aria-pressed="true">Preview</button>
+          <button id="canvasSourceBtn" type="button" aria-pressed="false">Code</button>
+        </div>
+        <div class="canvas-title"><strong id="canvasTitle">Canvas</strong><small>Interactive HTML canvas</small></div>
+        <a id="canvasDownload" class="canvas-icon-btn" download>Download</a>
+        <button id="canvasFullscreenBtn" class="canvas-icon-btn" type="button" aria-label="Toggle fullscreen">⛶</button>
+        <button id="canvasCloseBtn" class="canvas-icon-btn" type="button" aria-label="Close canvas">✕</button>
+      </header>
+      <div id="canvasStage" class="canvas-stage"><div class="canvas-loading">Loading canvas…</div></div>
+    </div>
+  </dialog>
 
   <script type="module">
     // The ?v= query busts stale cached copies of the module; bump it whenever
@@ -595,6 +815,8 @@
       statusDot: document.getElementById("statusDot"),
       statusText: document.getElementById("statusText"),
       messages: document.getElementById("messages"),
+      artifactPanelList: document.getElementById("artifactPanelList"),
+      outcomePanelList: document.getElementById("outcomePanelList"),
       textInput: document.getElementById("textInput"),
       sendBtn: document.getElementById("sendBtn"),
       copyBtn: document.getElementById("copyBtn"),
@@ -603,9 +825,11 @@
       refreshCapabilitiesBtn: document.getElementById("refreshCapabilitiesBtn"),
       capabilityStatus: document.getElementById("capabilityStatus"),
       toolSummary: document.getElementById("toolSummary"),
-      realtimeModeBtn: document.getElementById("realtimeModeBtn"),
       fullPowerVoiceModeBtn: document.getElementById("fullPowerVoiceModeBtn"),
       fullPowerModeBtn: document.getElementById("fullPowerModeBtn"),
+      codexAction: document.getElementById("codexAction"),
+      codexPrompt: document.getElementById("codexPrompt"),
+      runCodexBtn: document.getElementById("runCodexBtn"),
       modeNote: document.getElementById("modeNote"),
       fullPowerControls: document.getElementById("fullPowerControls"),
       sessionSelect: document.getElementById("sessionSelect"),
@@ -619,6 +843,25 @@
       composerFolderBtn: document.getElementById("composerFolderBtn"),
       filePicker: document.getElementById("filePicker"),
       folderPicker: document.getElementById("folderPicker"),
+      cameraBtn: document.getElementById("cameraBtn"),
+      screenBtn: document.getElementById("screenBtn"),
+      capturePauseBtn: document.getElementById("capturePauseBtn"),
+      captureStopBtn: document.getElementById("captureStopBtn"),
+      captureIndicator: document.getElementById("captureIndicator"),
+      retainCapture: document.getElementById("retainCapture"),
+      visualTaskActive: document.getElementById("visualTaskActive"),
+      visualEquivalent: document.getElementById("visualEquivalent"),
+      capturePreview: document.getElementById("capturePreview"),
+      captureVideo: document.getElementById("captureVideo"),
+      captureOverlay: document.getElementById("captureOverlay"),
+      canvasDialog: document.getElementById("canvasDialog"),
+      canvasStage: document.getElementById("canvasStage"),
+      canvasTitle: document.getElementById("canvasTitle"),
+      canvasPreviewBtn: document.getElementById("canvasPreviewBtn"),
+      canvasSourceBtn: document.getElementById("canvasSourceBtn"),
+      canvasDownload: document.getElementById("canvasDownload"),
+      canvasFullscreenBtn: document.getElementById("canvasFullscreenBtn"),
+      canvasCloseBtn: document.getElementById("canvasCloseBtn"),
     };
 
     const state = {
@@ -631,7 +874,7 @@
       activeStartRequestId: null,
       liveAnnounced: false,
       toolCatalog: null,
-      mode: MODE.REALTIME,
+      mode: MODE.FULL_POWER_VOICE,
       fullPowerSessionId: null,
       activeSessionId: null,
       fullPowerBusy: false,
@@ -659,6 +902,14 @@
       uploadLocalSkips: [],
       uploadBusy: false,
       uploadSessionId: `upload_${createRequestId().replace(/[^A-Za-z0-9_-]/g, "_")}`,
+      captureStream: null,
+      captureKind: null,
+      capturePaused: false,
+      captureTimer: null,
+      captureBytes: 0,
+      captureStartedAt: 0,
+      canvasSource: "",
+      canvasObjectUrl: null,
     };
 
     const savedBase = localStorage.getItem(STORAGE_KEY);
@@ -695,6 +946,100 @@
       }
       return `${unit === 0 ? value : value.toFixed(1)} ${units[unit]}`;
     }
+
+    const CAPTURE_LIMITS = Object.freeze({ width: 1280, height: 720, intervalMs: 2000, bytes: 8_000_000, durationMs: 120_000 });
+
+    function updateCaptureIndicator(message = null) {
+      const retention = el.retainCapture.checked ? "retained by choice" : "ephemeral";
+      const status = message || (state.captureStream
+        ? `${state.capturePaused ? "Paused" : "Capturing"} ${state.captureKind} · ${retention}`
+        : `Not capturing · ${retention}`);
+      el.captureIndicator.textContent = status;
+      el.captureIndicator.classList.toggle("live", Boolean(state.captureStream && !state.capturePaused));
+      el.captureIndicator.classList.toggle("paused", Boolean(state.captureStream && state.capturePaused));
+    }
+
+    function stopVisualCapture(reason = "Capture stopped") {
+      clearInterval(state.captureTimer);
+      state.captureTimer = null;
+      for (const track of state.captureStream?.getTracks() || []) track.stop();
+      state.captureStream = null;
+      state.captureKind = null;
+      state.capturePaused = false;
+      el.captureVideo.srcObject = null;
+      el.capturePreview.classList.remove("active");
+      el.capturePauseBtn.disabled = true;
+      el.captureStopBtn.disabled = true;
+      updateCaptureIndicator(reason);
+    }
+
+    async function sampleVisualFrame() {
+      if (!state.captureStream || state.capturePaused || !el.visualTaskActive.checked) return;
+      if (Date.now() - state.captureStartedAt > CAPTURE_LIMITS.durationMs) {
+        stopVisualCapture("Stopped: duration budget reached");
+        return;
+      }
+      const video = el.captureVideo;
+      if (!video.videoWidth || !video.videoHeight) return;
+      const scale = Math.min(1, CAPTURE_LIMITS.width / video.videoWidth, CAPTURE_LIMITS.height / video.videoHeight);
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+      canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
+      canvas.getContext("2d", { alpha: false }).drawImage(video, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.8));
+      if (!blob) return;
+      if (state.captureBytes + blob.size > CAPTURE_LIMITS.bytes) {
+        stopVisualCapture("Stopped: byte budget reached");
+        return;
+      }
+      state.captureBytes += blob.size;
+      // A domain integration may consume this event and upload one bounded frame.
+      // The web client itself never continuously streams visual media.
+      window.dispatchEvent(new CustomEvent("pj:visual-frame", { detail: {
+        blob,
+        source: state.captureKind,
+        retention: el.retainCapture.checked ? "retain" : "ephemeral",
+        textEquivalent: el.visualEquivalent.value,
+      } }));
+    }
+
+    async function startVisualCapture(kind) {
+      stopVisualCapture("Requesting permission…");
+      try {
+        const stream = kind === "camera"
+          ? await navigator.mediaDevices.getUserMedia({ video: { width: { max: 1280 }, height: { max: 720 } }, audio: false })
+          : await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+        state.captureStream = stream;
+        state.captureKind = kind;
+        state.captureBytes = 0;
+        state.captureStartedAt = Date.now();
+        el.captureVideo.srcObject = stream;
+        el.capturePreview.classList.add("active");
+        el.capturePauseBtn.disabled = false;
+        el.captureStopBtn.disabled = false;
+        const track = stream.getVideoTracks()[0];
+        track.addEventListener("ended", () => stopVisualCapture("Capture source ended or permission was revoked"), { once: true });
+        updateCaptureIndicator(`${kind === "screen" ? "Sharing" : "Using"} ${track.label || kind} · ${el.retainCapture.checked ? "retained by choice" : "ephemeral"}`);
+        state.captureTimer = setInterval(sampleVisualFrame, CAPTURE_LIMITS.intervalMs);
+      } catch (error) {
+        updateCaptureIndicator(error?.name === "NotAllowedError" ? "Capture permission denied" : "Capture unavailable");
+      }
+    }
+
+    function renderGroundedRegions(regions) {
+      el.captureOverlay.replaceChildren();
+      for (const region of regions || []) {
+        if (![region.x, region.y, region.width, region.height].every((value) => Number.isFinite(value) && value >= 0 && value <= 1)) continue;
+        const marker = document.createElement("span");
+        marker.style.left = `${region.x * 100}%`;
+        marker.style.top = `${region.y * 100}%`;
+        marker.style.width = `${region.width * 100}%`;
+        marker.style.height = `${region.height * 100}%`;
+        marker.title = String(region.label || "Grounded region");
+        el.captureOverlay.append(marker); // Never interpret OCR or labels as HTML.
+      }
+    }
+    window.pjRenderGroundedRegions = renderGroundedRegions;
 
     function setUploadBusy(busy) {
       state.uploadBusy = busy;
@@ -1111,7 +1456,6 @@
         stopFullPowerSession({ announce: false, preserveSession: true });
       }
       state.mode = mode;
-      el.realtimeModeBtn.classList.toggle("active", mode === MODE.REALTIME);
       el.fullPowerVoiceModeBtn.classList.toggle(
         "active", mode === MODE.FULL_POWER_VOICE
       );
@@ -1124,22 +1468,22 @@
         ? "End Session"
         : "Close Conversation";
       el.modeNote.textContent = mode === MODE.REALTIME
-        ? "Fast Voice responds immediately through Realtime and stores finalized transcripts."
+        ? "Realtime voice is available as an internal compatibility mode."
         : mode === MODE.FULL_POWER_VOICE
-          ? "Full Power Voice refines each completed transcript before PJ responds and preserves the original wording in shared history."
+          ? "Full Force Voice refines every completed thought before using PJ's full Responses runtime, while preserving your original wording in shared history."
           : "Full Power Text uses PJ's terminal-equivalent Responses runtime: web and file search, MCP, local tools, citations, structured output, and shared history.";
       const idleText = mode === MODE.REALTIME
-        ? "Fast Voice idle"
+        ? "Realtime Voice idle"
         : mode === MODE.FULL_POWER_VOICE
-          ? "Full Power Voice idle"
+          ? "Full Force Voice idle"
           : "Full Power Text idle";
       setPhase(PHASE.IDLE, idleText);
       appendBubble(
         "system",
         mode === MODE.REALTIME
-          ? "Fast Voice selected."
+          ? "Realtime Voice selected."
           : mode === MODE.FULL_POWER_VOICE
-            ? "Full Power Voice selected."
+            ? "Full Force Voice selected."
             : "Full Power Text selected. Start or resume a conversation.",
       );
       refreshCurrentCapabilities({ forceRefresh: false });
@@ -1153,6 +1497,7 @@
         return state.activeAssistantBubble;
       }
 
+      el.messages.querySelector(".welcome")?.remove();
       const bubble = document.createElement("div");
       bubble.className = `bubble ${role}`;
       bubble.textContent = text;
@@ -1619,8 +1964,8 @@
         appendBubble(
           "system",
           state.mode === MODE.FULL_POWER_VOICE
-            ? "Starting Full Power Voice session..."
-            : "Starting Fast Voice session...",
+            ? "Starting Full Force Voice session..."
+            : "Starting Realtime Voice session...",
         );
         const health = await checkBackendHealth(apiBase, requestId);
         await refreshCapabilities(apiBase, requestId, { health, forceRefresh: false });
@@ -2054,6 +2399,47 @@
         return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
       }
 
+      function renderCanvasView(sourceMode = false) {
+        el.canvasPreviewBtn.setAttribute("aria-pressed", String(!sourceMode));
+        el.canvasSourceBtn.setAttribute("aria-pressed", String(sourceMode));
+        el.canvasStage.replaceChildren();
+        if (sourceMode) {
+          const source = document.createElement("pre");
+          source.className = "canvas-source";
+          source.textContent = state.canvasSource;
+          el.canvasStage.appendChild(source);
+          return;
+        }
+        const frame = document.createElement("iframe");
+        frame.className = "canvas-frame";
+        frame.title = `${el.canvasTitle.textContent} preview`;
+        frame.sandbox = "allow-scripts allow-forms allow-modals allow-pointer-lock allow-downloads";
+        frame.src = state.canvasObjectUrl;
+        el.canvasStage.appendChild(frame);
+      }
+
+      async function openCanvas(artifact, downloadUrl) {
+        el.canvasTitle.textContent = artifact.filename;
+        el.canvasStage.innerHTML = '<div class="canvas-loading">Loading canvas…</div>';
+        el.canvasDialog.showModal();
+        try {
+          const response = await fetchWithTimeout(downloadUrl.href, {
+            credentials: "include",
+            headers: requestHeaders(createRequestId()),
+          }, 15000);
+          if (!response.ok) throw new Error(`Canvas download failed (${response.status})`);
+          const source = await response.text();
+          if (state.canvasObjectUrl) URL.revokeObjectURL(state.canvasObjectUrl);
+          state.canvasSource = source;
+          state.canvasObjectUrl = URL.createObjectURL(new Blob([source], { type: "text/html" }));
+          el.canvasDownload.href = state.canvasObjectUrl;
+          el.canvasDownload.download = artifact.filename;
+          renderCanvasView(false);
+        } catch (error) {
+          el.canvasStage.textContent = shorten(String(error), 300);
+        }
+      }
+
       function renderArtifactCard(artifact) {
         if (!artifact?.artifact_id || !artifact.filename || !artifact.download_url) return;
         let downloadUrl;
@@ -2075,8 +2461,31 @@
           link.className = "artifact-download";
           link.textContent = "Download";
           link.rel = "noopener";
-          card.append(title, meta, link);
-          el.messages.appendChild(card);
+          const validation = document.createElement("div");
+          validation.className = "validation-badge";
+          validation.textContent = "✓ Integrity verified";
+          const actions = document.createElement("div");
+          actions.className = "artifact-actions";
+          for (const label of ["Preview", "Compare", "Restore as new", "Follow up"]) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "muted-btn";
+            button.textContent = label;
+            button.dataset.artifactAction = label.toLowerCase().replaceAll(" ", "-");
+            actions.appendChild(button);
+          }
+          card.append(title, meta, validation);
+          if (String(artifact.mime_type || "").startsWith("text/html")) {
+            const open = document.createElement("button");
+            open.type = "button";
+            open.className = "canvas-open";
+            open.textContent = "Open canvas";
+            open.addEventListener("click", () => openCanvas(artifact, downloadUrl));
+            card.appendChild(open);
+          }
+          card.appendChild(link);
+          card.appendChild(actions);
+          el.artifactPanelList.appendChild(card);
           state.artifactCards.set(artifact.artifact_id, card);
         }
         card.querySelector(".artifact-card-title").textContent = artifact.filename;
@@ -2098,7 +2507,22 @@
         } else {
           preview?.remove();
         }
-        scrollMessagesToBottom();
+      }
+
+      function renderOutcomeCard(outcome) {
+        if (!outcome?.outcome_id || !outcome.result_summary) return;
+        const card = document.createElement("section");
+        card.className = "outcome-card";
+        const title = document.createElement("strong");
+        title.textContent = outcome.result_summary;
+        const status = document.createElement("div");
+        status.className = "validation-badge";
+        status.textContent = `Verification: ${outcome.verification_status || "pending"}`;
+        const detail = document.createElement("div");
+        detail.className = "artifact-card-meta";
+        detail.textContent = `${(outcome.deliverable_artifact_ids || []).length} deliverables · ${Number(outcome.elapsed_seconds || 0).toFixed(1)}s`;
+        card.append(title, status, detail);
+        el.outcomePanelList.appendChild(card);
       }
 
       function renderFullPowerEvent(event) {
@@ -2298,6 +2722,35 @@
           state.fullPowerBusy = false;
           state.responsesAbortController = null;
           if (state.phase === PHASE.LIVE) el.sendBtn.disabled = false;
+        }
+      }
+
+      async function runCodexTask() {
+        const task = el.codexPrompt.value.trim();
+        if (!task || state.fullPowerBusy) {
+          if (!task) appendBubble("system", "Describe the coding task before opening Codex.");
+          return;
+        }
+        const action = el.codexAction.value;
+        const instructions = {
+          analyze: "Use codex_analyze in its read-only sandbox to analyze this coding task. Report findings, evidence, and recommended next steps:",
+          delegate: "Use run_codex_task to implement this coding task. Request owner approval before any gated execution, preserve the sandbox policy, and report changed files plus validation:",
+          artifact: "Use codex_generate_artifact to create the requested coding deliverable and return every resulting artifact:",
+        };
+        el.runCodexBtn.disabled = true;
+        try {
+          if (state.mode !== MODE.FULL_POWER) setMode(MODE.FULL_POWER);
+          if (state.phase === PHASE.IDLE) await startFullPowerSession();
+          if (state.phase !== PHASE.LIVE || !state.fullPowerSessionId) {
+            throw new Error("Full Power could not start for Codex.");
+          }
+          el.textInput.value = `${instructions[action] || instructions.analyze}\n\n${task}`;
+          await sendFullPowerMessage();
+          el.codexPrompt.value = "";
+        } catch (error) {
+          appendBubble("system", `Codex could not start: ${shorten(String(error), 260)}`);
+        } finally {
+          el.runCodexBtn.disabled = false;
         }
       }
 
@@ -2774,6 +3227,18 @@
     el.sendBtn.addEventListener("click", sendSelectedMessage);
     el.copyBtn.addEventListener("click", copyTranscript);
     el.clearBtn.addEventListener("click", clearTranscript);
+    el.cameraBtn.addEventListener("click", () => startVisualCapture("camera"));
+    el.screenBtn.addEventListener("click", () => startVisualCapture("screen"));
+    el.capturePauseBtn.addEventListener("click", () => {
+      state.capturePaused = !state.capturePaused;
+      for (const track of state.captureStream?.getVideoTracks() || []) {
+        track.enabled = !state.capturePaused;
+      }
+      el.capturePauseBtn.textContent = state.capturePaused ? "Resume" : "Pause";
+      updateCaptureIndicator();
+    });
+    el.captureStopBtn.addEventListener("click", () => stopVisualCapture());
+    el.retainCapture.addEventListener("change", () => updateCaptureIndicator());
     el.composerFilesBtn.addEventListener("click", () => {
       el.filePicker.value = "";
       el.filePicker.click();
@@ -2803,12 +3268,12 @@
         appendBubble("system", `Capability catalog refreshed: ${count} local tools loaded.`);
       }
     });
-    el.realtimeModeBtn.addEventListener("click", () => setMode(MODE.REALTIME));
     el.fullPowerVoiceModeBtn.addEventListener(
       "click",
       () => setMode(MODE.FULL_POWER_VOICE),
     );
     el.fullPowerModeBtn.addEventListener("click", () => setMode(MODE.FULL_POWER));
+    el.runCodexBtn.addEventListener("click", runCodexTask);
     el.refreshSessionsBtn.addEventListener("click", refreshFullPowerSessions);
     el.sessionSelect.addEventListener("change", () => {
       if (el.sessionSelect.value) resumeFullPowerSession(el.sessionSelect.value);
@@ -2835,9 +3300,33 @@
         sendSelectedMessage();
       }
     });
+    el.canvasPreviewBtn.addEventListener("click", () => renderCanvasView(false));
+    el.canvasSourceBtn.addEventListener("click", () => renderCanvasView(true));
+    el.canvasCloseBtn.addEventListener("click", () => el.canvasDialog.close());
+    el.canvasFullscreenBtn.addEventListener("click", async () => {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await el.canvasDialog.requestFullscreen();
+    });
+    el.canvasDialog.addEventListener("close", () => {
+      if (document.fullscreenElement === el.canvasDialog) document.exitFullscreen();
+      if (state.canvasObjectUrl) URL.revokeObjectURL(state.canvasObjectUrl);
+      state.canvasObjectUrl = null;
+      state.canvasSource = "";
+      el.canvasStage.replaceChildren();
+    });
+    document.querySelectorAll?.("[data-prompt]").forEach((button) => {
+      button.addEventListener("click", () => {
+        el.textInput.value = button.dataset.prompt;
+        if (state.phase === PHASE.IDLE) {
+          el.startBtn.focus();
+          setStatus("Start a session to send your prompt");
+        } else {
+          el.textInput.focus();
+        }
+      });
+    });
 
     setPhase(PHASE.IDLE, "Idle");
-    appendBubble("system", "Ready. Click Start Session to connect to PJ.");
     refreshCurrentCapabilities({ forceRefresh: false });
   </script>
 </body>

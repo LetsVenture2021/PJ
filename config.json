@@ -34,4 +34,10 @@
     "max_output_chars": 30000
   },
   "shell_enabled": true
+  ,"conversation_routing": {
+    "enabled_routes": ["realtime", "responses", "local", "hosted", "delegated"],
+    "timeout_budgets_ms": {"realtime": 12000, "responses": 30000, "local": 5000, "hosted": 30000, "delegated": 300000},
+    "maximum_estimated_spend_usd": 5.0,
+    "safe_fallback_order": ["local", "responses", "realtime"]
+  }
 }

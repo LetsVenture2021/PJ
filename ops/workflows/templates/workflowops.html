@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>PJ WorkflowOps</title><style>
+:root{color-scheme:dark;--ink:#ecf4ff;--muted:#9db0c9;--panel:#101c2d;--line:#263b55;--a:#69e0c2}
+*{box-sizing:border-box}body{margin:0;background:#07111f;color:var(--ink);font:15px system-ui}
+header,main{max-width:1180px;margin:auto;padding:24px}header{display:flex;justify-content:space-between;align-items:center}
+.steps{display:flex;gap:8px;flex-wrap:wrap}.steps span,.tag{border:1px solid var(--line);border-radius:999px;padding:7px 11px;color:var(--muted)}
+.steps .active{border-color:var(--a);color:var(--a)}.grid{display:grid;grid-template-columns:260px 1fr 300px;gap:16px}
+section,aside{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px}h1,h2{margin-top:0}
+button,select,input,textarea{background:#0a1626;color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:10px}
+button.primary{background:var(--a);color:#052019;font-weight:700}textarea{width:100%;min-height:360px;font-family:monospace}
+.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}.card{padding:12px;border:1px solid var(--line);border-radius:8px;margin:8px 0}
+@media(max-width:850px){.grid{grid-template-columns:1fr}}
+</style></head><body><header><div><div class="tag">WORKFLOWOPS</div><h1>Build a governed workflow</h1></div>
+<div class="steps"><span class="active">1 Template</span><span>2 Edit</span><span>3 Permissions</span><span>4 Test</span><span>5 Publish</span></div></header>
+<main class="grid"><aside><h2>Templates</h2><div class="card">Research brief<br><small>Read-only connectors</small></div>
+<div class="card">Approval action<br><small>Human-gated write</small></div><div class="actions"><button>Import</button><button>Duplicate</button></div></aside>
+<section><h2>No-code definition</h2><p>Arrange bounded steps; executable code is never accepted.</p>
+<textarea aria-label="Workflow JSON">{
+  "name": "research-brief",
+  "steps": [
+    {"id":"research","type":"parallel_read"},
+    {"id":"check","type":"validation"},
+    {"id":"deliver","type":"artifact_output"}
+  ]
+}</textarea><div class="actions"><button>Validate</button><button>Test run</button><button class="primary">Publish version</button></div></section>
+<aside><h2>Permission review</h2><div class="card">Connector scopes<br><strong>Read documents</strong></div>
+<div class="card">External effects<br><strong>None predicted</strong></div><div class="card">Budget<br><strong>$2.00 / 10 minutes</strong></div>
+<div class="actions"><button>Rollback</button><button>Export signed</button></div></aside></main></body></html>
