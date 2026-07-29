@@ -1826,20 +1826,21 @@ def finalize_document(doc_id: str) -> dict:
                 "reason": "resolve markers via revise_document first",
             }
         quality = validate_content(content)
-        conn.execute(
-            "INSERT OR REPLACE INTO docops_quality_reports "
-            "(doc_id, version, source_sha256, report_sha256, validator_version, "
-            "status, report_json) VALUES (?,?,?,?,?,?,?)",
-            (
-                doc_id,
-                version,
-                sha,
-                quality["report_sha256"],
-                quality["validator_version"],
-                quality["status"],
-                json.dumps(quality, sort_keys=True),
-            ),
-        )
+        if status != "final":
+            conn.execute(
+                "INSERT OR REPLACE INTO docops_quality_reports "
+                "(doc_id, version, source_sha256, report_sha256, validator_version, "
+                "status, report_json) VALUES (?,?,?,?,?,?,?)",
+                (
+                    doc_id,
+                    version,
+                    sha,
+                    quality["report_sha256"],
+                    quality["validator_version"],
+                    quality["status"],
+                    json.dumps(quality, sort_keys=True),
+                ),
+            )
         if quality["status"] != "pass":
             return {
                 "status": "blocked",
