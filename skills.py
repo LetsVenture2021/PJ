@@ -486,6 +486,20 @@ def tool_policy_mode(tool_name: str) -> str:
     return _tool_policy_mode(tool_name)
 
 
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as _FutureTimeout
+
+_DISPATCH_POOL = None
+
+
+def _dispatch_pool():
+    """Reused executor: spawning a pool per tool call wastes ~ms and threads."""
+    global _DISPATCH_POOL
+    if _DISPATCH_POOL is None:
+        _DISPATCH_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pj-tool")
+    return _DISPATCH_POOL
+
+
 def dispatch(name: str, arguments: dict, *, approval_granted: bool = False):
     fn = DISPATCH_TABLE.get(name)
     if fn is None:
@@ -520,19 +534,15 @@ def dispatch(name: str, arguments: dict, *, approval_granted: bool = False):
     try:
         # error_as_result timeout semantics: a hung tool returns a
         # model-visible error instead of stalling the whole turn.
-        from concurrent.futures import ThreadPoolExecutor
-        from concurrent.futures import TimeoutError as _FutureTimeout
-
-        with ThreadPoolExecutor(max_workers=1) as _pool:
-            try:
-                result = _pool.submit(lambda: fn(**args)).result(timeout=timeout_s)
-            except _FutureTimeout:
-                result = {
-                    "error": (
-                        f"tool_timeout: '{name}' exceeded {int(timeout_s)}s "
-                        "and was abandoned; the operation may still be running."
-                    )
-                }
+        try:
+            result = _dispatch_pool().submit(lambda: fn(**args)).result(timeout=timeout_s)
+        except _FutureTimeout:
+            result = {
+                "error": (
+                    f"tool_timeout: '{name}' exceeded {int(timeout_s)}s "
+                    "and was abandoned; the operation may still be running."
+                )
+            }
     except TypeError as exc:
         result = {"error": f"tool_argument_error: {exc}"}
     except ValueError as exc:

@@ -21,6 +21,11 @@ def run_codex_task(prompt: str = "", sandbox: str = "read-only") -> dict:
     preset_name = _SANDBOXES.get(str(sandbox or "read-only"))
     if preset_name is None:
         return {"error": "sandbox must be 'read-only' or 'workspace-write'"}
+    from ops.shared.spend_guard import check_and_count
+
+    guard_error = check_and_count(BASE_DIR / "pj_data.sqlite3", "codex")
+    if guard_error:
+        return {"error": guard_error}
     try:
         from openai_codex import Codex, Sandbox
     except ImportError:

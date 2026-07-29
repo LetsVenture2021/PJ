@@ -63,6 +63,23 @@ voice, a local browser client, and an optional Cloudflare Worker edge proxy.
   from OpenAI, validates Cloudflare Access identity, and bridges privileged
   tool/Responses calls to the private Flask runtime.
 
+### Delegation, vision, and hosted compute
+
+- Approval-gated Codex SDK delegation (`run_codex_task`) plus automatic
+  read-only `codex_analyze` routing for code-related prompts.
+- Vision analysis of uploaded raster images (`analyze_uploaded_image`,
+  `detail: original`), available in text and voice modes.
+- Hosted image generation (config-toggled); generated images persist as
+  integrity-registered downloadable uploads with the revised prompt recorded.
+- Hosted shell in OpenAI-managed containers (`shell_enabled`, network
+  disabled); `fetch_container_artifacts` copies `/mnt/data` outputs into
+  durable storage.
+- Approval-gated `~/.env` placeholder and editor-opening tools; secret values
+  never pass through the assistant.
+- Every document export is quietly vectorized into the owner store, deduplicated
+  by content hash; local tool dispatch enforces `PJ_TOOL_TIMEOUT_SECONDS` and
+  Codex calls are capped by `PJ_CODEX_DAILY_CALL_LIMIT`.
+
 ### Governed knowledge and integrations
 
 - Vector-store source ingestion/synchronization into DocOps, CodeOps, and the
