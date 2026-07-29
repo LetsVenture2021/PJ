@@ -53,6 +53,7 @@ from pathlib import Path
 
 import fcntl
 import presentationops
+from ops.docs.quality.conflicts import GIT_CONFLICT_MARKER_LABEL, has_git_conflict_marker
 from ops.docs.quality import validate_content
 from ops.shared.io import atomic_copy, sha256_file
 from ops.docs.quality.artifacts import Block, CanonicalDocument, quality_check, write_quality_report
@@ -163,6 +164,13 @@ def _normalize_alias_key(value: str) -> str:
 
 def _hash_file_path(path: Path) -> str:
     return sha256_file(path)
+
+
+def _unresolved_markers(content: str) -> list[str]:
+    markers = {marker for marker in BLOCKING_MARKERS if marker in content}
+    if has_git_conflict_marker(content):
+        markers.add(GIT_CONFLICT_MARKER_LABEL)
+    return sorted(markers)
 
 
 def _atomic_copy(source: Path, destination: Path):
@@ -1210,7 +1218,7 @@ def _write_version(
         "VALUES (?,?,?,?,?,?,?,?,?)",
         (doc_id, version, title, template, tpl_version, str(path), sha, tags, change_note),
     )
-    markers = sorted({m for m in BLOCKING_MARKERS if m in content})
+    markers = _unresolved_markers(content)
     return {
         "doc_id": doc_id,
         "version": version,
@@ -1860,7 +1868,7 @@ def finalize_document(doc_id: str) -> dict:
                     "file was modified outside DocOps; use revise_document to issue a new version"
                 ),
             }
-        markers = sorted({marker for marker in BLOCKING_MARKERS if marker in content})
+        markers = _unresolved_markers(content)
         if markers:
             return {
                 "status": "blocked",
@@ -1925,7 +1933,7 @@ def finalize_document(doc_id: str) -> dict:
                 "path": path,
             }
         else:
-            markers = sorted({marker for marker in BLOCKING_MARKERS if marker in content})
+            markers = _unresolved_markers(content)
             if markers:
                 return {
                     "status": "blocked",

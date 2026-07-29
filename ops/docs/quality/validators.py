@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 
+from .conflicts import GIT_CONFLICT_MARKER_LINE
 from .model import Finding, QualityConfig
 
 RULES = {
@@ -17,6 +18,7 @@ RULES = {
     "formula": "DOC-SEC-001",
     "secret": "DOC-SEC-002",
     "placeholder": "DOC-CONTENT-001",
+    "merge_conflict": "DOC-COMPLETE-002",
 }
 
 _SECRET = re.compile(
@@ -92,6 +94,13 @@ def validate_text(text: str, config: QualityConfig) -> Iterable[Finding]:
                 "secret",
                 "blocker",
                 "Potential sensitive value detected; value omitted.",
+                number,
+            )
+        if GIT_CONFLICT_MARKER_LINE.match(line):
+            yield _finding(
+                "merge_conflict",
+                "blocker",
+                "Unresolved Git conflict marker is present.",
                 number,
             )
         if re.search(r"\[(?:TBD|VERIFY CURRENT)\]|\{\{[^}]+\}\}|\bTODO\b", line, re.I):
