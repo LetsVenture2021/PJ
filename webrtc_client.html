@@ -238,6 +238,43 @@
       width: 100%;
     }
 
+    .codex-module {
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+      padding: 12px;
+      border: 1px solid rgba(108, 92, 231, .42);
+      border-radius: 10px;
+      background: linear-gradient(145deg, rgba(108, 92, 231, .14), rgba(11, 14, 18, .96));
+    }
+
+    .codex-module-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .codex-module-header strong { font-size: 13px; }
+    .codex-badge {
+      color: #c9c3ff;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .codex-module textarea {
+      width: 100%;
+      min-height: 84px;
+      resize: vertical;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0b0e12;
+      color: var(--text);
+    }
+
     .chat {
       display: grid;
       grid-template-rows: auto 1fr auto;
@@ -370,7 +407,7 @@
       word-break: break-all;
     }
 
-    .artifact-download {
+    .artifact-download, .canvas-open {
       width: fit-content;
       color: #fff;
       background: var(--brand);
@@ -381,6 +418,38 @@
       font-weight: 700;
       font-size: 13px;
     }
+
+    .canvas-open { border-color: #52e5ee; background: #12323a; color: #b9fbff; }
+    .canvas-dialog {
+      width: min(1180px, calc(100vw - 32px));
+      height: min(860px, calc(100vh - 32px));
+      padding: 0;
+      border: 1px solid #444842;
+      border-radius: 16px;
+      overflow: hidden;
+      color: #f4f5f2;
+      background: #191a18;
+      box-shadow: 0 30px 90px #000c;
+    }
+    .canvas-dialog::backdrop { background: #050606b8; backdrop-filter: blur(4px); }
+    .canvas-shell { display: grid; grid-template-rows: 58px 1fr; height: 100%; }
+    .canvas-toolbar {
+      display: flex; align-items: center; gap: 10px; padding: 9px 14px;
+      border-bottom: 1px solid #30312e; background: #252623;
+    }
+    .canvas-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .canvas-title strong { display: block; overflow: hidden; text-overflow: ellipsis; }
+    .canvas-title small { color: #999d96; }
+    .canvas-view-toggle { display: flex; padding: 3px; border-radius: 9px; background: #151614; }
+    .canvas-view-toggle button, .canvas-icon-btn {
+      border: 0; border-radius: 7px; padding: 8px 10px; color: #c5c8c1; background: transparent; cursor: pointer;
+    }
+    .canvas-view-toggle button[aria-pressed="true"] { color: white; background: #3b3d38; }
+    .canvas-icon-btn:hover { color: white; background: #3b3d38; }
+    .canvas-stage { min-height: 0; background: #070a13; }
+    .canvas-frame { width: 100%; height: 100%; border: 0; background: white; }
+    .canvas-source { box-sizing: border-box; width: 100%; height: 100%; margin: 0; padding: 22px; overflow: auto; color: #d4d9d0; background: #0c0e0d; font: 13px/1.6 ui-monospace, monospace; white-space: pre-wrap; }
+    .canvas-loading { display: grid; place-items: center; height: 100%; color: #a7aaa3; }
 
     .artifact-panel {
       padding: 16px;
@@ -393,7 +462,6 @@
     .artifact-panel h2 { margin: 0 0 4px; font-size: 17px; }
     .artifact-panel-list { display: grid; gap: 12px; margin-top: 14px; }
     .artifact-panel .artifact-card { width: 100%; }
-    .artifact-actions { display: flex; flex-wrap: wrap; gap: 6px; }
     .artifact-actions button { padding: 6px 8px; font-size: 11px; }
     .outcome-card { border-left: 3px solid var(--ok); padding: 12px; background: var(--panel-2); border-radius: 8px; }
     .validation-badge { color: var(--ok); font-size: 12px; font-weight: 700; }
@@ -532,8 +600,7 @@
       </div>
 
       <div class="mode-switch" aria-label="Assistant mode">
-        <button id="realtimeModeBtn" class="active" type="button">Fast Voice</button>
-        <button id="fullPowerVoiceModeBtn" type="button">Full Power Voice</button>
+        <button id="fullPowerVoiceModeBtn" class="active" type="button">Full Force Voice</button>
         <button id="fullPowerModeBtn" type="button">Full Power Text</button>
       </div>
 
@@ -548,9 +615,26 @@
       </div>
 
       <div id="modeNote" class="note">
-        Voice mode requires microphone permission. You can still send text
-        messages once the realtime session is connected.
+        Full Force Voice refines every completed thought, then uses PJ's full
+        Responses runtime for tools, research, artifacts, and governed actions.
       </div>
+
+      <section class="codex-module" aria-labelledby="codexTitle">
+        <div class="codex-module-header">
+          <strong id="codexTitle">Codex</strong>
+          <span class="codex-badge">Coding agent</span>
+        </div>
+        <label for="codexAction">Task mode</label>
+        <select id="codexAction">
+          <option value="analyze">Analyze safely</option>
+          <option value="delegate">Implement with approval</option>
+          <option value="artifact">Create an artifact</option>
+        </select>
+        <label for="codexPrompt">Coding task</label>
+        <textarea id="codexPrompt" placeholder="Review a repository, debug an issue, or describe what Codex should build."></textarea>
+        <button id="runCodexBtn" class="primary full-width-btn" type="button">Open in Codex</button>
+        <small class="sub">Codex runs through Full Power. Write access remains owner-approval gated.</small>
+      </section>
 
       <section class="capture-panel" aria-labelledby="captureTitle">
         <strong id="captureTitle">Visual context (read-only)</strong>
@@ -625,7 +709,7 @@
             <button class="suggestion" type="button" data-prompt="Help me plan a project with clear milestones and next steps."><strong>Plan a project</strong>Turn an idea into clear milestones and next steps</button>
             <button class="suggestion" type="button" data-prompt="Help me summarize and compare my documents."><strong>Work with documents</strong>Summarize, compare, or transform your files</button>
             <button class="suggestion" type="button" data-prompt="Help me create a polished brief from an idea."><strong>Create something</strong>Draft a presentation, image, or polished brief</button>
-            <button class="suggestion" type="button" data-prompt="I'd like to talk through an idea."><strong>Talk it through</strong>Use Fast Voice for a natural live conversation</button>
+            <button class="suggestion" type="button" data-prompt="I'd like to talk through an idea."><strong>Talk it through</strong>Use Full Force Voice for a natural, tool-enabled conversation</button>
           </div>
         </section>
       </div>
@@ -674,6 +758,22 @@
   </div>
 
   <audio id="pjAudio" autoplay></audio>
+
+  <dialog id="canvasDialog" class="canvas-dialog" aria-labelledby="canvasTitle">
+    <div class="canvas-shell">
+      <header class="canvas-toolbar">
+        <div class="canvas-view-toggle" aria-label="Canvas view">
+          <button id="canvasPreviewBtn" type="button" aria-pressed="true">Preview</button>
+          <button id="canvasSourceBtn" type="button" aria-pressed="false">Code</button>
+        </div>
+        <div class="canvas-title"><strong id="canvasTitle">Canvas</strong><small>Interactive HTML canvas</small></div>
+        <a id="canvasDownload" class="canvas-icon-btn" download>Download</a>
+        <button id="canvasFullscreenBtn" class="canvas-icon-btn" type="button" aria-label="Toggle fullscreen">⛶</button>
+        <button id="canvasCloseBtn" class="canvas-icon-btn" type="button" aria-label="Close canvas">✕</button>
+      </header>
+      <div id="canvasStage" class="canvas-stage"><div class="canvas-loading">Loading canvas…</div></div>
+    </div>
+  </dialog>
 
   <script type="module">
     // The ?v= query busts stale cached copies of the module; bump it whenever
@@ -725,9 +825,11 @@
       refreshCapabilitiesBtn: document.getElementById("refreshCapabilitiesBtn"),
       capabilityStatus: document.getElementById("capabilityStatus"),
       toolSummary: document.getElementById("toolSummary"),
-      realtimeModeBtn: document.getElementById("realtimeModeBtn"),
       fullPowerVoiceModeBtn: document.getElementById("fullPowerVoiceModeBtn"),
       fullPowerModeBtn: document.getElementById("fullPowerModeBtn"),
+      codexAction: document.getElementById("codexAction"),
+      codexPrompt: document.getElementById("codexPrompt"),
+      runCodexBtn: document.getElementById("runCodexBtn"),
       modeNote: document.getElementById("modeNote"),
       fullPowerControls: document.getElementById("fullPowerControls"),
       sessionSelect: document.getElementById("sessionSelect"),
@@ -752,6 +854,14 @@
       capturePreview: document.getElementById("capturePreview"),
       captureVideo: document.getElementById("captureVideo"),
       captureOverlay: document.getElementById("captureOverlay"),
+      canvasDialog: document.getElementById("canvasDialog"),
+      canvasStage: document.getElementById("canvasStage"),
+      canvasTitle: document.getElementById("canvasTitle"),
+      canvasPreviewBtn: document.getElementById("canvasPreviewBtn"),
+      canvasSourceBtn: document.getElementById("canvasSourceBtn"),
+      canvasDownload: document.getElementById("canvasDownload"),
+      canvasFullscreenBtn: document.getElementById("canvasFullscreenBtn"),
+      canvasCloseBtn: document.getElementById("canvasCloseBtn"),
     };
 
     const state = {
@@ -764,7 +874,7 @@
       activeStartRequestId: null,
       liveAnnounced: false,
       toolCatalog: null,
-      mode: MODE.REALTIME,
+      mode: MODE.FULL_POWER_VOICE,
       fullPowerSessionId: null,
       activeSessionId: null,
       fullPowerBusy: false,
@@ -798,6 +908,8 @@
       captureTimer: null,
       captureBytes: 0,
       captureStartedAt: 0,
+      canvasSource: "",
+      canvasObjectUrl: null,
     };
 
     const savedBase = localStorage.getItem(STORAGE_KEY);
@@ -1344,7 +1456,6 @@
         stopFullPowerSession({ announce: false, preserveSession: true });
       }
       state.mode = mode;
-      el.realtimeModeBtn.classList.toggle("active", mode === MODE.REALTIME);
       el.fullPowerVoiceModeBtn.classList.toggle(
         "active", mode === MODE.FULL_POWER_VOICE
       );
@@ -1357,22 +1468,22 @@
         ? "End Session"
         : "Close Conversation";
       el.modeNote.textContent = mode === MODE.REALTIME
-        ? "Fast Voice responds immediately through Realtime and stores finalized transcripts."
+        ? "Realtime voice is available as an internal compatibility mode."
         : mode === MODE.FULL_POWER_VOICE
-          ? "Full Power Voice refines each completed transcript before PJ responds and preserves the original wording in shared history."
+          ? "Full Force Voice refines every completed thought before using PJ's full Responses runtime, while preserving your original wording in shared history."
           : "Full Power Text uses PJ's terminal-equivalent Responses runtime: web and file search, MCP, local tools, citations, structured output, and shared history.";
       const idleText = mode === MODE.REALTIME
-        ? "Fast Voice idle"
+        ? "Realtime Voice idle"
         : mode === MODE.FULL_POWER_VOICE
-          ? "Full Power Voice idle"
+          ? "Full Force Voice idle"
           : "Full Power Text idle";
       setPhase(PHASE.IDLE, idleText);
       appendBubble(
         "system",
         mode === MODE.REALTIME
-          ? "Fast Voice selected."
+          ? "Realtime Voice selected."
           : mode === MODE.FULL_POWER_VOICE
-            ? "Full Power Voice selected."
+            ? "Full Force Voice selected."
             : "Full Power Text selected. Start or resume a conversation.",
       );
       refreshCurrentCapabilities({ forceRefresh: false });
@@ -1853,8 +1964,8 @@
         appendBubble(
           "system",
           state.mode === MODE.FULL_POWER_VOICE
-            ? "Starting Full Power Voice session..."
-            : "Starting Fast Voice session...",
+            ? "Starting Full Force Voice session..."
+            : "Starting Realtime Voice session...",
         );
         const health = await checkBackendHealth(apiBase, requestId);
         await refreshCapabilities(apiBase, requestId, { health, forceRefresh: false });
@@ -2288,6 +2399,47 @@
         return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
       }
 
+      function renderCanvasView(sourceMode = false) {
+        el.canvasPreviewBtn.setAttribute("aria-pressed", String(!sourceMode));
+        el.canvasSourceBtn.setAttribute("aria-pressed", String(sourceMode));
+        el.canvasStage.replaceChildren();
+        if (sourceMode) {
+          const source = document.createElement("pre");
+          source.className = "canvas-source";
+          source.textContent = state.canvasSource;
+          el.canvasStage.appendChild(source);
+          return;
+        }
+        const frame = document.createElement("iframe");
+        frame.className = "canvas-frame";
+        frame.title = `${el.canvasTitle.textContent} preview`;
+        frame.sandbox = "allow-scripts allow-forms allow-modals allow-pointer-lock allow-downloads";
+        frame.src = state.canvasObjectUrl;
+        el.canvasStage.appendChild(frame);
+      }
+
+      async function openCanvas(artifact, downloadUrl) {
+        el.canvasTitle.textContent = artifact.filename;
+        el.canvasStage.innerHTML = '<div class="canvas-loading">Loading canvas…</div>';
+        el.canvasDialog.showModal();
+        try {
+          const response = await fetchWithTimeout(downloadUrl.href, {
+            credentials: "include",
+            headers: requestHeaders(createRequestId()),
+          }, 15000);
+          if (!response.ok) throw new Error(`Canvas download failed (${response.status})`);
+          const source = await response.text();
+          if (state.canvasObjectUrl) URL.revokeObjectURL(state.canvasObjectUrl);
+          state.canvasSource = source;
+          state.canvasObjectUrl = URL.createObjectURL(new Blob([source], { type: "text/html" }));
+          el.canvasDownload.href = state.canvasObjectUrl;
+          el.canvasDownload.download = artifact.filename;
+          renderCanvasView(false);
+        } catch (error) {
+          el.canvasStage.textContent = shorten(String(error), 300);
+        }
+      }
+
       function renderArtifactCard(artifact) {
         if (!artifact?.artifact_id || !artifact.filename || !artifact.download_url) return;
         let downloadUrl;
@@ -2322,7 +2474,17 @@
             button.dataset.artifactAction = label.toLowerCase().replaceAll(" ", "-");
             actions.appendChild(button);
           }
-          card.append(title, meta, validation, link, actions);
+          card.append(title, meta, validation);
+          if (String(artifact.mime_type || "").startsWith("text/html")) {
+            const open = document.createElement("button");
+            open.type = "button";
+            open.className = "canvas-open";
+            open.textContent = "Open canvas";
+            open.addEventListener("click", () => openCanvas(artifact, downloadUrl));
+            card.appendChild(open);
+          }
+          card.appendChild(link);
+          card.appendChild(actions);
           el.artifactPanelList.appendChild(card);
           state.artifactCards.set(artifact.artifact_id, card);
         }
@@ -2560,6 +2722,35 @@
           state.fullPowerBusy = false;
           state.responsesAbortController = null;
           if (state.phase === PHASE.LIVE) el.sendBtn.disabled = false;
+        }
+      }
+
+      async function runCodexTask() {
+        const task = el.codexPrompt.value.trim();
+        if (!task || state.fullPowerBusy) {
+          if (!task) appendBubble("system", "Describe the coding task before opening Codex.");
+          return;
+        }
+        const action = el.codexAction.value;
+        const instructions = {
+          analyze: "Use codex_analyze in its read-only sandbox to analyze this coding task. Report findings, evidence, and recommended next steps:",
+          delegate: "Use run_codex_task to implement this coding task. Request owner approval before any gated execution, preserve the sandbox policy, and report changed files plus validation:",
+          artifact: "Use codex_generate_artifact to create the requested coding deliverable and return every resulting artifact:",
+        };
+        el.runCodexBtn.disabled = true;
+        try {
+          if (state.mode !== MODE.FULL_POWER) setMode(MODE.FULL_POWER);
+          if (state.phase === PHASE.IDLE) await startFullPowerSession();
+          if (state.phase !== PHASE.LIVE || !state.fullPowerSessionId) {
+            throw new Error("Full Power could not start for Codex.");
+          }
+          el.textInput.value = `${instructions[action] || instructions.analyze}\n\n${task}`;
+          await sendFullPowerMessage();
+          el.codexPrompt.value = "";
+        } catch (error) {
+          appendBubble("system", `Codex could not start: ${shorten(String(error), 260)}`);
+        } finally {
+          el.runCodexBtn.disabled = false;
         }
       }
 
@@ -3077,12 +3268,12 @@
         appendBubble("system", `Capability catalog refreshed: ${count} local tools loaded.`);
       }
     });
-    el.realtimeModeBtn.addEventListener("click", () => setMode(MODE.REALTIME));
     el.fullPowerVoiceModeBtn.addEventListener(
       "click",
       () => setMode(MODE.FULL_POWER_VOICE),
     );
     el.fullPowerModeBtn.addEventListener("click", () => setMode(MODE.FULL_POWER));
+    el.runCodexBtn.addEventListener("click", runCodexTask);
     el.refreshSessionsBtn.addEventListener("click", refreshFullPowerSessions);
     el.sessionSelect.addEventListener("change", () => {
       if (el.sessionSelect.value) resumeFullPowerSession(el.sessionSelect.value);
@@ -3108,6 +3299,20 @@
         event.preventDefault();
         sendSelectedMessage();
       }
+    });
+    el.canvasPreviewBtn.addEventListener("click", () => renderCanvasView(false));
+    el.canvasSourceBtn.addEventListener("click", () => renderCanvasView(true));
+    el.canvasCloseBtn.addEventListener("click", () => el.canvasDialog.close());
+    el.canvasFullscreenBtn.addEventListener("click", async () => {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await el.canvasDialog.requestFullscreen();
+    });
+    el.canvasDialog.addEventListener("close", () => {
+      if (document.fullscreenElement === el.canvasDialog) document.exitFullscreen();
+      if (state.canvasObjectUrl) URL.revokeObjectURL(state.canvasObjectUrl);
+      state.canvasObjectUrl = null;
+      state.canvasSource = "";
+      el.canvasStage.replaceChildren();
     });
     document.querySelectorAll?.("[data-prompt]").forEach((button) => {
       button.addEventListener("click", () => {

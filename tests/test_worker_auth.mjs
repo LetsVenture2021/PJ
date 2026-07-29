@@ -1074,7 +1074,9 @@ test("browser module initializes with Full Power helpers in shared scope", async
          ? { ...window.__directToolOutput, version: PROTOCOL_VERSION }
          : (url.endsWith("/health")
              ? { ok: true, version: PROTOCOL_VERSION }
-             : { tools: [], version: PROTOCOL_VERSION });
+             : (url.endsWith("/responses/prompt-perfect")
+                 ? { prompt: { refined_prompt: "Hello PJ", version: "test", refined_sha256: "a".repeat(64), changed: false }, version: PROTOCOL_VERSION }
+                 : { tools: [], version: PROTOCOL_VERSION }));
        return new Response(
          JSON.stringify(payload),
          { status: 200, headers: { "content-type": "application/json" } },
@@ -1194,6 +1196,7 @@ test("browser module initializes with Full Power helpers in shared scope", async
   assert.equal(typeof listeners.get("startBtn:click"), "function");
   assert.equal(typeof listeners.get("fullPowerModeBtn:click"), "function");
   assert.equal(typeof listeners.get("fullPowerVoiceModeBtn:click"), "function");
+  assert.equal(typeof listeners.get("runCodexBtn:click"), "function");
   assert.equal(typeof listeners.get("refreshSessionsBtn:click"), "function");
   assert.match(moduleSource, /event\.type === "artifact\.ready"/);
   assert.match(moduleSource, /className = "artifact-download"/);
@@ -1211,6 +1214,10 @@ test("browser module initializes with Full Power helpers in shared scope", async
   assert.doesNotMatch(html, /persistAssistantRealtimeItem\(item, "completed"\)/);
   assert.match(html, /artifact-image-preview/);
   assert.match(html, /startsWith\("image\/"\)/);
+  assert.match(html, /className = "canvas-open"/);
+  assert.match(html, /frame\.sandbox = "allow-scripts allow-forms allow-modals allow-pointer-lock allow-downloads"/);
+  assert.match(html, /URL\.createObjectURL\(new Blob\(\[source\], \{ type: "text\/html" \}\)\)/);
+  assert.match(html, /state\.canvasObjectUrl\) URL\.revokeObjectURL/);
   assert.doesNotMatch(html, /innerHTML\s*=\s*event\./);
   assert.match(
     hooks.validateInboundRealtimeEvent({

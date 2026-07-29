@@ -1,20 +1,152 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://pj.local/schemas/documents/document-metadata-v1.json",
-  "title": "PJ document metadata",
   "type": "object",
   "additionalProperties": false,
-  "required": ["document_id", "path", "class", "owner", "audience", "classification", "status", "sha256"],
   "properties": {
-    "document_id": {"type": "string", "pattern": "^[A-Z]+-[A-Za-z0-9._-]+$"},
-    "path": {"type": "string", "pattern": "^(docs|documents)/"},
-    "class": {"enum": ["business", "operational", "technical", "audit", "corpus", "evidence"]},
-    "owner": {"type": "string", "minLength": 1},
-    "audience": {"type": "string", "minLength": 1},
-    "classification": {"enum": ["public", "internal", "restricted"]},
-    "status": {"enum": ["draft", "in_review", "approved", "superseded", "retired"]},
-    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
-    "review_interval_days": {"type": "integer", "minimum": 1},
-    "source_of_truth": {"type": "boolean"}
-  }
+    "schema_version": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\\\d*)\\\\.(0|[1-9]\\\\d*)\\\\.(0|[1-9]\\\\d*)(?:-[0-9A-Za-z.-]+)?(?:\\\\+[0-9A-Za-z.-]+)?$"
+    },
+    "stable_id": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+){1,15}$"
+    },
+    "path": {
+      "type": "string",
+      "pattern": "^(?:documents|docs)/[^/].+$"
+    },
+    "class": {
+      "enum": [
+        "business",
+        "operational",
+        "technical",
+        "audit",
+        "corpus",
+        "structured-data"
+      ]
+    },
+    "owner": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9 ._@-]{1,127}$"
+    },
+    "status": {
+      "enum": [
+        "draft",
+        "in_review",
+        "approved",
+        "published",
+        "deprecated",
+        "superseded",
+        "archived"
+      ]
+    },
+    "classification": {
+      "enum": [
+        "public",
+        "internal",
+        "confidential",
+        "restricted"
+      ]
+    },
+    "source_of_truth": {
+      "type": "boolean"
+    },
+    "content_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "last_reviewed_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^\\\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\\\d|3[01])T(?:[01]\\\\d|2[0-3]):[0-5]\\\\d:[0-5]\\\\d(?:\\\\.\\\\d+)?Z$"
+    },
+    "next_review_at": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^\\\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\\\d|3[01])T(?:[01]\\\\d|2[0-3]):[0-5]\\\\d:[0-5]\\\\d(?:\\\\.\\\\d+)?Z$"
+    },
+    "quality_profile": {
+      "enum": [
+        "business",
+        "operational",
+        "technical",
+        "audit",
+        "corpus",
+        "structured-data"
+      ]
+    },
+    "supersedes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+){1,15}$"
+      },
+      "uniqueItems": true
+    },
+    "superseded_by": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+){1,15}$"
+      },
+      "uniqueItems": true
+    },
+    "derived_from": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+){1,15}$"
+      },
+      "uniqueItems": true
+    },
+    "supports": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+){1,15}$"
+      },
+      "uniqueItems": true
+    },
+    "references": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+){1,15}$"
+      },
+      "uniqueItems": true
+    },
+    "generated_artifacts": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+){1,15}$"
+      },
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "schema_version",
+    "stable_id",
+    "path",
+    "class",
+    "owner",
+    "status",
+    "classification",
+    "source_of_truth",
+    "content_sha256",
+    "last_reviewed_at",
+    "next_review_at",
+    "quality_profile",
+    "supersedes",
+    "superseded_by",
+    "derived_from",
+    "supports",
+    "references",
+    "generated_artifacts"
+  ]
 }

@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pj.local/schemas/documents/document-provenance-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\\\d*)\\\\.(0|[1-9]\\\\d*)\\\\.(0|[1-9]\\\\d*)(?:-[0-9A-Za-z.-]+)?(?:\\\\+[0-9A-Za-z.-]+)?$"
+    },
+    "stable_id": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+){1,15}$"
+    },
+    "provenance_id": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+){1,15}$"
+    },
+    "recorded_at": {
+      "type": "string",
+      "pattern": "^\\\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\\\d|3[01])T(?:[01]\\\\d|2[0-3]):[0-5]\\\\d:[0-5]\\\\d(?:\\\\.\\\\d+)?Z$"
+    },
+    "content_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "actor": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 128
+    },
+    "activity": {
+      "enum": [
+        "created",
+        "imported",
+        "revised",
+        "reviewed",
+        "approved",
+        "published",
+        "generated"
+      ]
+    },
+    "inputs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+){1,15}$"
+      },
+      "uniqueItems": true
+    },
+    "previous_version": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+){1,15}$"
+    }
+  },
+  "required": [
+    "schema_version",
+    "stable_id",
+    "provenance_id",
+    "recorded_at",
+    "content_sha256",
+    "actor",
+    "activity",
+    "inputs",
+    "previous_version"
+  ]
+}

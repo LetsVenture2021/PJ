@@ -69,6 +69,7 @@ from ops.realtime.payload_validation import (
 from ops.conversations.models import ConversationContext, ConversationRequest
 from ops.conversations.routing import CapabilityRouter, RoutingError
 from ops.conversations.service import ConversationService
+from ops.jobs.service import create_jobs_blueprint
 from ops.workflows.ui import create_workflow_blueprint
 from runtime_config import load_runtime_config
 from realtime_config import realtime_session_config, realtime_tool_schemas
@@ -152,6 +153,8 @@ app.config.update(
 )
 app.config.setdefault("UPLOAD_SCANNER", None)
 app.config.setdefault("CONVERSATION_SERVICE", ConversationService())
+app.config.setdefault("JOB_SERVICE", None)
+app.register_blueprint(create_jobs_blueprint(lambda: app.config["JOB_SERVICE"]))
 CORS(app)  # allow local browser origins when running on localhost
 app.register_blueprint(create_workflow_blueprint())
 

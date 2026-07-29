@@ -5,6 +5,9 @@ PJ is a standalone Chief of Staff. This module lets PJ automate and
 streamline the creation of mission-critical documents with governance
 adapted from production document-pipeline practice:
 
+  STANDARD   — every DocOps source and export is governed by the normative
+               docs/document-quality-standard.md specification.
+
   TEMPLATES  — versioned, structured templates define required sections
                so every document of a type is complete and consistent.
   DRAFT      — PJ drafts content section-by-section; it is validated
@@ -49,8 +52,9 @@ from pathlib import Path
 
 import fcntl
 import presentationops
-from ops.shared.io import atomic_copy, sha256_file
 from ops.docs.quality import validate_content
+from ops.shared.io import atomic_copy, sha256_file
+from ops.shared.sqlite import atomic_sqlite_connection
 
 try:
     import markdown as _markdown
@@ -230,8 +234,7 @@ def _ensure_immutable_artifacts(conn):
 
 @contextmanager
 def _db():
-    conn = sqlite3.connect(_DB_PATH)
-    try:
+    with atomic_sqlite_connection(_DB_PATH) as conn:
         conn.execute("""CREATE TABLE IF NOT EXISTS docops_templates (
             name TEXT PRIMARY KEY,
             version INTEGER DEFAULT 1,
@@ -368,6 +371,46 @@ def _db():
             FOREIGN KEY (doc_id, version)
                 REFERENCES docops_documents(doc_id, version)
         )""")
+        # Governance is additive: existing document rows and their evidence remain untouched.
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_manifest_records (
+            stable_id TEXT PRIMARY KEY,
+            path TEXT NOT NULL UNIQUE,
+            document_class TEXT NOT NULL,
+            owner TEXT NOT NULL,
+            lifecycle_status TEXT NOT NULL,
+            source_of_truth INTEGER NOT NULL DEFAULT 0,
+            content_sha256 TEXT NOT NULL,
+            last_reviewed_at TEXT,
+            next_review_at TEXT,
+            quality_profile TEXT,
+            imported_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_relationships (
+            stable_id TEXT NOT NULL,
+            relationship TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (stable_id, relationship, target_id)
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_quality_reports (
+            report_id TEXT PRIMARY KEY, stable_id TEXT NOT NULL,
+            profile TEXT NOT NULL, passed INTEGER NOT NULL,
+            report_json TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_approvals (
+            approval_id TEXT PRIMARY KEY, stable_id TEXT NOT NULL,
+            decision TEXT NOT NULL, approver TEXT NOT NULL,
+            decided_at TEXT NOT NULL, supersedes_approval_id TEXT
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_provenance (
+            provenance_id TEXT PRIMARY KEY, stable_id TEXT NOT NULL,
+            record_json TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_waivers (
+            waiver_id TEXT PRIMARY KEY, stable_id TEXT NOT NULL,
+            control_id TEXT NOT NULL, expires_at TEXT,
+            record_json TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
         _ensure_immutable_artifacts(conn)
         # Seed starter templates once.
         have = {r[0] for r in conn.execute("SELECT name FROM docops_templates").fetchall()}
@@ -397,9 +440,6 @@ def _db():
                 (key, name, name, name),
             )
         yield conn
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def _now():
@@ -1883,6 +1923,22 @@ def finalize_document(doc_id: str) -> dict:
                 "path": path,
             }
         else:
+            markers = sorted({marker for marker in BLOCKING_MARKERS if marker in content})
+            if markers:
+                return {
+                    "status": "blocked",
+                    "unresolved_markers": markers,
+                    "reason": "resolve markers via revise_document first",
+                }
+            from ops.docs.quality import validate_document
+
+            quality_report = validate_document(p)
+            if quality_report.failed:
+                return {
+                    "status": "blocked",
+                    "reason": "document quality gate failed",
+                    "quality_report": quality_report.as_dict(),
+                }
             content = content.replace("**Status:** DRAFT", "**Status:** FINAL", 1)
             p.write_text(content)
             new_sha = _hash(content)
@@ -1974,7 +2030,14 @@ def finalize_document(doc_id: str) -> dict:
                 "sha256": new_sha,
                 "path": path,
             }
-    return _attach_source_artifact(result)
+    attached = _attach_source_artifact(result)
+    if "quality_report" not in attached:
+        from ops.docs.quality import validate_document
+
+        attached["quality_report"] = validate_document(attached["path"]).as_dict()
+    if isinstance(attached.get("artifact"), dict):
+        attached["artifact"]["quality_report"] = attached["quality_report"]
+    return attached
 
 
 def validate_document(doc_id: str, version: int = 0) -> dict:
@@ -2867,6 +2930,13 @@ def _attach_source_artifact(result: dict) -> dict:
             )
             if result["artifact"]["sha256"] != expected_sha:
                 raise ValueError("source artifact bytes do not match the governed SHA-256")
+            # Document creation has two intentionally separate outputs: the
+            # immutable user download above, and normalized Markdown sent to
+            # the configured vector store(s). Ingestion is best-effort and
+            # never makes the user deliverable unavailable.
+            from ops.docs.auto_vectorize import vectorize_document_export
+
+            result["vectorized"] = vectorize_document_export(result["doc_id"], result["version"])
     except (OSError, ValueError) as exc:
         result["artifact_error"] = f"source artifact registration failed: {exc}"
     return result
@@ -3618,6 +3688,13 @@ DOCOPS_SCHEMAS = [
     },
 ]
 
+_DOCUMENT_QUALITY_STANDARD_NOTICE = (
+    " Govern this source and every export under the normative "
+    "docs/document-quality-standard.md specification."
+)
+for _docops_schema in DOCOPS_SCHEMAS:
+    _docops_schema["description"] += _DOCUMENT_QUALITY_STANDARD_NOTICE
+
 DOCOPS_DISPATCH = {
     "list_doc_templates": list_doc_templates,
     "create_doc_template": create_doc_template,
@@ -3646,7 +3723,25 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
     """Export plus quiet vector ingestion of the document source."""
     result = _export_document_core(doc_id, format, version)
     if isinstance(result, dict) and not result.get("error"):
+        if result.get("audience_ready") and result.get("artifact"):
+            from ops.docs.quality import validate_document
+
+            with _db() as conn:
+                row = conn.execute(
+                    "SELECT path FROM docops_documents WHERE doc_id=? AND version=?",
+                    (doc_id, int(result.get("version", version))),
+                ).fetchone()
+            if row:
+                quality_report = validate_document(row[0]).as_dict()
+                result["quality_report"] = quality_report
+                result["artifact"]["quality_report"] = quality_report
         from ops.docs.auto_vectorize import vectorize_document_export
 
         result["vectorized"] = vectorize_document_export(doc_id, version)
     return result
+
+
+# DOCOPS_DISPATCH is constructed before the compatibility wrapper above so
+# replace the core reference explicitly. Chat tool calls must get the same
+# vector-ingestion behavior as direct Python callers.
+DOCOPS_DISPATCH["export_document"] = export_document
