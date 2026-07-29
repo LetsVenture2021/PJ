@@ -55,7 +55,11 @@ def _decode_header(value: str | None) -> str:
     pieces: list[str] = []
     for chunk, charset in decode_header(value or ""):
         if isinstance(chunk, bytes):
-            pieces.append(chunk.decode(charset or "utf-8", errors="replace"))
+            encoding = charset or "utf-8"
+            try:
+                pieces.append(chunk.decode(encoding, errors="replace"))
+            except LookupError:
+                pieces.append(chunk.decode("utf-8", errors="replace"))
         else:
             pieces.append(chunk)
     return " ".join("".join(pieces).split())[:MAX_HEADER_CHARS]
