@@ -29,11 +29,14 @@ CF_ACCESS_AUD = "replace-with-access-application-aud"
 PJ_TOOL_BRIDGE_URL = "https://replace-with-private-runtime/execute-tool"
 PJ_TOOL_SCHEMAS_URL = "https://replace-with-private-runtime/tool-schemas"
 PJ_MAX_UPLOAD_BYTES = "104857600"
+PJ_COLLABORATION_ENABLED = "false"
 
 # Store these with `wrangler secret put`; never commit their values:
 # OPENAI_API_KEY
 # PJ_OWNER_EMAILS
 # PJ_TOOL_BRIDGE_TOKEN
+# PJ_IDENTITY_CONFIG (required JSON secret when collaboration is enabled)
+# PJ_TENANT_CONFIG (required JSON secret when collaboration is enabled)
 #
 # PJ_TOOL_BRIDGE_URL and PJ_TOOL_SCHEMAS_URL must target the private runtime.
 # PJ_RESPONSES_BRIDGE_URL may optionally override the runtime base URL used for
