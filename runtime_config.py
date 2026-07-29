@@ -45,6 +45,7 @@ class RuntimeConfig:
     worker: dict[str, Any]
     providers: dict[str, Any]
     execution_modes: dict[str, Any]
+    collaboration: dict[str, Any]
     sources: dict[str, Path]
 
 
@@ -403,6 +404,11 @@ def load_runtime_config(
                 },
             },
         ),
+        "collaboration": {
+            "enabled": False,
+            "identity_provider": "",
+            "tenant_store": "",
+        },
     }
 
     if environ.get("PJ_MODEL"):
@@ -444,6 +450,20 @@ def load_runtime_config(
     if not isinstance(worker, dict):
         raise ConfigError("worker configuration must be an object")
     _validate_provider_routing(sections)
+    collaboration = sections["collaboration"]
+    if not isinstance(collaboration, dict) or not isinstance(collaboration.get("enabled"), bool):
+        raise ConfigError("collaboration.enabled must be a boolean")
+    if collaboration["enabled"] and selected == "prod":
+        missing = [
+            field
+            for field in ("identity_provider", "tenant_store")
+            if not isinstance(collaboration.get(field), str) or not collaboration[field].strip()
+        ]
+        if missing:
+            raise ConfigError(
+                "Production collaboration requires identity and tenant configuration: "
+                + ", ".join(missing)
+            )
 
     return RuntimeConfig(
         profile=selected,
@@ -454,6 +474,7 @@ def load_runtime_config(
         worker=copy.deepcopy(worker),
         providers=copy.deepcopy(sections["providers"]),
         execution_modes=copy.deepcopy(sections["execution_modes"]),
+        collaboration=copy.deepcopy(collaboration),
         sources={
             "assistant": assistant_path,
             "mcp_servers": mcp_path,
