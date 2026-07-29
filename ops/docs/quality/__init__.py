@@ -1,5 +1,6 @@
 """Deterministic document quality and security gates."""
 
+from ops.docs.quality.validation import validate_content, validate_path
 from ops.docs.quality.scorecard import (
     calculate_scorecard,
     generate_monthly_scorecard,
@@ -19,4 +20,6 @@ __all__ = [
     "regression_alerts",
     "scan_text",
     "validate_audience",
+    "validate_content",
+    "validate_path",
 ]

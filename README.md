@@ -6,6 +6,7 @@ voice, a local browser client, and an optional Cloudflare Worker edge proxy.
 
 ## Documentation
 
+- [Document quality standard](docs/document-quality-standard.md)
 - [Architecture and technology-stack assessment (July 29, 2026)](docs/architecture-stack-assessment-2026-07-29.md)
 - [Market-competitive capability gaps](docs/market-competitive-capabilities-2026-07-29.md)
   prioritizes the additional product capabilities PJ needs for parity and
