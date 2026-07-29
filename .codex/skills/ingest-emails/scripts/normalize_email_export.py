@@ -172,12 +172,14 @@ def normalize(source: Path, output: Path, max_bytes: int, max_messages: int) -> 
     fd, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as destination:
+            limit_reached = False
             for path in _input_files(source):
                 counts["discovered"] += 1
                 try:
                     for source_name, message in _messages(path, max_bytes):
                         if counts["written"] >= max_messages:
-                            raise ValueError("message limit reached")
+                            limit_reached = True
+                            break
                         record = _record(message, source_name)
                         digest = str(record["digest"])
                         if digest in seen:
@@ -186,6 +188,8 @@ def normalize(source: Path, output: Path, max_bytes: int, max_messages: int) -> 
                         seen.add(digest)
                         destination.write(json.dumps(record, ensure_ascii=False) + "\n")
                         counts["written"] += 1
+                    if limit_reached:
+                        break
                 except (OSError, ValueError, mailbox.Error):
                     counts["skipped"] += 1
             destination.flush()
