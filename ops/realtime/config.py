@@ -10,6 +10,7 @@ Both configure the same realtime session: PJ's model, instructions, voice,
 server-side VAD, live input transcription, and the same function-calling
 "skills" used by pj.py.
 """
+
 import skills
 from runtime_config import load_runtime_config
 from responses_runtime import ADVANCED_DELEGATION_TOOL, load_instructions
