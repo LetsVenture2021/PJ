@@ -35,6 +35,7 @@ _IDENTIFIER_RE = re.compile(
     r"(?<!\w)(?:[A-Za-z0-9]+(?:[_:/.-][A-Za-z0-9]+)+|"
     r"(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*\d)[A-Za-z0-9]+)(?!\w)"
 )
+_MACHINE_IDENTIFIER_RE = re.compile(r"[_:/.\d]")
 
 
 class PromptPerfectingError(RuntimeError):
@@ -196,13 +197,20 @@ def _validate_result(original: str, payload: dict, max_output_chars: int) -> dic
 
 
 def _missing_preserved_literals(original: str, refined: str) -> set[str]:
+    def identifiers(text: str) -> set[str]:
+        values = set()
+        for item in _IDENTIFIER_RE.findall(text):
+            if _MACHINE_IDENTIFIER_RE.search(item) or any(char.isupper() for char in item):
+                values.add(item)
+        return values
+
     extractors = {
         "URL": lambda text: {item.rstrip(".,);]") for item in _URL_RE.findall(text)},
         "date": lambda text: set(_DATE_RE.findall(text)),
         "quantity": lambda text: set(_QUANTITY_RE.findall(text)),
         "quoted": lambda text: {match.group(0) for match in _QUOTED_RE.finditer(text)},
         "code": lambda text: set(_FENCED_CODE_RE.findall(text) + _INLINE_CODE_RE.findall(text)),
-        "identifier": lambda text: set(_IDENTIFIER_RE.findall(text)),
+        "identifier": identifiers,
     }
     missing = set()
     for category, extract in extractors.items():
