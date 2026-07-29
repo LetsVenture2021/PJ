@@ -1,0 +1,1 @@
+{"counts":{"blocker":0,"critical":0,"info":0,"warning":1},"findings":[{"location":"document","rule_id":"DOC-PROV-001","severity":"warning"}],"profile":"security","schema_version":"1.0.0","source":"docs/security-controls.md","source_sha256":"f35afc1f79a7b08174bfd1fec4e60bba6b5664b2f15149ea34099d7c8185b189","standard_version":"1.0.0","status":"pass"}

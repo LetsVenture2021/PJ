@@ -13,6 +13,7 @@ compatibility_date = "2026-07-28"
 # Bind only API paths so the existing frontend can continue serving `/` and
 # `/assets/*`. Protect these paths with the same owner-only Access application.
 routes = [
+  { pattern = "pj-assistant.ai/conversations*", zone_name = "pj-assistant.ai" },
   { pattern = "pj-assistant.ai/health", zone_name = "pj-assistant.ai" },
   { pattern = "pj-assistant.ai/session", zone_name = "pj-assistant.ai" },
   { pattern = "pj-assistant.ai/token", zone_name = "pj-assistant.ai" },
