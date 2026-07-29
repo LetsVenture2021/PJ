@@ -75,6 +75,22 @@ class DocumentQualityTests(unittest.TestCase):
         self.assertIn("DOC-SEC-002", serialized)
         self.assertNotIn(secret, serialized)
 
+    def test_git_conflict_markers_block_manifest_validation_without_raw_content(self):
+        confidential = "internal resolution details"
+        report = self.report(f"# T\n\n<<<<< ours\n{confidential}\n")
+        serialized = report.to_json()
+        self.assertIn("DOC-COMPLETE-002", {item.rule_id for item in report.findings})
+        self.assertTrue(report.failed)
+        self.assertNotIn(confidential, serialized)
+
+    def test_git_diff3_marker_blocks_manifest_validation(self):
+        report = self.report("# T\n\n||||| base\n")
+        self.assertIn("DOC-COMPLETE-002", {item.rule_id for item in report.findings})
+
+    def test_equals_divider_is_not_a_manifest_conflict_marker(self):
+        report = self.report("# T\n\n=======\n")
+        self.assertNotIn("DOC-COMPLETE-002", {item.rule_id for item in report.findings})
+
     def test_malformed_utf8_is_a_sanitized_blocker(self):
         report = self.report(b"# title\n\xffsecret")
         self.assertEqual(report.findings[0].rule_id, "DOC-INPUT-001")

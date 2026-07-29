@@ -1,0 +1,4 @@
+interface:
+  display_name: "Full Stack App Creator"
+  short_description: "Build production-ready full-stack applications"
+  default_prompt: "Use $full-stack-app-creator to design and build a production-ready web application from end to end."

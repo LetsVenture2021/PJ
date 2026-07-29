@@ -21,6 +21,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+import tempfile
 import zipfile
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -51,6 +52,7 @@ from ops.docs import formats as upload_formats
 from ops.productivity.ui import blueprint as productivity_blueprint
 from ops.docs import uploads as document_uploads
 from ops.artifacts import ArtifactError, ArtifactFacade
+from ops.projects import service as projects
 from pj_contract import CONTRACT_VERSION, PROTOCOL_VERSION
 from ops.shared.logging import (
     bind_log_context,
@@ -1075,12 +1077,192 @@ def health():
                 "/responses/artifacts/<artifact-id>",
                 "/upload/files",
                 "/upload/folder",
+                "/projects",
                 "/health",
             ],
         },
         status=200,
         req_id=req_id,
     )
+
+
+def _project_owner_id():
+    """Return the authenticated owner namespace without trusting request bodies."""
+    value = (request.headers.get("X-PJ-Owner-ID") or "local-owner").strip()
+    return value[:200] or "local-owner"
+
+
+def _project_error(exc, req_id, status=400):
+    return _error_response("project_error", str(exc), status, req_id)
+
+
+@app.route("/projects", methods=["GET", "POST"])
+def projects_collection():
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id)
+    if auth_error:
+        return auth_error
+    owner_id = _project_owner_id()
+    try:
+        if request.method == "GET":
+            include_archived = request.args.get("include_archived") == "1"
+            records = projects.list_projects(owner_id, include_archived=include_archived)
+            return _json_response(
+                {"ok": True, "count": len(records), "projects": records}, req_id=req_id
+            )
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) - {"name", "description", "template_id"}:
+            return _error_response("invalid_project", "Invalid project payload.", 400, req_id)
+        record = projects.create_project(
+            owner_id,
+            payload.get("name", ""),
+            payload.get("description", ""),
+            template_id=payload.get("template_id"),
+        )
+        return _json_response({"ok": True, "project": record}, 201, req_id)
+    except projects.ProjectError as exc:
+        return _project_error(exc, req_id)
+
+
+@app.route("/projects/<project_id>", methods=["GET", "PATCH", "DELETE"])
+def project_item(project_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id)
+    if auth_error:
+        return auth_error
+    owner_id = _project_owner_id()
+    try:
+        if request.method == "GET":
+            record = projects.get_project(project_id, owner_id=owner_id)
+        elif request.method == "PATCH":
+            payload = request.get_json(silent=True)
+            if not isinstance(payload, dict) or set(payload) - {"name", "description"}:
+                return _error_response("invalid_project", "Invalid project payload.", 400, req_id)
+            record = projects.update_project(
+                project_id,
+                owner_id,
+                name=payload.get("name"),
+                description=payload.get("description"),
+            )
+        else:
+            projects.delete_project(project_id, owner_id)
+            return _json_response({"ok": True}, req_id=req_id)
+        return _json_response({"ok": True, "project": record}, req_id=req_id)
+    except projects.ProjectError as exc:
+        return _project_error(exc, req_id, 404 if "not found" in str(exc) else 400)
+
+
+@app.route("/projects/<project_id>/archive", methods=["POST"], defaults={"action": "archive"})
+@app.route("/projects/<project_id>/restore", methods=["POST"], defaults={"action": "restore"})
+def project_action(project_id, action):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id)
+    if auth_error:
+        return auth_error
+    try:
+        method = projects.archive_project if action == "archive" else projects.restore_project
+        record = method(project_id, _project_owner_id())
+        return _json_response({"ok": True, "project": record}, req_id=req_id)
+    except projects.ProjectError as exc:
+        return _project_error(exc, req_id)
+
+
+@app.route("/projects/<project_id>/<kind>", methods=["GET", "POST"])
+def project_records(project_id, kind):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id)
+    if auth_error:
+        return auth_error
+    if kind not in {"conversations", "sources", "artifacts", "goals"}:
+        return _error_response(
+            "invalid_project_records", "Unknown project record type.", 404, req_id
+        )
+    try:
+        projects.get_project(project_id, owner_id=_project_owner_id())
+        if request.method == "GET":
+            records = projects.list_records(project_id, kind)
+            return _json_response({"ok": True, "count": len(records), kind: records}, req_id=req_id)
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return _error_response("invalid_project_record", "JSON object required.", 400, req_id)
+        if kind == "conversations":
+            record = projects.link_conversation(
+                project_id,
+                payload.get("conversation_id", ""),
+                payload.get("conversation_type", "responses"),
+            )
+        elif kind == "sources":
+            record = projects.add_source(
+                project_id,
+                payload.get("source_type", ""),
+                payload.get("source_id", ""),
+                label=payload.get("label", ""),
+                provenance=payload.get("provenance"),
+            )
+        elif kind == "artifacts":
+            record = projects.link_artifact(
+                project_id,
+                payload.get("artifact_type", ""),
+                payload.get("artifact_id", ""),
+                relative_path=payload.get("relative_path"),
+                sha256=payload.get("sha256"),
+                provenance=payload.get("provenance"),
+            )
+        else:
+            record = projects.add_goal(
+                project_id, payload.get("title", ""), description=payload.get("description", "")
+            )
+        return _json_response({"ok": True, "record": record}, 201, req_id)
+    except (projects.ProjectError, sqlite3.IntegrityError) as exc:
+        return _project_error(exc, req_id)
+
+
+@app.route("/projects/conversations/<conversation_id>", methods=["DELETE"])
+def remove_project_conversation(conversation_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id)
+    if auth_error:
+        return auth_error
+    projects.unlink_conversation(conversation_id)
+    return _json_response({"ok": True}, req_id=req_id)
+
+
+@app.route("/projects/<project_id>/export", methods=["POST"])
+def project_export(project_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    try:
+        destination = Path(tempfile.gettempdir()) / f"pj-project-{secrets.token_hex(8)}.zip"
+        projects.export_project(
+            project_id, destination, owner_id=_project_owner_id(), artifact_root=BASE_DIR
+        )
+        return send_file(destination, as_attachment=True, download_name=f"project-{project_id}.zip")
+    except projects.ProjectError as exc:
+        return _project_error(exc, req_id)
+
+
+@app.route("/projects/import", methods=["POST"])
+def project_import():
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    upload = request.files.get("bundle")
+    if upload is None:
+        return _error_response("invalid_project_bundle", "A bundle file is required.", 400, req_id)
+    destination = Path(tempfile.gettempdir()) / f"pj-project-import-{secrets.token_hex(8)}.zip"
+    try:
+        upload.save(destination)
+        record = projects.import_project(
+            destination, owner_id=_project_owner_id(), artifact_root=BASE_DIR
+        )
+        return _json_response({"ok": True, "project": record}, 201, req_id)
+    except (projects.ProjectError, zipfile.BadZipFile) as exc:
+        return _project_error(exc, req_id)
+    finally:
+        destination.unlink(missing_ok=True)
 
 
 @app.route("/tool-schemas", methods=["GET"])
