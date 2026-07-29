@@ -1016,9 +1016,13 @@ class ResponsesOrchestrator:
                     return
                 if required_format and output_text:
                     yield {"type": "text.delta", "delta": output_text}
+                from ops.images.persist_generated import persist_generated_images
+
+                generated_images = persist_generated_images(final_response)
                 completion = {
                     "type": "completion",
                     "text": output_text,
+                    "generated_images": generated_images,
                     "citations": all_citations,
                     "sources": all_sources,
                     "artifacts": list(ready_artifacts.values()),
