@@ -1480,6 +1480,15 @@ def finalize_document(doc_id: str) -> dict:
                     "unresolved_markers": markers,
                     "reason": "resolve markers via revise_document first",
                 }
+            from ops.docs.quality import validate_document
+
+            quality_report = validate_document(p)
+            if quality_report.failed:
+                return {
+                    "status": "blocked",
+                    "reason": "document quality gate failed",
+                    "quality_report": quality_report.as_dict(),
+                }
             content = content.replace("**Status:** DRAFT", "**Status:** FINAL", 1)
             p.write_text(content)
             new_sha = _hash(content)
@@ -1495,7 +1504,14 @@ def finalize_document(doc_id: str) -> dict:
                 "sha256": new_sha,
                 "path": path,
             }
-    return _attach_source_artifact(result)
+    attached = _attach_source_artifact(result)
+    if "quality_report" not in attached:
+        from ops.docs.quality import validate_document
+
+        attached["quality_report"] = validate_document(attached["path"]).as_dict()
+    if isinstance(attached.get("artifact"), dict):
+        attached["artifact"]["quality_report"] = attached["quality_report"]
+    return attached
 
 
 def list_documents(status: str = "all", query: str = "") -> dict:
@@ -3000,6 +3016,18 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
     """Export plus quiet vector ingestion of the document source."""
     result = _export_document_core(doc_id, format, version)
     if isinstance(result, dict) and not result.get("error"):
+        if result.get("audience_ready") and result.get("artifact"):
+            from ops.docs.quality import validate_document
+
+            with _db() as conn:
+                row = conn.execute(
+                    "SELECT path FROM docops_documents WHERE doc_id=? AND version=?",
+                    (doc_id, int(result.get("version", version))),
+                ).fetchone()
+            if row:
+                quality_report = validate_document(row[0]).as_dict()
+                result["quality_report"] = quality_report
+                result["artifact"]["quality_report"] = quality_report
         from ops.docs.auto_vectorize import vectorize_document_export
 
         result["vectorized"] = vectorize_document_export(doc_id, version)

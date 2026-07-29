@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "documents": [
+    {
+      "class": "capability_overview",
+      "source": "documents/DOC-1cc579c8-pj-capability-overview-v1.md",
+      "formats": ["md", "html", "pdf", "docx", "rtf", "xlsx"],
+      "fresh_until": "2027-07-29",
+      "review_by": "2027-01-29",
+      "depends_on": []
+    }
+  ]
+}
