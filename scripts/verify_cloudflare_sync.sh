@@ -47,6 +47,8 @@ with Wrangler, and prints the manual Cloudflare Access application/policy checks
 
 Environment:
   WRANGLER_BIN  Wrangler executable to use (default: wrangler)
+  PJ_RELEASE_MANIFEST Optional manifest whose routes/config/WAF sets are checked
+  PJ_RELEASE_OBSERVATIONS Optional sanitized health JSON; enables parity verifier
 EOF
 }
 
@@ -146,6 +148,36 @@ if [[ ! -r "$config" ]]; then
   fail "Wrangler config is not readable: $config"
   print_access_checklist
   exit 1
+fi
+
+if [[ -n "${PJ_RELEASE_MANIFEST:-}" ]]; then
+  if [[ ! -r "$PJ_RELEASE_MANIFEST" ]]; then
+    fail "Release manifest is not readable"
+  else
+    manifest_check="$(python3 - "$PJ_RELEASE_MANIFEST" "$config" <<'PY'
+import json, re, sys
+m = json.load(open(sys.argv[1]))
+text = open(sys.argv[2]).read()
+paths = sorted("/" + x.split("/", 1)[1] for x in re.findall(r'pattern\s*=\s*"([^"]+)"', text))
+expected_waf = sorted(["/execute-tool", "/health", "/responses/", "/tool-schemas", "/upload/"])
+errors = []
+if sorted(m.get("routes", [])) != paths: errors.append("routes")
+if sorted(m.get("waf_paths", expected_waf)) != expected_waf: errors.append("waf_paths")
+required = {"PJ_ALLOWED_ORIGINS", "CF_ACCESS_TEAM_DOMAIN", "CF_ACCESS_AUD", "PJ_TOOL_BRIDGE_URL", "PJ_TOOL_SCHEMAS_URL"}
+if not required.issubset(m.get("required_config_keys", [])): errors.append("required_config_keys")
+print(",".join(errors))
+PY
+)" || manifest_check="corrupt_manifest"
+    if [[ -n "$manifest_check" ]]; then fail "Release manifest mismatch: $manifest_check"; else pass "Release manifest matches Wrangler route/config/WAF contract"; fi
+  fi
+fi
+
+if [[ -n "${PJ_RELEASE_OBSERVATIONS:-}" ]]; then
+  if python3 "$(dirname "$0")/verify_release.py" "$PJ_RELEASE_MANIFEST" "$PJ_RELEASE_OBSERVATIONS" >/dev/null; then
+    pass "Runtime, Worker, and browser release parity"
+  else
+    fail "Runtime, Worker, or browser release parity mismatch"
+  fi
 fi
 
 configured_routes="$(

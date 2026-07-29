@@ -1,0 +1,51 @@
+name: Document quality tiers
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      release:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -r requirements.txt -r requirements-dev.txt
+      - name: Select changed documents and affected dependents
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git diff --name-only --diff-filter=ACMR "$BASE" HEAD -- docs/ documents/ > /tmp/docs
+          if [[ ! -s /tmp/docs ]]; then
+            echo "No document files changed."
+            exit 0
+          fi
+          args=()
+          while IFS= read -r path; do args+=(--changed-file "$path"); done < /tmp/docs
+          python -m ops.docs.quality.cli check --manifest documents/library-manifest.json "${args[@]}"
+      - name: Validate complete manifest
+        if: github.event_name == 'push'
+        run: python -m ops.docs.quality.cli check --manifest documents/library-manifest.json --json /tmp/document-quality.json
+      - name: Check freshness and review deadlines
+        if: github.event_name == 'schedule'
+        run: python -m ops.docs.quality.cli check --manifest documents/library-manifest.json --scheduled
+      - name: Build and validate runner-supported release formats
+        if: github.event_name == 'workflow_dispatch' && inputs.release
+        run: python -m unittest tests.test_document_downloads tests.test_presentationops -v

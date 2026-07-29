@@ -64,9 +64,7 @@ class TestDocumentDownloads(unittest.TestCase):
         realtime_server.app.config.update(TESTING=True)
         self.client = realtime_server.app.test_client()
         authorization_scheme = "Bear" + "er"
-        self.auth = {
-            "Authorization": f"{authorization_scheme} bridge-secret"
-        }
+        self.auth = {"Authorization": f"{authorization_scheme} bridge-secret"}
 
     def tearDown(self):
         self.prompt_perfecting.stop()
@@ -78,13 +76,15 @@ class TestDocumentDownloads(unittest.TestCase):
 
     @staticmethod
     def _sections():
-        return json.dumps({
-            "Attendees": "PJ and the owner",
-            "Context": "Document download validation",
-            "Discussion": "Every created document must be downloadable.",
-            "Decisions": "Use immutable chat artifacts.",
-            "Action Items": "Ship after validation.",
-        })
+        return json.dumps(
+            {
+                "Attendees": "PJ and the owner",
+                "Context": "Document download validation",
+                "Discussion": "Every created document must be downloadable.",
+                "Decisions": "Use immutable chat artifacts.",
+                "Action Items": "Ship after validation.",
+            }
+        )
 
     def _draft(self, *, finalize=False):
         result = docops.draft_document(
@@ -106,9 +106,7 @@ class TestDocumentDownloads(unittest.TestCase):
 
         resolved = docops.resolve_export_artifact(artifact["artifact_id"])
         self.assertEqual(resolved, artifact | {"created_at": resolved["created_at"]})
-        metadata, snapshot = docops.open_export_artifact_snapshot(
-            artifact["artifact_id"]
-        )
+        metadata, snapshot = docops.open_export_artifact_snapshot(artifact["artifact_id"])
         try:
             self.assertEqual(metadata["sha256"], artifact["sha256"])
             self.assertIn(b"# Download Validation", snapshot.read())
@@ -139,28 +137,19 @@ class TestDocumentDownloads(unittest.TestCase):
         expected_mime_types = {
             "html": "text/html; charset=utf-8",
             "pdf": "application/pdf",
-            "docx": (
-                "application/vnd.openxmlformats-officedocument."
-                "wordprocessingml.document"
-            ),
+            "docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
             "rtf": "application/rtf",
-            "xlsx": (
-                "application/vnd.openxmlformats-officedocument."
-                "spreadsheetml.sheet"
-            ),
+            "xlsx": ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
         }
         for format_name in formats:
             with self.subTest(format=format_name):
-                exported = docops.export_document(
-                    drafted["doc_id"], format=format_name
-                )
+                exported = docops.export_document(drafted["doc_id"], format=format_name)
                 self.assertNotIn("error", exported)
                 artifact = exported["artifact"]
                 self.assertEqual(artifact["format"], format_name)
                 self.assertTrue(artifact["audience_ready"])
                 self.assertGreater(artifact["byte_size"], 0)
-                self.assertEqual(artifact["mime_type"],
-                                 expected_mime_types[format_name])
+                self.assertEqual(artifact["mime_type"], expected_mime_types[format_name])
                 internal = docops.resolve_export_artifact(
                     artifact["artifact_id"], include_path=True
                 )
@@ -171,9 +160,7 @@ class TestDocumentDownloads(unittest.TestCase):
                 elif format_name == "xlsx":
                     self.assertTrue(content.startswith(b"PK"))
 
-                downloaded = self.client.get(
-                    artifact["download_url"], headers=self.auth
-                )
+                downloaded = self.client.get(artifact["download_url"], headers=self.auth)
                 try:
                     self.assertEqual(downloaded.status_code, 200)
                     self.assertEqual(downloaded.data, content)
@@ -185,14 +172,10 @@ class TestDocumentDownloads(unittest.TestCase):
                     downloaded.close()
 
                 if format_name == "xlsx":
-                    workbook = load_workbook(
-                        internal["path"], read_only=True
-                    )
+                    workbook = load_workbook(internal["path"], read_only=True)
                     try:
                         sheet = workbook["Document"]
-                        self.assertEqual(
-                            sheet["A1"].value, "Download Validation"
-                        )
+                        self.assertEqual(sheet["A1"].value, "Download Validation")
                         self.assertEqual(sheet["A8"].value, "Attendees")
                     finally:
                         workbook.close()
@@ -203,20 +186,22 @@ class TestDocumentDownloads(unittest.TestCase):
         self.assertEqual(rejected.get("status"), "rejected")
         self.assertNotIn("artifact", rejected)
 
-        slides = json.dumps([{
-            "layout": "title",
-            "title": "Download Validation",
-            "subtitle": "Governed presentation export",
-        }])
+        slides = json.dumps(
+            [
+                {
+                    "layout": "title",
+                    "title": "Download Validation",
+                    "subtitle": "Governed presentation export",
+                }
+            ]
+        )
         presentation_doc = docops.draft_presentation(
             "Download Validation",
             "Internal stakeholders",
             slides,
             finalize=True,
         )
-        exported = docops.export_document(
-            presentation_doc["doc_id"], format="pptx"
-        )
+        exported = docops.export_document(presentation_doc["doc_id"], format="pptx")
         self.assertNotIn("error", exported)
         artifact = exported["artifact"]
         self.assertEqual(artifact["format"], "pptx")
@@ -224,26 +209,20 @@ class TestDocumentDownloads(unittest.TestCase):
         self.assertGreater(artifact["byte_size"], 0)
         self.assertEqual(
             artifact["mime_type"],
-            "application/vnd.openxmlformats-officedocument."
-            "presentationml.presentation",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         )
-        internal = docops.resolve_export_artifact(
-            artifact["artifact_id"], include_path=True
-        )
+        internal = docops.resolve_export_artifact(artifact["artifact_id"], include_path=True)
         self.assertEqual(internal["status"], "ready")
         content = Path(internal["path"]).read_bytes()
         self.assertTrue(content.startswith(b"PK"))
 
-        downloaded = self.client.get(
-            artifact["download_url"], headers=self.auth
-        )
+        downloaded = self.client.get(artifact["download_url"], headers=self.auth)
         try:
             self.assertEqual(downloaded.status_code, 200)
             self.assertEqual(downloaded.data, content)
             self.assertEqual(
                 downloaded.headers["Content-Type"],
-                "application/vnd.openxmlformats-officedocument."
-                "presentationml.presentation",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
             )
         finally:
             downloaded.close()
@@ -264,15 +243,9 @@ class TestDocumentDownloads(unittest.TestCase):
             "md": "text/markdown; charset=utf-8",
             "html": "text/html; charset=utf-8",
             "pdf": "application/pdf",
-            "docx": (
-                "application/vnd.openxmlformats-officedocument."
-                "wordprocessingml.document"
-            ),
+            "docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
             "rtf": "application/rtf",
-            "xlsx": (
-                "application/vnd.openxmlformats-officedocument."
-                "spreadsheetml.sheet"
-            ),
+            "xlsx": ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
         }
         for format_name in formats:
             with self.subTest(format=format_name):
@@ -335,11 +308,15 @@ class TestDocumentDownloads(unittest.TestCase):
         drafted = docops.draft_presentation(
             "Native Download Validation",
             "Internal stakeholders",
-            json.dumps([{
-                "layout": "title",
-                "title": "Native PowerPoint",
-                "subtitle": "Governed PresentationOps renderer",
-            }]),
+            json.dumps(
+                [
+                    {
+                        "layout": "title",
+                        "title": "Native PowerPoint",
+                        "subtitle": "Governed PresentationOps renderer",
+                    }
+                ]
+            ),
             finalize=True,
         )
         exported = docops.export_document(
@@ -349,8 +326,7 @@ class TestDocumentDownloads(unittest.TestCase):
         artifact = exported["artifact"]
         self.assertEqual(
             artifact["mime_type"],
-            "application/vnd.openxmlformats-officedocument."
-            "presentationml.presentation",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         )
         internal = docops.resolve_export_artifact(
             artifact["artifact_id"],
@@ -360,8 +336,7 @@ class TestDocumentDownloads(unittest.TestCase):
         self.assertEqual(len(presentation.slides), 1)
         self.assertTrue(
             any(
-                getattr(shape, "has_text_frame", False)
-                and "Native PowerPoint" in shape.text
+                getattr(shape, "has_text_frame", False) and "Native PowerPoint" in shape.text
                 for shape in presentation.slides[0].shapes
             )
         )
@@ -389,9 +364,7 @@ class TestDocumentDownloads(unittest.TestCase):
 
     def test_tampered_immutable_artifact_is_rejected(self):
         artifact = self._draft()["artifact"]
-        internal = docops.resolve_export_artifact(
-            artifact["artifact_id"], include_path=True
-        )
+        internal = docops.resolve_export_artifact(artifact["artifact_id"], include_path=True)
         Path(internal["path"]).write_bytes(b"tampered")
         blocked = docops.resolve_export_artifact(artifact["artifact_id"])
         self.assertEqual(blocked["status"], "blocked")
@@ -408,9 +381,7 @@ class TestDocumentDownloads(unittest.TestCase):
     def test_resume_restores_artifact_and_authenticated_download(self):
         artifact = self._draft(finalize=True)["artifact"]
         session = chatlog.new_session(channel="web")
-        self.assertTrue(
-            chatlog.link_session_artifact(session["id"], artifact["artifact_id"])
-        )
+        self.assertTrue(chatlog.link_session_artifact(session["id"], artifact["artifact_id"]))
 
         resumed = self.client.post(
             f"/responses/sessions/{session['id']}/resume",
@@ -423,9 +394,7 @@ class TestDocumentDownloads(unittest.TestCase):
             artifact["artifact_id"],
         )
 
-        denied = self.client.get(
-            f"/responses/artifacts/{artifact['artifact_id']}"
-        )
+        denied = self.client.get(f"/responses/artifacts/{artifact['artifact_id']}")
         self.assertEqual(denied.status_code, 401)
         downloaded = self.client.get(
             f"/responses/artifacts/{artifact['artifact_id']}",
@@ -433,18 +402,21 @@ class TestDocumentDownloads(unittest.TestCase):
         )
         try:
             self.assertEqual(downloaded.status_code, 200)
-            self.assertEqual(downloaded.data.hex(), Path(
-                docops.resolve_export_artifact(
-                    artifact["artifact_id"], include_path=True
-                )["path"]
-            ).read_bytes().hex())
+            self.assertEqual(
+                downloaded.data.hex(),
+                Path(
+                    docops.resolve_export_artifact(artifact["artifact_id"], include_path=True)[
+                        "path"
+                    ]
+                )
+                .read_bytes()
+                .hex(),
+            )
             self.assertIn(
                 artifact["filename"],
                 downloaded.headers["Content-Disposition"],
             )
-            self.assertEqual(
-                downloaded.headers["Cache-Control"], "private, no-store"
-            )
+            self.assertEqual(downloaded.headers["Cache-Control"], "private, no-store")
         finally:
             downloaded.close()
 
@@ -465,9 +437,7 @@ class TestDocumentDownloads(unittest.TestCase):
                     "_response_id": "resp-document",
                 }
 
-        with patch.object(
-            realtime_server, "ResponsesOrchestrator", FakeOrchestrator
-        ):
+        with patch.object(realtime_server, "ResponsesOrchestrator", FakeOrchestrator):
             response = self.client.post(
                 f"/responses/sessions/{session['id']}/turns",
                 json={"message": "Create a document"},
@@ -482,19 +452,19 @@ class TestDocumentDownloads(unittest.TestCase):
         )
 
     def test_tool_schemas_and_delivery_detection_cover_all_formats(self):
+        self.assertIs(
+            docops.DOCOPS_DISPATCH["export_document"],
+            docops.export_document,
+        )
         export_schema = next(
-            schema
-            for schema in docops.DOCOPS_SCHEMAS
-            if schema["name"] == "export_document"
+            schema for schema in docops.DOCOPS_SCHEMAS if schema["name"] == "export_document"
         )
         self.assertEqual(
             set(export_schema["parameters"]["properties"]["format"]["enum"]),
             {"md", "html", "pdf", "docx", "rtf", "pptx", "xlsx"},
         )
         list_schema = next(
-            schema
-            for schema in docops.DOCOPS_SCHEMAS
-            if schema["name"] == "list_export_artifacts"
+            schema for schema in docops.DOCOPS_SCHEMAS if schema["name"] == "list_export_artifacts"
         )
         self.assertEqual(
             set(list_schema["parameters"]["properties"]["format"]["enum"]),
@@ -512,9 +482,7 @@ class TestDocumentDownloads(unittest.TestCase):
         for request, expected in examples.items():
             with self.subTest(request=request):
                 self.assertEqual(
-                    responses_runtime.requested_deliverable_format(
-                        request
-                    ),
+                    responses_runtime.requested_deliverable_format(request),
                     expected,
                 )
 
@@ -522,9 +490,7 @@ class TestDocumentDownloads(unittest.TestCase):
         with patch.object(
             realtime_server,
             "dispatch_realtime_function",
-            side_effect=PermissionError(
-                "cannot write /Users/private/documents/report.md"
-            ),
+            side_effect=PermissionError("cannot write /Users/private/documents/report.md"),
         ):
             response = self.client.post(
                 "/execute-tool",
@@ -542,18 +508,12 @@ class TestDocumentDownloads(unittest.TestCase):
                 pass
 
             def stream_turn(self, *_args, **_kwargs):
-                raise PermissionError(
-                    "cannot open /Users/private/documents/report.md"
-                )
+                raise PermissionError("cannot open /Users/private/documents/report.md")
                 yield
 
         with (
-            patch.object(
-                realtime_server, "ResponsesOrchestrator", FailingOrchestrator
-            ),
-            patch.object(
-                realtime_server, "OPENAI_CLIENT_FACTORY", return_value=object()
-            ),
+            patch.object(realtime_server, "ResponsesOrchestrator", FailingOrchestrator),
+            patch.object(realtime_server, "OPENAI_CLIENT_FACTORY", return_value=object()),
         ):
             streamed = self.client.post(
                 f"/responses/sessions/{session['id']}/turns",
@@ -569,17 +529,18 @@ class TestDocumentDownloads(unittest.TestCase):
         import voice
 
         output = io.StringIO()
-        with patch.object(
-            voice,
-            "dispatch_realtime_function",
-            return_value={
-                "status": "ready",
-                "path": "/Users/private/documents/report.pdf",
-            },
-        ), redirect_stdout(output):
-            result = json.loads(
-                voice._run_tool_call("export_document", "{}")
-            )
+        with (
+            patch.object(
+                voice,
+                "dispatch_realtime_function",
+                return_value={
+                    "status": "ready",
+                    "path": "/Users/private/documents/report.pdf",
+                },
+            ),
+            redirect_stdout(output),
+        ):
+            result = json.loads(voice._run_tool_call("export_document", "{}"))
         self.assertNotIn("/Users/private", json.dumps(result))
         self.assertNotIn("/Users/private", output.getvalue())
         self.assertNotIn("path", result)

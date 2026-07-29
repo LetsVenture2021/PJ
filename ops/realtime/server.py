@@ -49,7 +49,9 @@ import docops
 import promptops
 import skills
 from ops.docs import formats as upload_formats
+from ops.productivity.ui import blueprint as productivity_blueprint
 from ops.docs import uploads as document_uploads
+from ops.artifacts import ArtifactError, ArtifactFacade
 from ops.projects import service as projects
 from pj_contract import CONTRACT_VERSION, PROTOCOL_VERSION
 from ops.shared.logging import (
@@ -66,6 +68,12 @@ from ops.realtime.payload_validation import (
     validate_outbound_event,
     validate_outbound_payload,
 )
+from ops.conversations.models import ConversationContext, ConversationRequest
+from ops.conversations.routing import CapabilityRouter, RoutingError
+from ops.conversations.service import ConversationService
+from ops.jobs.service import create_jobs_blueprint
+from ops.workflows.ui import create_workflow_blueprint
+from runtime_config import load_runtime_config
 from realtime_config import realtime_session_config, realtime_tool_schemas
 from responses_runtime import (
     capability_manifest,
@@ -127,6 +135,7 @@ TEXT_UPLOAD_EXTENSIONS = {
 
 configure_logging()
 _LOGGER = get_logger("realtime.server")
+ARTIFACT_FACADE = ArtifactFacade(BASE_DIR / "pj_data.sqlite3")
 
 
 class DurableExecutionOutcomeUnknown(RuntimeError):
@@ -134,6 +143,7 @@ class DurableExecutionOutcomeUnknown(RuntimeError):
 
 
 app = Flask(__name__, static_folder=str(BASE_DIR / "assets"), static_url_path="/assets")
+app.register_blueprint(productivity_blueprint)
 app.secret_key = os.getenv("PJ_LOCAL_WEB_SESSION_SECRET") or secrets.token_hex(32)
 app.config.update(
     LOCAL_WEB_OWNER_SESSION_ENABLED=(os.getenv("PJ_LOCAL_WEB_OWNER_SESSION_ENABLED") == "1"),
@@ -144,7 +154,11 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Strict",
 )
 app.config.setdefault("UPLOAD_SCANNER", None)
+app.config.setdefault("CONVERSATION_SERVICE", ConversationService())
+app.config.setdefault("JOB_SERVICE", None)
+app.register_blueprint(create_jobs_blueprint(lambda: app.config["JOB_SERVICE"]))
 CORS(app)  # allow local browser origins when running on localhost
+app.register_blueprint(create_workflow_blueprint())
 
 
 @app.before_request
@@ -305,7 +319,7 @@ def _uses_pj_protocol():
         "/tool-schemas",
         "/upload/files",
         "/upload/folder",
-    } or request.path.startswith("/responses/")
+    } or request.path.startswith(("/responses/", "/conversations"))
 
 
 def _validate_protocol_request(req_id):
@@ -1307,6 +1321,132 @@ def prompt_perfect():
     )
 
 
+def _conversation_service():
+    return app.config["CONVERSATION_SERVICE"]
+
+
+@app.route("/conversations", methods=["POST"])
+def create_conversation():
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id)
+    if auth_error:
+        return auth_error
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return _error_response("invalid_json", "Expected a JSON object.", 400, req_id)
+    requested_id = payload.get("conversation_id")
+    service = _conversation_service()
+    if requested_id and service.exists(requested_id):
+        conversation_id, created = requested_id, False
+    else:
+        stored = chatlog.new_session(
+            str(payload.get("title", ""))[:MAX_SESSION_TITLE_LENGTH], channel="web"
+        )
+        conversation_id, created = service.create(stored["id"]), True
+        service.publish(conversation_id, "conversation.created")
+    return _json_response(
+        {"ok": True, "conversation": {"id": conversation_id}, "created": created},
+        201 if created else 200,
+        req_id,
+    )
+
+
+@app.route("/conversations/<conversation_id>/turns", methods=["POST"])
+def create_conversation_turn(conversation_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id)
+    if auth_error:
+        return auth_error
+    service = _conversation_service()
+    if not service.exists(conversation_id):
+        return _error_response("conversation_not_found", "Conversation not found.", 404, req_id)
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return _error_response("invalid_json", "Expected a JSON object.", 400, req_id)
+    try:
+        modalities = tuple(
+            payload.get("modalities")
+            or (["attachment"] if payload.get("attachments") else ["text"])
+        )
+        conversation_request = ConversationRequest(
+            text=str(payload.get("text", "")),
+            modalities=modalities,
+            attachments=tuple(payload.get("attachments", ())),
+            requested_output_format=payload.get("requested_output_format"),
+            latency_preference=payload.get("latency_preference", "balanced"),
+            risk_class=payload.get("risk_class", "low"),
+            session_id=conversation_id,
+            project_id=payload.get("project_id"),
+            tool_names=tuple(payload.get("tool_names", ())),
+            connector_names=tuple(payload.get("connector_names", ())),
+            preferred_route=payload.get("preferred_route"),
+        )
+        config = load_runtime_config()
+        context = ConversationContext(
+            conversation_id,
+            payload.get("project_id"),
+            provider_availability=payload.get("provider_availability", {}),
+            connector_health=payload.get("connector_health", {}),
+            estimated_latency_ms=payload.get("estimated_latency_ms", {}),
+            estimated_cost_usd=payload.get("estimated_cost_usd", {}),
+        )
+        decision = CapabilityRouter(config.conversation_routing, config.tool_policy).choose(
+            conversation_request, context
+        )
+    except (TypeError, ValueError, RoutingError) as exc:
+        code = getattr(exc, "reason_code", "invalid_conversation_turn")
+        return _error_response(code, "This turn cannot be routed safely.", 422, req_id)
+    accepted = service.publish(
+        conversation_id,
+        "turn.accepted",
+        {"route": decision.route, "reason_code": decision.reason_code},
+    )
+    if decision.route in {"responses", "delegated"}:
+        service.publish(
+            conversation_id,
+            "routing.transition",
+            {"route": decision.route, "reason_code": decision.reason_code},
+        )
+    return _json_response(
+        {"ok": True, "event": {"id": accepted.id}, "routing": decision.as_dict()}, 202, req_id
+    )
+
+
+@app.route("/conversations/<conversation_id>/events", methods=["GET"])
+def conversation_events(conversation_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id)
+    if auth_error:
+        return auth_error
+    service = _conversation_service()
+    if not service.exists(conversation_id):
+        return _error_response("conversation_not_found", "Conversation not found.", 404, req_id)
+    raw_cursor = request.headers.get("Last-Event-ID", request.args.get("cursor", "0"))
+    try:
+        cursor = max(0, int(raw_cursor))
+    except ValueError:
+        return _error_response("invalid_event_cursor", "Event cursor is invalid.", 400, req_id)
+
+    def generate():
+        for event in service.events(conversation_id, cursor):
+            yield f"id: {event.id}\nevent: {event.type}\ndata: {json.dumps(event.data, separators=(',', ':'))}\n\n"
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.route("/conversations/<conversation_id>/realtime-token", methods=["POST"])
+def conversation_realtime_token(conversation_id):
+    if not _conversation_service().exists(conversation_id):
+        return _error_response(
+            "conversation_not_found", "Conversation not found.", 404, _request_id()
+        )
+    return mint_realtime_token()
+
+
 @app.route("/responses/sessions", methods=["POST"])
 def create_responses_session():
     req_id = _request_id()
@@ -1797,6 +1937,99 @@ def record_realtime_message(session_id):
         req_id=req_id,
         outbound_schema="realtime.message.response",
     )
+
+
+def _facade_access(artifact_id, session_id, req_id):
+    _session_record, error = _validated_session(session_id, req_id)
+    if error:
+        return None, error
+    if artifact_id not in chatlog.list_session_artifact_ids(session_id):
+        return None, _error_response("artifact_not_found", "Artifact was not found.", 404, req_id)
+    try:
+        return ARTIFACT_FACADE.get(artifact_id, project_id=None, session_id=session_id), None
+    except ArtifactError as exc:
+        return None, _error_response(exc.code, str(exc), 404, req_id)
+
+
+@app.route("/responses/sessions/<session_id>/artifacts/<artifact_id>", methods=["GET", "DELETE"])
+def artifact_metadata(session_id, artifact_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    artifact, error = _facade_access(artifact_id, session_id, req_id)
+    if error:
+        return error
+    try:
+        if request.method == "DELETE":
+            artifact = ARTIFACT_FACADE.tombstone(
+                artifact_id, project_id=None, session_id=session_id
+            )
+        return _json_response({"artifact": artifact.as_dict()}, req_id=req_id)
+    except ArtifactError as exc:
+        return _error_response(exc.code, str(exc), 409, req_id)
+
+
+@app.route("/responses/sessions/<session_id>/artifacts/<artifact_id>/preview", methods=["GET"])
+def artifact_preview(session_id, artifact_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    _artifact, error = _facade_access(artifact_id, session_id, req_id)
+    if error:
+        return error
+    try:
+        return _json_response(
+            ARTIFACT_FACADE.preview(artifact_id, project_id=None, session_id=session_id),
+            req_id=req_id,
+        )
+    except ArtifactError as exc:
+        return _error_response(exc.code, str(exc), 409, req_id)
+
+
+@app.route("/responses/sessions/<session_id>/artifacts/<artifact_id>/download", methods=["GET"])
+def artifact_download(session_id, artifact_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    artifact, error = _facade_access(artifact_id, session_id, req_id)
+    if error:
+        return error
+    try:
+        path = ARTIFACT_FACADE.verified_path(artifact_id, project_id=None, session_id=session_id)
+    except ArtifactError as exc:
+        return _error_response(exc.code, str(exc), 409, req_id)
+    response = send_file(
+        path,
+        mimetype=artifact.media_type,
+        as_attachment=True,
+        download_name=path.name,
+        conditional=False,
+        etag=False,
+        max_age=0,
+    )
+    response.headers["ETag"] = f'"sha256-{artifact.content_hash}"'
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+@app.route("/responses/sessions/<session_id>/outcomes/<outcome_id>", methods=["GET"])
+def outcome_metadata(session_id, outcome_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    _session_record, error = _validated_session(session_id, req_id)
+    if error:
+        return error
+    try:
+        outcome = ARTIFACT_FACADE.get_outcome(outcome_id, project_id=None, session_id=session_id)
+    except ArtifactError as exc:
+        return _error_response(exc.code, str(exc), 404, req_id)
+    return _json_response({"outcome": outcome}, req_id=req_id)
 
 
 @app.route("/responses/artifacts/<artifact_id>", methods=["GET"])
