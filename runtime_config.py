@@ -43,8 +43,48 @@ class RuntimeConfig:
     tool_policy: dict[str, Any]
     realtime: dict[str, Any]
     worker: dict[str, Any]
+    providers: dict[str, Any]
+    execution_modes: dict[str, Any]
     collaboration: dict[str, Any]
     sources: dict[str, Path]
+
+
+EXECUTION_MODE_FIELDS = {"capability", "latency", "tools", "spend", "privacy"}
+
+
+def _validate_provider_routing(sections: dict[str, Any]) -> None:
+    providers = sections.get("providers")
+    modes = sections.get("execution_modes")
+    if not isinstance(providers, dict) or not providers:
+        raise ConfigError("providers must be a non-empty object")
+    for name, provider in providers.items():
+        if not isinstance(provider, dict):
+            raise ConfigError(f"providers.{name} must be an object")
+        models = provider.get("models")
+        if not isinstance(models, dict) or not models:
+            raise ConfigError(f"providers.{name}.models must be a non-empty object")
+        if provider.get("required") and not provider.get("available", False):
+            raise ConfigError(f"required provider {name!r} is unavailable")
+    if not isinstance(modes, dict) or not modes:
+        raise ConfigError("execution_modes must be a non-empty object")
+    for mode, policy in modes.items():
+        if not isinstance(policy, dict) or not EXECUTION_MODE_FIELDS <= policy.keys():
+            raise ConfigError(
+                f"execution_modes.{mode} must define capability, latency, tools, spend, and privacy"
+            )
+        fallbacks = policy.get("fallbacks", [])
+        if not isinstance(fallbacks, list):
+            raise ConfigError(f"execution_modes.{mode}.fallbacks must be a list")
+        for fallback in fallbacks:
+            if not isinstance(fallback, dict):
+                raise ConfigError(f"execution_modes.{mode} fallback must be an object")
+            provider = providers.get(fallback.get("provider"))
+            if provider is None or fallback.get("model") not in provider.get("models", {}):
+                raise ConfigError(f"execution_modes.{mode} has an unknown provider/model fallback")
+            if policy["privacy"] == "local" and not provider.get("local", False):
+                raise ConfigError(
+                    f"execution_modes.{mode} cannot fall back to a non-local provider"
+                )
 
 
 def _read_json(path: Path, *, default: Any = None) -> Any:
@@ -316,6 +356,54 @@ def load_runtime_config(
             "voice": "marin",
         },
         "worker": _load_worker_config(worker_path, selected),
+        "providers": assistant.pop(
+            "providers",
+            {
+                "openai": {
+                    "available": bool(environ.get("OPENAI_API_KEY")) or selected == "dev",
+                    "required": selected in {"staging", "prod"},
+                    "local": False,
+                    "models": {"default": assistant["model"]},
+                }
+            },
+        ),
+        "execution_modes": assistant.pop(
+            "execution_modes",
+            {
+                "quick": {
+                    "capability": "standard",
+                    "latency": "low",
+                    "tools": "limited",
+                    "spend": "low",
+                    "privacy": "standard",
+                    "fallbacks": [{"provider": "openai", "model": "default"}],
+                },
+                "balanced": {
+                    "capability": "high",
+                    "latency": "medium",
+                    "tools": "standard",
+                    "spend": "medium",
+                    "privacy": "standard",
+                    "fallbacks": [{"provider": "openai", "model": "default"}],
+                },
+                "deep": {
+                    "capability": "highest",
+                    "latency": "high",
+                    "tools": "all",
+                    "spend": "high",
+                    "privacy": "standard",
+                    "fallbacks": [{"provider": "openai", "model": "default"}],
+                },
+                "local_private": {
+                    "capability": "standard",
+                    "latency": "medium",
+                    "tools": "local",
+                    "spend": "none",
+                    "privacy": "local",
+                    "fallbacks": [],
+                },
+            },
+        ),
         "collaboration": {
             "enabled": False,
             "identity_provider": "",
@@ -361,6 +449,7 @@ def load_runtime_config(
     worker = sections["worker"]
     if not isinstance(worker, dict):
         raise ConfigError("worker configuration must be an object")
+    _validate_provider_routing(sections)
     collaboration = sections["collaboration"]
     if not isinstance(collaboration, dict) or not isinstance(collaboration.get("enabled"), bool):
         raise ConfigError("collaboration.enabled must be a boolean")
@@ -383,6 +472,8 @@ def load_runtime_config(
         tool_policy=tool_policy,
         realtime=copy.deepcopy(realtime),
         worker=copy.deepcopy(worker),
+        providers=copy.deepcopy(sections["providers"]),
+        execution_modes=copy.deepcopy(sections["execution_modes"]),
         collaboration=copy.deepcopy(collaboration),
         sources={
             "assistant": assistant_path,
