@@ -49,7 +49,7 @@ class RuntimeConfig:
     execution_modes: dict[str, Any]
     collaboration: dict[str, Any]
     sources: dict[str, Path]
- 
+
 
 @dataclass(frozen=True)
 class ConversationRoutingSettings:
