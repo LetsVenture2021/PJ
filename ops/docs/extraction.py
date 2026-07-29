@@ -114,6 +114,7 @@ def extract_preview(path: Path, classification: Classification, char_cap: int = 
         Family.MARKUP: _html,
         Family.SPREADSHEET: _spreadsheet,
         Family.OFFICE: _office,
+        Family.PDF: _pdf,
         Family.VECTOR: _svg,
     }.get(family, _plain_text)
     return extractor(path, char_cap)
@@ -250,6 +251,40 @@ def _spreadsheet(path: Path, char_cap: int) -> str:
     except Exception:
         pass
     return redact("\n".join(parts))[:char_cap]
+
+
+def _pdf(path: Path, char_cap: int) -> str:
+    """Extract text from PDFs via pypdf. Pages are parsed, never rendered or run."""
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:
+        raise ExtractionError("extraction_missing_pypdf") from exc
+    try:
+        reader = PdfReader(path)
+        pages = reader.pages
+    except Exception as exc:
+        raise ExtractionError("extraction_invalid_pdf") from exc
+    total_pages = len(pages)
+    parts = [f"**PDF** `{path.name}` - {total_pages} page(s); text layer extracted.\n"]
+    extracted_chars = 0
+    for index, page in enumerate(pages):
+        if index >= 60 or extracted_chars >= char_cap:
+            parts.append(f"({total_pages - index} more page(s) not shown)")
+            break
+        try:
+            text = (page.extract_text() or "").strip()
+        except Exception:
+            text = ""
+        if text:
+            parts.append(f"### Page {index + 1}")
+            parts.append(text[: char_cap - extracted_chars])
+            extracted_chars += len(text)
+    if extracted_chars == 0:
+        parts.append(
+            "(no extractable text layer - likely a scanned document; "
+            "use analyze_uploaded_image on page images or request OCR)"
+        )
+    return redact("\n\n".join(parts))[:char_cap]
 
 
 def _office(path: Path, char_cap: int) -> str:

@@ -396,3 +396,24 @@ class TestDelegationContext(unittest.TestCase):
         self.assertIn("SOW.xlsx", context)
         self.assertIn("CONVERSATION CONTEXT", context)
         self.assertEqual(_delegation_context(None), "")
+
+
+class TestPdfExtraction(unittest.TestCase):
+    def test_pdf_text_is_extracted(self):
+        import tempfile
+
+        from pypdf import PdfWriter
+
+        from ops.docs.extraction import extract_preview
+        from ops.docs.formats import classify
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "psa.pdf"
+            writer = PdfWriter()
+            writer.add_blank_page(width=612, height=792)
+            writer.write(path)
+            classification = classify("psa.pdf", path.read_bytes()[:8], path.stat().st_size)
+            self.assertEqual(classification.spec.handling, "extract")
+            preview = extract_preview(path, classification)
+            self.assertIn("PDF", preview)
+            self.assertIn("no extractable text layer", preview)

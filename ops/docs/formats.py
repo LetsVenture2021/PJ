@@ -125,8 +125,8 @@ SPECS: tuple[FormatSpec, ...] = (
     FormatSpec(
         Family.PDF,
         frozenset({".pdf"}),
-        "register_only",
-        0,
+        "extract",
+        60 * MB,
         magic=(b"%PDF-",),
         strict_magic=True,
         label="PDF",
