@@ -13,6 +13,7 @@ REQUIRED_ROUTES = {
     "pj-assistant.ai/execute-tool",
     "pj-assistant.ai/conversations*",
     "pj-assistant.ai/health",
+    "pj-assistant.ai/projects*",
     "pj-assistant.ai/responses/*",
     "pj-assistant.ai/session",
     "pj-assistant.ai/token",

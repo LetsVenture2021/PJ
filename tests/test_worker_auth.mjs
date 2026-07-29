@@ -132,6 +132,8 @@ function assertionRequest(assertion) {
 
 test("deployment routes cover APIs without claiming frontend assets", () => {
   for (const route of [
+    "pj-assistant.ai/conversations*",
+    "pj-assistant.ai/projects*",
     "pj-assistant.ai/health",
     "pj-assistant.ai/session",
     "pj-assistant.ai/token",
