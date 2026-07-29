@@ -12,6 +12,7 @@
     "create_image_variation": "approval",
     "delete_image_asset": "approval",
     "create_env_placeholder": "approval",
-    "open_env_file": "approval"
+    "open_env_file": "approval",
+    "run_codex_task": "approval"
   }
 }

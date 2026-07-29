@@ -34,14 +34,14 @@ def _get(path: str, params: dict[str, str]) -> dict:
     token = os.environ.get("HF_TOKEN")
     if token:
         headers["authorization"] = f"Bearer {token}"
-    for attempt in range(5):
+    for attempt in range(8):
         try:
             with urllib.request.urlopen(
                 urllib.request.Request(url, headers=headers), timeout=60
             ) as response:
                 return json.load(response)
         except urllib.error.HTTPError as exc:
-            if exc.code not in RETRY_STATUS or attempt == 4:
+            if exc.code not in RETRY_STATUS or attempt == 7:
                 raise SystemExit(f"datasets-server error {exc.code}: {url}")
             time.sleep(2**attempt)
     raise SystemExit("unreachable")
@@ -93,7 +93,7 @@ def pull(
                 digest.update(line.encode("utf-8"))
                 written += 1
             if fetch is _get:
-                time.sleep(0.2)  # be a polite client
+                time.sleep(0.5)  # be a polite client
 
     manifest = {
         "dataset": dataset,

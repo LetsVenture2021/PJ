@@ -287,6 +287,12 @@ from ops.shared import envfile as _envfile  # noqa: E402
 TOOL_SCHEMAS.extend(_envfile.ENVFILE_SCHEMAS)
 DISPATCH_TABLE.update(_envfile.ENVFILE_DISPATCH)
 
+# --- Codex delegation: approval-gated coding tasks via the Codex SDK ---------
+from ops.shared import codexops as _codexops  # noqa: E402
+
+TOOL_SCHEMAS.extend(_codexops.CODEXOPS_SCHEMAS)
+DISPATCH_TABLE.update(_codexops.CODEXOPS_DISPATCH)
+
 # --- ChiefOps: executive operations toolkit ----------------------------------
 # Calendar, reminders, mail drafts, relationship memory, portfolio,
 # commitments, revenue pipeline, decision journal, risk register, web
