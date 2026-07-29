@@ -2484,7 +2484,7 @@ def execute_tool():
         )
 
     try:
-        result = dispatch_realtime_function(name, arguments)
+        result = dispatch_realtime_function(name, arguments, session_id=session_id or None)
     except ValueError as exc:
         return _error_response(
             "tool_dispatch_error",

@@ -1259,11 +1259,54 @@ def _voice_safe_summary(text, limit=700):
     return compact[:limit].rsplit(" ", 1)[0] + "."
 
 
-def delegate_advanced_task(prompt, *, client=None, cfg=None):
+def _delegation_context(session_id, *, max_turns=12, max_chars=6000):
+    """Recent conversation turns and uploads, so delegated tasks keep context.
+
+    Delegation previously started from a blank turn: a follow-up like
+    "validate the costs in the document" arrived with no idea which document
+    the conversation was about.
+    """
+    if not session_id:
+        return ""
+    parts = []
+    try:
+        import chatlog
+
+        detail = chatlog.session_detail(session_id, message_limit=max_turns)
+        for message in detail.get("messages", [])[-max_turns:]:
+            role = message.get("role") or "user"
+            content = str(message.get("content") or "").strip()
+            if content:
+                parts.append(f"{role}: {content[:400]}")
+    except Exception:
+        pass
+    try:
+        from ops.docs import uploads as document_uploads
+
+        listed = document_uploads.list_uploaded_documents(session_id=session_id, limit=10)
+        names = [doc["name"] + " (" + doc["upload_id"] + ")" for doc in listed.get("documents", [])]
+        if names:
+            parts.append("uploaded documents this conversation: " + "; ".join(names))
+    except Exception:
+        pass
+    if not parts:
+        return ""
+    block = "\n".join(parts)[:max_chars]
+    return (
+        "CONVERSATION CONTEXT (recent turns and uploads; use to resolve "
+        "references like 'the document'):\n" + block
+    )
+
+
+def delegate_advanced_task(prompt, *, client=None, cfg=None, session_id=None):
     if not isinstance(prompt, str) or not prompt.strip():
         return {"error": "prompt must be a non-empty string"}
     if _delegation_active.get():
         return {"error": "Recursive advanced delegation is not allowed"}
+
+    context = _delegation_context(session_id)
+    if context:
+        prompt = f"{context}\n\nCURRENT REQUEST: {prompt.strip()}"
 
     token = _delegation_active.set(True)
     try:
@@ -1325,7 +1368,9 @@ def delegate_advanced_task(prompt, *, client=None, cfg=None):
         _delegation_active.reset(token)
 
 
-def dispatch_realtime_function(name, arguments, *, client=None, cfg=None, approval_granted=False):
+def dispatch_realtime_function(
+    name, arguments, *, client=None, cfg=None, approval_granted=False, session_id=None
+):
     started_at = perf_counter()
     fields = {
         "approval_granted": approval_granted,
@@ -1339,6 +1384,7 @@ def dispatch_realtime_function(name, arguments, *, client=None, cfg=None, approv
                 arguments.get("prompt") if isinstance(arguments, dict) else None,
                 client=client,
                 cfg=cfg,
+                session_id=session_id,
             )
         else:
             from realtime_config import realtime_tool_schemas

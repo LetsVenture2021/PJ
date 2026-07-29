@@ -364,3 +364,35 @@ class TestSiteDeploy(unittest.TestCase):
             "no registered upload",
             deploy_generated_site("UPL-" + "0" * 32, "pj-test-site")["error"],
         )
+
+
+class TestDelegationContext(unittest.TestCase):
+    def test_context_includes_turns_and_uploads(self):
+        from unittest.mock import patch as _patch
+
+        import chatlog
+        from ops.docs import uploads as document_uploads
+        from ops.realtime.orchestration import _delegation_context
+
+        with (
+            _patch.object(
+                chatlog,
+                "session_detail",
+                return_value={
+                    "messages": [
+                        {"role": "user", "content": "analyze the SOW"},
+                        {"role": "assistant", "content": "budget is $172,500 for 5,120 sqft"},
+                    ]
+                },
+            ),
+            _patch.object(
+                document_uploads,
+                "list_uploaded_documents",
+                return_value={"documents": [{"name": "SOW.xlsx", "upload_id": "UPL-" + "a" * 32}]},
+            ),
+        ):
+            context = _delegation_context("session_x_12345678")
+        self.assertIn("172,500", context)
+        self.assertIn("SOW.xlsx", context)
+        self.assertIn("CONVERSATION CONTEXT", context)
+        self.assertEqual(_delegation_context(None), "")
