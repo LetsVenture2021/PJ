@@ -280,6 +280,13 @@ import docops as _docops
 TOOL_SCHEMAS.extend(_docops.DOCOPS_SCHEMAS)
 DISPATCH_TABLE.update(_docops.DOCOPS_DISPATCH)
 
+# --- Env placeholders: approval-gated ~/.env variable names ------------------
+# Secret values never flow through the assistant; see ops/shared/envfile.py.
+from ops.shared import envfile as _envfile  # noqa: E402
+
+TOOL_SCHEMAS.extend(_envfile.ENVFILE_SCHEMAS)
+DISPATCH_TABLE.update(_envfile.ENVFILE_DISPATCH)
+
 # --- ChiefOps: executive operations toolkit ----------------------------------
 # Calendar, reminders, mail drafts, relationship memory, portfolio,
 # commitments, revenue pipeline, decision journal, risk register, web
