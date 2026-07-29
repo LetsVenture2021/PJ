@@ -38,6 +38,10 @@ def get_with_retry(
                 return response
             last_error = f"HTTP {response.status_code}: {response.text[:300]}"
             if response.status_code != 429 and response.status_code < 500:
+                # A response owns a pooled connection until its body is consumed
+                # or it is closed.  This branch is not retried, but it still has
+                # to release that connection before surfacing the status error.
+                response.close()
                 raise RuntimeError(last_error)
             response.close()
         if attempt + 1 < attempts:
