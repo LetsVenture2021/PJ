@@ -6,6 +6,7 @@ voice, a local browser client, and an optional Cloudflare Worker edge proxy.
 
 ## Documentation
 
+- [Product and technology report (July 28, 2026)](docs/product-technology-report-2026-07-28.md)
 - [End-to-end architecture](docs/architecture.md)
 - [Realtime protocol compatibility](docs/realtime-protocol.md)
 - [Incident response and recovery runbook](docs/runbook.md)
@@ -47,6 +48,10 @@ voice, a local browser client, and an optional Cloudflare Worker edge proxy.
   artifacts, and an authenticated local tool bridge.
 - The browser offers **Fast Voice**, **Full Power Voice**, and **Full Power
   Text**, including saved conversation history and structured JSON output.
+- Document uploads from the chat composer in every mode: a **+** icon uploads
+  files and a **folder** icon uploads a directory tree via `/upload/files` and
+  `/upload/folder`. Selection uploads immediately, and progress, completion,
+  and errors are reported as system bubbles in the conversation.
 - A Cloudflare Worker proxies the same API surfaces, obtains Realtime sessions
   from OpenAI, validates Cloudflare Access identity, and bridges privileged
   tool/Responses calls to the private Flask runtime.
@@ -398,10 +403,18 @@ It deploys API routes only; it does **not** deploy `webrtc_client.html` or
    application/policy checks that must be confirmed in Zero Trust.
 
 Only `GET /health` and CORS preflight are public. `/session`, `/token`,
-`/tool-schemas`, `/execute-tool`, and `/responses/*` require a valid Cloudflare
-Access identity. Full local tools and Full Power routes also require a reachable
-private runtime and matching bridge token; without it the Worker remains useful
-only for its direct Realtime path and reports degraded capability in `/health`.
+`/tool-schemas`, `/execute-tool`, `/responses/*`, and `/upload/*` require a
+valid Cloudflare Access identity. Full local tools, Full Power, and upload
+routes also require a reachable private runtime and matching bridge token;
+without it the Worker remains useful only for its direct Realtime path and
+reports degraded capability in `/health`.
+
+If the zone runs Super Bot Fight Mode or challenge-issuing security features,
+add a WAF custom skip rule for the bridge hostname's authenticated paths —
+`/execute-tool`, `/tool-schemas`, `/health`, `/responses/*`, and `/upload/*` —
+because Worker subrequests cannot answer browser challenges. A challenged
+bridge path fails silently: the client reports an upload or tool call in
+progress and nothing reaches the runtime.
 
 `POST /webhook` is **not a supported or deployed API**. A legacy local-only
 Flask handler remains for reference, but it does not verify OpenAI webhook
@@ -413,10 +426,24 @@ workflow.
 ### Browser frontend
 
 The repository contains the static client (`webrtc_client.html` and `assets/`)
-but no Pages, static-host, container, or other frontend deployment manifest.
-The Worker routes intentionally exclude `/` and `/assets/*`. Serve those files
-with an existing static frontend deployment, or use the loopback Flask client;
-there is no repository-backed production frontend deployment command to run.
+but no committed frontend deployment manifest. The Worker routes intentionally
+exclude `/` and `/assets/*`; serve those paths from a static host such as a
+Cloudflare Pages project on the same domain, protected by the same Access
+application. A direct-upload deploy stages the client as `index.html` plus the
+`assets/` directory:
+
+```bash
+mkdir -p /tmp/pj-site/assets
+cp webrtc_client.html /tmp/pj-site/index.html
+cp assets/pj_web_utils.js /tmp/pj-site/assets/
+wrangler pages deploy /tmp/pj-site --project-name=YOUR_PAGES_PROJECT --branch=master
+```
+
+When `assets/pj_web_utils.js` changes its exports, bump the `?v=` query on the
+module import in `webrtc_client.html` in the same change; deployed HTML that
+resolves a stale cached module fails its import and loses every event
+listener. Alternatively, use the loopback Flask client, which serves the same
+files locally.
 
 ## Known gaps and operational limits
 
