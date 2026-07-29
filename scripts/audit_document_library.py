@@ -7,18 +7,20 @@ import argparse
 import hashlib
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from jsonschema import Draft202012Validator  # noqa: E402
+from jsonschema import Draft202012Validator, FormatChecker  # noqa: E402
 
 from ops.docs.quality import validate_content  # noqa: E402
 
 
 DEFAULT_MANIFEST = ROOT / "documents" / "library-manifest.json"
 SCHEMA_DIR = ROOT / "schemas" / "documents"
+CURRENT_RECORD_SCHEMA_VERSION = "1.0.0"
 
 
 def _entry_id(entry: dict) -> str:
@@ -28,6 +30,10 @@ def _entry_id(entry: dict) -> str:
 def _entry_digest(entry: dict) -> str | None:
     value = entry.get("content_sha256") or entry.get("sha256")
     return str(value) if value is not None else None
+
+
+def _entry_is_legacy(entry: dict) -> bool:
+    return "document_id" in entry or "sha256" in entry
 
 
 def _schema_id(value: str) -> str:
@@ -48,10 +54,13 @@ def _normalize_schema_patterns(value):
 def _schema_manifest(manifest: dict) -> dict:
     documents = []
     for entry in manifest.get("documents", []):
+        if not _entry_is_legacy(entry):
+            documents.append(dict(entry))
+            continue
         document_class = entry.get("quality_profile") or entry.get("class") or "technical"
         documents.append(
             {
-                "schema_version": entry.get("schema_version", "1.0.0"),
+                "schema_version": CURRENT_RECORD_SCHEMA_VERSION,
                 "stable_id": _schema_id(_entry_id(entry)),
                 "path": entry.get("path", ""),
                 "class": entry.get("class", document_class),
@@ -71,32 +80,43 @@ def _schema_manifest(manifest: dict) -> dict:
                 "generated_artifacts": entry.get("generated_artifacts", []),
             }
         )
-    return {"schema_version": "1.0", "documents": documents}
+    normalized = dict(manifest)
+    normalized["documents"] = documents
+    return normalized
+
+
+def _timestamp_schema_errors(manifest: dict) -> list[str]:
+    errors: list[str] = []
+    for entry in manifest.get("documents", []):
+        document_id = _entry_id(entry)
+        for field in ("last_reviewed_at", "next_review_at"):
+            value = entry.get(field)
+            if not isinstance(value, str):
+                continue
+            try:
+                datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                errors.append(f"{document_id} {field} is not a valid RFC3339 date-time")
+    return errors
 
 
 def audit(manifest_path: Path = DEFAULT_MANIFEST) -> dict:
     root = ROOT.resolve()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     # Manifests written before the versioned governance inventory used
-    # ``document_id`` and ``sha256``.  They remain readable so operators can
-    # audit existing local catalogs before explicitly bootstrapping the new
-    # format.
-    legacy_manifest = any(
-        "document_id" in entry or "sha256" in entry for entry in manifest.get("documents", [])
-    )
+    # ``document_id`` and ``sha256``. They remain readable by normalizing those
+    # records individually while still validating versioned records and the
+    # actual manifest envelope.
     schema = json.loads((SCHEMA_DIR / "document-library-v1.json").read_text())
     schema["properties"]["documents"]["items"] = json.loads(
         (SCHEMA_DIR / "document-metadata-v1.json").read_text()
     )
     schema = _normalize_schema_patterns(schema)
-    validator = Draft202012Validator(schema)
-    schema_errors = (
-        []
-        if legacy_manifest
-        else sorted(
-            error.message for error in validator.iter_errors(_schema_manifest(manifest))
-        )
-    )
+    schema_manifest = _schema_manifest(manifest)
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    schema_errors = sorted(error.message for error in validator.iter_errors(schema_manifest))
+    schema_errors.extend(_timestamp_schema_errors(schema_manifest))
+    schema_errors.sort()
     findings: list[dict] = []
     seen: set[str] = set()
     for entry in manifest.get("documents", []):
@@ -116,11 +136,7 @@ def audit(manifest_path: Path = DEFAULT_MANIFEST) -> dict:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         if digest != _entry_digest(entry):
             findings.append({"document_id": document_id, "error": "sha256_mismatch"})
-        if (
-            not legacy_manifest
-            and path.suffix.casefold() == ".md"
-            and entry.get("class") != "corpus"
-        ):
+        if path.suffix.casefold() == ".md" and entry.get("class") != "corpus":
             report = validate_content(
                 path.read_text(encoding="utf-8"), profile=entry.get("class", "governed")
             )

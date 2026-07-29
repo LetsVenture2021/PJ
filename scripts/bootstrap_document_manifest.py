@@ -17,6 +17,7 @@ from ops.shared.sqlite import atomic_sqlite_connection  # noqa: E402
 
 DEFAULT_MANIFEST = ROOT / "documents" / "library-manifest.json"
 DEFAULT_DB = ROOT / "pj_data.sqlite3"
+CURRENT_RECORD_SCHEMA_VERSION = "1.0.0"
 RELATIONSHIPS = (
     "supersedes",
     "superseded_by",
@@ -32,6 +33,14 @@ def _stable_id(path: str) -> str:
     return f"DOC-{token}"
 
 
+def _validated_previous_schema_version(previous: dict, relative: str) -> None:
+    version = previous.get("schema_version")
+    if version is not None and version != CURRENT_RECORD_SCHEMA_VERSION:
+        raise ValueError(
+            f"{relative} uses unsupported document metadata schema_version {version!r}"
+        )
+
+
 def propose_records(manifest_path: Path = DEFAULT_MANIFEST) -> list[dict]:
     """Return proposed records without changing any file or database."""
     current = {}
@@ -44,12 +53,13 @@ def propose_records(manifest_path: Path = DEFAULT_MANIFEST) -> list[dict]:
                 continue
             relative = path.relative_to(ROOT).as_posix()
             previous = current.get(relative, {})
+            _validated_previous_schema_version(previous, relative)
             document_class = previous.get(
                 "class", "structured-data" if path.suffix == ".json" else "technical"
             )
             records.append(
                 {
-                    "schema_version": previous.get("schema_version", "1.0.0"),
+                    "schema_version": CURRENT_RECORD_SCHEMA_VERSION,
                     "path": relative,
                     "stable_id": previous.get("stable_id", _stable_id(relative)),
                     "class": document_class,
