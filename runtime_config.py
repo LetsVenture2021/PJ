@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Unified, profile-aware runtime configuration for PJ."""
+
 from __future__ import annotations
 
 import copy
@@ -42,7 +43,47 @@ class RuntimeConfig:
     tool_policy: dict[str, Any]
     realtime: dict[str, Any]
     worker: dict[str, Any]
+    providers: dict[str, Any]
+    execution_modes: dict[str, Any]
     sources: dict[str, Path]
+
+
+EXECUTION_MODE_FIELDS = {"capability", "latency", "tools", "spend", "privacy"}
+
+
+def _validate_provider_routing(sections: dict[str, Any]) -> None:
+    providers = sections.get("providers")
+    modes = sections.get("execution_modes")
+    if not isinstance(providers, dict) or not providers:
+        raise ConfigError("providers must be a non-empty object")
+    for name, provider in providers.items():
+        if not isinstance(provider, dict):
+            raise ConfigError(f"providers.{name} must be an object")
+        models = provider.get("models")
+        if not isinstance(models, dict) or not models:
+            raise ConfigError(f"providers.{name}.models must be a non-empty object")
+        if provider.get("required") and not provider.get("available", False):
+            raise ConfigError(f"required provider {name!r} is unavailable")
+    if not isinstance(modes, dict) or not modes:
+        raise ConfigError("execution_modes must be a non-empty object")
+    for mode, policy in modes.items():
+        if not isinstance(policy, dict) or not EXECUTION_MODE_FIELDS <= policy.keys():
+            raise ConfigError(
+                f"execution_modes.{mode} must define capability, latency, tools, spend, and privacy"
+            )
+        fallbacks = policy.get("fallbacks", [])
+        if not isinstance(fallbacks, list):
+            raise ConfigError(f"execution_modes.{mode}.fallbacks must be a list")
+        for fallback in fallbacks:
+            if not isinstance(fallback, dict):
+                raise ConfigError(f"execution_modes.{mode} fallback must be an object")
+            provider = providers.get(fallback.get("provider"))
+            if provider is None or fallback.get("model") not in provider.get("models", {}):
+                raise ConfigError(f"execution_modes.{mode} has an unknown provider/model fallback")
+            if policy["privacy"] == "local" and not provider.get("local", False):
+                raise ConfigError(
+                    f"execution_modes.{mode} cannot fall back to a non-local provider"
+                )
 
 
 def _read_json(path: Path, *, default: Any = None) -> Any:
@@ -86,18 +127,15 @@ def _parse_env_value(raw: str) -> Any:
         return raw
 
 
-def _apply_nested_env_overrides(
-    sections: dict[str, Any], environ: Mapping[str, str]
-) -> None:
+def _apply_nested_env_overrides(sections: dict[str, Any], environ: Mapping[str, str]) -> None:
     prefix = "PJ_CONFIG__"
     for name in sorted(environ):
         if not name.startswith(prefix):
             continue
-        path = [part.lower() for part in name[len(prefix):].split("__") if part]
+        path = [part.lower() for part in name[len(prefix) :].split("__") if part]
         if len(path) < 2 or path[0] not in sections:
             raise ConfigError(
-                f"{name} must target a section and field, for example "
-                "PJ_CONFIG__ASSISTANT__MODEL"
+                f"{name} must target a section and field, for example PJ_CONFIG__ASSISTANT__MODEL"
             )
         current = sections[path[0]]
         for part in path[1:-1]:
@@ -109,9 +147,7 @@ def _apply_nested_env_overrides(
         current[path[-1]] = _parse_env_value(environ[name])
 
 
-def _select_profile(
-    profile: str | None, environ: Mapping[str, str]
-) -> str:
+def _select_profile(profile: str | None, environ: Mapping[str, str]) -> str:
     selected = (profile or environ.get("PJ_PROFILE") or "dev").strip().lower()
     if selected not in PROFILES:
         choices = ", ".join(sorted(PROFILES))
@@ -119,9 +155,7 @@ def _select_profile(
     return selected
 
 
-def _apply_profile_overlay(
-    config: dict[str, Any], profile: str, *, source: Path
-) -> dict[str, Any]:
+def _apply_profile_overlay(config: dict[str, Any], profile: str, *, source: Path) -> dict[str, Any]:
     profiles = config.pop("profiles", {})
     if not isinstance(profiles, dict):
         raise ConfigError(f"{source}: profiles must be an object")
@@ -147,9 +181,7 @@ def _normalize_assistant(config: Any, base_dir: Path, source: Path) -> dict[str,
         or not instruction_files
         or any(not isinstance(item, str) or not item.strip() for item in instruction_files)
     ):
-        raise ConfigError(
-            f"{source} must define instruction_files or legacy instructions_file"
-        )
+        raise ConfigError(f"{source} must define instruction_files or legacy instructions_file")
     instruction_files = list(dict.fromkeys(item.strip() for item in instruction_files))
     instruction_parts = []
     resolved_base = base_dir.resolve()
@@ -169,12 +201,9 @@ def _normalize_assistant(config: Any, base_dir: Path, source: Path) -> dict[str,
 
     vector_store_ids = config.get("vector_store_ids")
     if vector_store_ids is None:
-        vector_store_ids = (
-            [config["vector_store_id"]] if config.get("vector_store_id") else []
-        )
-    if (
-        not isinstance(vector_store_ids, list)
-        or any(not isinstance(item, str) or not item.strip() for item in vector_store_ids)
+        vector_store_ids = [config["vector_store_id"]] if config.get("vector_store_id") else []
+    if not isinstance(vector_store_ids, list) or any(
+        not isinstance(item, str) or not item.strip() for item in vector_store_ids
     ):
         raise ConfigError("vector_store_ids must be a list of non-empty strings")
     vector_store_ids = list(dict.fromkeys(item.strip() for item in vector_store_ids))
@@ -209,11 +238,7 @@ def load_tool_policy(
     path: str | Path | None = None, *, environ: Mapping[str, str] | None = None
 ) -> dict[str, Any]:
     environ = os.environ if environ is None else environ
-    source = Path(
-        path
-        or environ.get("PJ_TOOL_POLICY_PATH")
-        or (BASE_DIR / "tool_policy.json")
-    )
+    source = Path(path or environ.get("PJ_TOOL_POLICY_PATH") or (BASE_DIR / "tool_policy.json"))
     policy = _read_json(source, default={"default": "allow", "tools": {}})
     override = _read_json_env("PJ_TOOL_POLICY_JSON", environ, dict)
     if override is not None:
@@ -244,11 +269,7 @@ def load_mcp_config(
     path: str | Path | None = None, *, environ: Mapping[str, str] | None = None
 ) -> list[dict[str, Any]]:
     environ = os.environ if environ is None else environ
-    source = Path(
-        path
-        or environ.get("PJ_MCP_SERVERS_PATH")
-        or (BASE_DIR / "mcp_servers.json")
-    )
+    source = Path(path or environ.get("PJ_MCP_SERVERS_PATH") or (BASE_DIR / "mcp_servers.json"))
     servers = _read_json(source, default=[])
     override = _read_json_env("PJ_MCP_SERVERS_JSON", environ, list)
     if override is not None:
@@ -282,18 +303,13 @@ def _load_worker_config(path: Path, profile: str) -> dict[str, Any]:
     return worker
 
 
-def _validate_required_env(
-    profile: str, environ: Mapping[str, str], *, extra: str = ""
-) -> None:
+def _validate_required_env(profile: str, environ: Mapping[str, str], *, extra: str = "") -> None:
     required = list(PROFILE_REQUIRED_ENV[profile])
     required.extend(_split_csv(extra))
-    missing = sorted(
-        set(name for name in required if not str(environ.get(name, "")).strip())
-    )
+    missing = sorted(set(name for name in required if not str(environ.get(name, "")).strip()))
     if missing:
         raise ConfigError(
-            f"Profile {profile!r} requires environment variable(s): "
-            + ", ".join(missing)
+            f"Profile {profile!r} requires environment variable(s): " + ", ".join(missing)
         )
 
 
@@ -309,17 +325,14 @@ def load_runtime_config(
     environ = os.environ if environ is None else environ
     selected = _select_profile(profile, environ)
 
-    assistant_path = Path(
-        environ.get("PJ_ASSISTANT_CONFIG_PATH", base_dir / "config.json")
-    )
+    assistant_path = Path(environ.get("PJ_ASSISTANT_CONFIG_PATH", base_dir / "config.json"))
     mcp_path = Path(environ.get("PJ_MCP_SERVERS_PATH", base_dir / "mcp_servers.json"))
-    policy_path = Path(
-        environ.get("PJ_TOOL_POLICY_PATH", base_dir / "tool_policy.json")
-    )
+    policy_path = Path(environ.get("PJ_TOOL_POLICY_PATH", base_dir / "tool_policy.json"))
     worker_path = Path(
         environ.get(
             "PJ_WRANGLER_CONFIG_PATH",
-            base_dir / (
+            base_dir
+            / (
                 "wrangler.toml"
                 if (base_dir / "wrangler.toml").is_file()
                 else "wrangler.toml.example"
@@ -330,9 +343,7 @@ def load_runtime_config(
     assistant = _read_json(assistant_path)
     if not isinstance(assistant, dict):
         raise ConfigError(f"{assistant_path} must contain a JSON object")
-    assistant = _apply_profile_overlay(
-        copy.deepcopy(assistant), selected, source=assistant_path
-    )
+    assistant = _apply_profile_overlay(copy.deepcopy(assistant), selected, source=assistant_path)
     mcp_servers = load_mcp_config(mcp_path, environ=environ)
     tool_policy = load_tool_policy(policy_path, environ=environ)
     sections: dict[str, Any] = {
@@ -344,14 +355,60 @@ def load_runtime_config(
             "voice": "marin",
         },
         "worker": _load_worker_config(worker_path, selected),
+        "providers": assistant.pop(
+            "providers",
+            {
+                "openai": {
+                    "available": bool(environ.get("OPENAI_API_KEY")) or selected == "dev",
+                    "required": selected in {"staging", "prod"},
+                    "local": False,
+                    "models": {"default": assistant["model"]},
+                }
+            },
+        ),
+        "execution_modes": assistant.pop(
+            "execution_modes",
+            {
+                "quick": {
+                    "capability": "standard",
+                    "latency": "low",
+                    "tools": "limited",
+                    "spend": "low",
+                    "privacy": "standard",
+                    "fallbacks": [{"provider": "openai", "model": "default"}],
+                },
+                "balanced": {
+                    "capability": "high",
+                    "latency": "medium",
+                    "tools": "standard",
+                    "spend": "medium",
+                    "privacy": "standard",
+                    "fallbacks": [{"provider": "openai", "model": "default"}],
+                },
+                "deep": {
+                    "capability": "highest",
+                    "latency": "high",
+                    "tools": "all",
+                    "spend": "high",
+                    "privacy": "standard",
+                    "fallbacks": [{"provider": "openai", "model": "default"}],
+                },
+                "local_private": {
+                    "capability": "standard",
+                    "latency": "medium",
+                    "tools": "local",
+                    "spend": "none",
+                    "privacy": "local",
+                    "fallbacks": [],
+                },
+            },
+        ),
     }
 
     if environ.get("PJ_MODEL"):
         sections["assistant"]["model"] = environ["PJ_MODEL"]
     if environ.get("PJ_VECTOR_STORE_IDS") is not None:
-        sections["assistant"]["vector_store_ids"] = _split_csv(
-            environ["PJ_VECTOR_STORE_IDS"]
-        )
+        sections["assistant"]["vector_store_ids"] = _split_csv(environ["PJ_VECTOR_STORE_IDS"])
     if environ.get("PJ_REALTIME_MODEL"):
         sections["realtime"]["model"] = environ["PJ_REALTIME_MODEL"]
     if environ.get("PJ_REALTIME_VOICE"):
@@ -366,12 +423,8 @@ def load_runtime_config(
     _apply_nested_env_overrides(sections, environ)
 
     if validate_required:
-        _validate_required_env(
-            selected, environ, extra=environ.get("PJ_REQUIRED_ENV", "")
-        )
-    assistant = _normalize_assistant(
-        sections["assistant"], base_dir, assistant_path
-    )
+        _validate_required_env(selected, environ, extra=environ.get("PJ_REQUIRED_ENV", ""))
+    assistant = _normalize_assistant(sections["assistant"], base_dir, assistant_path)
     mcp_servers = _normalize_mcp_servers(sections["mcp_servers"], mcp_path)
     tool_policy = sections["tool_policy"]
     if (
@@ -390,6 +443,7 @@ def load_runtime_config(
     worker = sections["worker"]
     if not isinstance(worker, dict):
         raise ConfigError("worker configuration must be an object")
+    _validate_provider_routing(sections)
 
     return RuntimeConfig(
         profile=selected,
@@ -398,6 +452,8 @@ def load_runtime_config(
         tool_policy=tool_policy,
         realtime=copy.deepcopy(realtime),
         worker=copy.deepcopy(worker),
+        providers=copy.deepcopy(sections["providers"]),
+        execution_modes=copy.deepcopy(sections["execution_modes"]),
         sources={
             "assistant": assistant_path,
             "mcp_servers": mcp_path,
