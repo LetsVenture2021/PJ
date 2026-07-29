@@ -736,7 +736,26 @@ class ResponsesOrchestrator:
             final_response = None
             round_text = []
             pending_stream_results = {}
-            for event in self.provider.create_response(**kwargs):
+            try:
+                provider_stream = self.provider.create_response(**kwargs)
+            except Exception as exc:
+                # A stored continuation the provider can no longer replay would
+                # otherwise fail every turn of the session. Drop it once and
+                # start a fresh provider thread; local history is unaffected.
+                if (
+                    not first
+                    or not kwargs.get("previous_response_id")
+                    or getattr(exc, "status_code", None) != 500
+                ):
+                    raise
+                _LOGGER.warning(
+                    "responses.continuation_rejected",
+                    extra={"previous_response_id": kwargs["previous_response_id"]},
+                )
+                kwargs.pop("previous_response_id", None)
+                previous_response_id = None
+                provider_stream = self.provider.create_response(**kwargs)
+            for event in provider_stream:
                 event_type = _get(event, "type", "")
                 if event_type == "response.created":
                     created_response = _get(event, "response")
