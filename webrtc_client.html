@@ -464,6 +464,31 @@
       align-self: stretch;
     }
 
+    .composer .composer-icon-btn {
+      min-width: 44px;
+      width: 44px;
+      height: 44px;
+      flex: 0 0 auto;
+      align-self: flex-end;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+      background: #0d1524;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .composer .composer-icon-btn:hover:not(:disabled) {
+      color: var(--text);
+      border-color: #3b82f680;
+    }
+    .composer .composer-icon-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
     @media (max-width: 940px) {
       .app {
         grid-template-columns: 1fr;
@@ -570,6 +595,28 @@
       </div>
       <div id="messages" class="messages"></div>
       <div class="composer">
+        <button
+          id="composerFilesBtn"
+          class="composer-icon-btn hidden"
+          type="button"
+          title="Upload documents"
+          aria-label="Upload documents"
+        >
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <path d="M12 5v14M5 12h14"/>
+          </svg>
+        </button>
+        <button
+          id="composerFolderBtn"
+          class="composer-icon-btn hidden"
+          type="button"
+          title="Upload a folder"
+          aria-label="Upload a folder"
+        >
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/>
+          </svg>
+        </button>
         <textarea id="textInput" placeholder="Type a message to PJ..." disabled></textarea>
         <button id="sendBtn" class="primary" disabled>Send</button>
       </div>
@@ -638,6 +685,8 @@
       schemaJson: document.getElementById("schemaJson"),
       chooseFilesBtn: document.getElementById("chooseFilesBtn"),
       chooseFolderBtn: document.getElementById("chooseFolderBtn"),
+      composerFilesBtn: document.getElementById("composerFilesBtn"),
+      composerFolderBtn: document.getElementById("composerFolderBtn"),
       filePicker: document.getElementById("filePicker"),
       folderPicker: document.getElementById("folderPicker"),
       uploadSummary: document.getElementById("uploadSummary"),
@@ -679,6 +728,7 @@
       uploadMode: "files",
       uploadItems: [],
       uploadBusy: false,
+      composerAutoUpload: false,
       uploadSessionId: `upload_${createRequestId().replace(/[^A-Za-z0-9_-]/g, "_")}`,
     };
 
@@ -726,6 +776,8 @@
       el.uploadBtn.disabled = state.uploadBusy || count === 0;
       el.chooseFilesBtn.disabled = state.uploadBusy;
       el.chooseFolderBtn.disabled = state.uploadBusy;
+      el.composerFilesBtn.disabled = state.uploadBusy;
+      el.composerFolderBtn.disabled = state.uploadBusy;
     }
 
     function selectUploadItems(fileList, mode) {
@@ -1044,6 +1096,8 @@
       );
       el.fullPowerModeBtn.classList.toggle("active", mode === MODE.FULL_POWER);
       el.fullPowerControls.classList.toggle("hidden", mode !== MODE.FULL_POWER);
+      el.composerFilesBtn.classList.toggle("hidden", mode !== MODE.FULL_POWER);
+      el.composerFolderBtn.classList.toggle("hidden", mode !== MODE.FULL_POWER);
       el.startBtn.textContent = mode !== MODE.FULL_POWER
         ? "Start Session"
         : "New Conversation";
@@ -2673,18 +2727,38 @@
     el.copyBtn.addEventListener("click", copyTranscript);
     el.clearBtn.addEventListener("click", clearTranscript);
     el.chooseFilesBtn.addEventListener("click", () => {
+      state.composerAutoUpload = false;
       el.filePicker.value = "";
       el.filePicker.click();
     });
     el.chooseFolderBtn.addEventListener("click", () => {
+      state.composerAutoUpload = false;
+      el.folderPicker.value = "";
+      el.folderPicker.click();
+    });
+    el.composerFilesBtn.addEventListener("click", () => {
+      state.composerAutoUpload = true;
+      el.filePicker.value = "";
+      el.filePicker.click();
+    });
+    el.composerFolderBtn.addEventListener("click", () => {
+      state.composerAutoUpload = true;
       el.folderPicker.value = "";
       el.folderPicker.click();
     });
     el.filePicker.addEventListener("change", () => {
       selectUploadItems(el.filePicker.files, "files");
+      if (state.composerAutoUpload) {
+        state.composerAutoUpload = false;
+        uploadSelectedDocuments();
+      }
     });
     el.folderPicker.addEventListener("change", () => {
       selectUploadItems(el.folderPicker.files, "folder");
+      if (state.composerAutoUpload) {
+        state.composerAutoUpload = false;
+        uploadSelectedDocuments();
+      }
     });
     el.uploadBtn.addEventListener("click", uploadSelectedDocuments);
     el.refreshCapabilitiesBtn.addEventListener("click", async () => {
