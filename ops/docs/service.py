@@ -49,6 +49,7 @@ from pathlib import Path
 
 import fcntl
 import presentationops
+from ops.docs.quality import validate_for_finalization
 from ops.shared.io import atomic_copy, sha256_file
 
 try:
@@ -1480,6 +1481,16 @@ def finalize_document(doc_id: str) -> dict:
                     "unresolved_markers": markers,
                     "reason": "resolve markers via revise_document first",
                 }
+            quality_report = validate_for_finalization(p)
+            if quality_report["status"] != "pass":
+                return {
+                    "status": "blocked",
+                    "reason": "document quality validation failed",
+                    "source_sha256": quality_report["source_sha256"],
+                    "rule_ids": sorted(
+                        {finding["rule_id"] for finding in quality_report["findings"]}
+                    ),
+                }
             content = content.replace("**Status:** DRAFT", "**Status:** FINAL", 1)
             p.write_text(content)
             new_sha = _hash(content)
@@ -1494,6 +1505,8 @@ def finalize_document(doc_id: str) -> dict:
                 "status": "final",
                 "sha256": new_sha,
                 "path": path,
+                "quality_report_sha256": quality_report["source_sha256"],
+                "approval_evidence": "explicit_finalize_document_call",
             }
     return _attach_source_artifact(result)
 
