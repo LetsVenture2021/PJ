@@ -644,6 +644,9 @@
       responseItems: new Map(),
       activeAssistantItemId: null,
       activeResponseId: null,
+      responseInProgress: false,
+      pendingResponseCreate: false,
+      persistedExternalIds: new Set(),
       pendingSeedHistory: [],
       seededSessionIds: new Set(),
       perfectedInputItems: new Set(),
@@ -948,6 +951,15 @@
         return `unsupported type ${payload.type}`;
       }
       return null;
+    }
+
+    function requestResponse() {
+      // Creating a response while one is active is a protocol error; queue it.
+      if (state.responseInProgress) {
+        state.pendingResponseCreate = true;
+        return;
+      }
+      sendRealtimeEvent({ type: "response.create" });
     }
 
     function sendRealtimeEvent(payload) {
@@ -1326,6 +1338,12 @@
       metadata = {},
     }) {
       if (!state.activeSessionId || !externalId) return;
+      const persistKey = `${externalId}:${status}`;
+      if (state.persistedExternalIds.has(persistKey)) return;
+      state.persistedExternalIds.add(persistKey);
+      if (state.persistedExternalIds.size > 500) {
+        state.persistedExternalIds.delete(state.persistedExternalIds.values().next().value);
+      }
       await fetchJson(
         `${apiBase()}/responses/sessions/${encodeURIComponent(state.activeSessionId)}/realtime-messages`,
         {
@@ -1798,7 +1816,7 @@
             content: [{ type: "input_text", text: submitted }],
           },
         });
-        sendRealtimeEvent({ type: "response.create" });
+        requestResponse();
         setStatus("Live", "live");
       } catch (error) {
         appendBubble(
@@ -2381,7 +2399,7 @@
               }],
             },
           });
-          sendRealtimeEvent({ type: "response.create" });
+          requestResponse();
           setStatus("Live", "live");
           return;
         }
@@ -2453,9 +2471,18 @@
 
       if (event.type === "response.created") {
         state.activeResponseId = event.response?.id || event.response_id || null;
+        state.responseInProgress = true;
         state.activePlaybackStartSeconds = Number(el.pjAudio.currentTime || 0);
         el.pjAudio.play().catch(() => {});
         return;
+      }
+
+      if (event.type === "response.done") {
+        state.responseInProgress = false;
+        if (state.pendingResponseCreate) {
+          state.pendingResponseCreate = false;
+          sendRealtimeEvent({ type: "response.create" });
+        }
       }
 
       if (event.type === "input_audio_buffer.speech_started") {
@@ -2720,7 +2747,7 @@
           type: "conversation.item.create",
           item: { type: "function_call_output", call_id: callId, output },
         });
-        sendRealtimeEvent({ type: "response.create" });
+        requestResponse();
       }
 
       delete state.pendingCalls[callId];
