@@ -2647,6 +2647,20 @@
           });
         } else {
           output = raw;
+          // Voice parity: delegated turns can produce the same downloadable
+          // artifacts as Full Power Text; render the same cards for them.
+          const details = protocolPayload?.details;
+          for (const artifact of details?.artifacts || []) {
+            renderArtifactCard(artifact);
+          }
+          const images = details?.generated_images || [];
+          if (images.length) {
+            appendBubble(
+              "system",
+              `Saved ${images.length} generated image${images.length === 1 ? "" : "s"}: ` +
+                images.map((img) => img.saved_path).join(", "),
+            );
+          }
         }
       } catch (error) {
         output = JSON.stringify({ error: String(error) });
