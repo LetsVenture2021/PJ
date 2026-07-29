@@ -50,6 +50,7 @@ from pathlib import Path
 import fcntl
 import presentationops
 from ops.shared.io import atomic_copy, sha256_file
+from ops.shared.sqlite import atomic_sqlite_connection
 
 try:
     import markdown as _markdown
@@ -207,8 +208,7 @@ def _ensure_immutable_artifacts(conn):
 
 @contextmanager
 def _db():
-    conn = sqlite3.connect(_DB_PATH)
-    try:
+    with atomic_sqlite_connection(_DB_PATH) as conn:
         conn.execute("""CREATE TABLE IF NOT EXISTS docops_templates (
             name TEXT PRIMARY KEY,
             version INTEGER DEFAULT 1,
@@ -271,6 +271,46 @@ def _db():
             FOREIGN KEY (doc_id, version)
                 REFERENCES docops_documents(doc_id, version)
         )""")
+        # Governance is additive: existing document rows and their evidence remain untouched.
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_manifest_records (
+            stable_id TEXT PRIMARY KEY,
+            path TEXT NOT NULL UNIQUE,
+            document_class TEXT NOT NULL,
+            owner TEXT NOT NULL,
+            lifecycle_status TEXT NOT NULL,
+            source_of_truth INTEGER NOT NULL DEFAULT 0,
+            content_sha256 TEXT NOT NULL,
+            last_reviewed_at TEXT,
+            next_review_at TEXT,
+            quality_profile TEXT,
+            imported_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_relationships (
+            stable_id TEXT NOT NULL,
+            relationship TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (stable_id, relationship, target_id)
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_quality_reports (
+            report_id TEXT PRIMARY KEY, stable_id TEXT NOT NULL,
+            profile TEXT NOT NULL, passed INTEGER NOT NULL,
+            report_json TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_approvals (
+            approval_id TEXT PRIMARY KEY, stable_id TEXT NOT NULL,
+            decision TEXT NOT NULL, approver TEXT NOT NULL,
+            decided_at TEXT NOT NULL, supersedes_approval_id TEXT
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_provenance (
+            provenance_id TEXT PRIMARY KEY, stable_id TEXT NOT NULL,
+            record_json TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_waivers (
+            waiver_id TEXT PRIMARY KEY, stable_id TEXT NOT NULL,
+            control_id TEXT NOT NULL, expires_at TEXT,
+            record_json TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
         _ensure_immutable_artifacts(conn)
         # Seed starter templates once.
         have = {r[0] for r in conn.execute("SELECT name FROM docops_templates").fetchall()}
@@ -300,9 +340,6 @@ def _db():
                 (key, name, name, name),
             )
         yield conn
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def _now():
