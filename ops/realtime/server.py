@@ -64,6 +64,7 @@ from ops.realtime.payload_validation import (
     validate_outbound_event,
     validate_outbound_payload,
 )
+from ops.jobs.service import create_jobs_blueprint
 from realtime_config import realtime_session_config, realtime_tool_schemas
 from responses_runtime import (
     capability_manifest,
@@ -142,6 +143,8 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Strict",
 )
 app.config.setdefault("UPLOAD_SCANNER", None)
+app.config.setdefault("JOB_SERVICE", None)
+app.register_blueprint(create_jobs_blueprint(lambda: app.config["JOB_SERVICE"]))
 CORS(app)  # allow local browser origins when running on localhost
 
 
