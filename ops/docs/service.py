@@ -50,6 +50,7 @@ from pathlib import Path
 import fcntl
 import presentationops
 from ops.shared.io import atomic_copy, sha256_file
+from ops.docs.quality import validate_content
 
 try:
     import markdown as _markdown
@@ -270,6 +271,17 @@ def _db():
             UNIQUE (doc_id, version, format),
             FOREIGN KEY (doc_id, version)
                 REFERENCES docops_documents(doc_id, version)
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_quality_reports (
+            doc_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            source_sha256 TEXT NOT NULL,
+            report_sha256 TEXT NOT NULL,
+            validator_version TEXT NOT NULL,
+            status TEXT NOT NULL,
+            report_json TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (doc_id, version, source_sha256)
         )""")
         _ensure_immutable_artifacts(conn)
         # Seed starter templates once.
@@ -1437,6 +1449,34 @@ def finalize_document(doc_id: str) -> dict:
                     "file was modified outside DocOps; use revise_document to issue a new version"
                 ),
             }
+        markers = sorted({marker for marker in BLOCKING_MARKERS if marker in content})
+        if markers:
+            return {
+                "status": "blocked",
+                "unresolved_markers": markers,
+                "reason": "resolve markers via revise_document first",
+            }
+        quality = validate_content(content)
+        conn.execute(
+            "INSERT OR REPLACE INTO docops_quality_reports "
+            "(doc_id, version, source_sha256, report_sha256, validator_version, "
+            "status, report_json) VALUES (?,?,?,?,?,?,?)",
+            (
+                doc_id,
+                version,
+                sha,
+                quality["report_sha256"],
+                quality["validator_version"],
+                quality["status"],
+                json.dumps(quality, sort_keys=True),
+            ),
+        )
+        if quality["status"] != "pass":
+            return {
+                "status": "blocked",
+                "reason": "document quality gate failed",
+                "quality": quality,
+            }
         spec_row = conn.execute(
             "SELECT spec_json, spec_sha256 "
             "FROM docops_presentation_specs "
@@ -1473,13 +1513,6 @@ def finalize_document(doc_id: str) -> dict:
                 "path": path,
             }
         else:
-            markers = sorted({marker for marker in BLOCKING_MARKERS if marker in content})
-            if markers:
-                return {
-                    "status": "blocked",
-                    "unresolved_markers": markers,
-                    "reason": "resolve markers via revise_document first",
-                }
             content = content.replace("**Status:** DRAFT", "**Status:** FINAL", 1)
             p.write_text(content)
             new_sha = _hash(content)
@@ -1487,6 +1520,21 @@ def finalize_document(doc_id: str) -> dict:
                 "UPDATE docops_documents SET status='final', sha256=?, "
                 "finalized_at=? WHERE doc_id=? AND version=?",
                 (new_sha, _now(), doc_id, version),
+            )
+            final_quality = validate_content(content)
+            conn.execute(
+                "INSERT OR REPLACE INTO docops_quality_reports "
+                "(doc_id, version, source_sha256, report_sha256, validator_version, "
+                "status, report_json) VALUES (?,?,?,?,?,?,?)",
+                (
+                    doc_id,
+                    version,
+                    new_sha,
+                    final_quality["report_sha256"],
+                    final_quality["validator_version"],
+                    final_quality["status"],
+                    json.dumps(final_quality, sort_keys=True),
+                ),
             )
             result = {
                 "doc_id": doc_id,
@@ -1496,6 +1544,43 @@ def finalize_document(doc_id: str) -> dict:
                 "path": path,
             }
     return _attach_source_artifact(result)
+
+
+def validate_document(doc_id: str, version: int = 0) -> dict:
+    """Run and retain the deterministic quality report for a governed version."""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT version, path, sha256 FROM docops_documents WHERE doc_id=? ORDER BY version",
+            (doc_id,),
+        ).fetchall()
+        if not rows:
+            return {"error": f"unknown doc_id '{doc_id}'"}
+        row = next((item for item in rows if item[0] == version), None) if version else rows[-1]
+        if row is None:
+            return {"error": f"document version {version} not found"}
+        selected_version, path, expected_sha = row
+        source = Path(path)
+        if not source.is_file():
+            return {"error": f"file missing: {path}"}
+        content = source.read_text()
+        if _hash(content) != expected_sha:
+            return {"status": "blocked", "reason": "document integrity mismatch"}
+        report = validate_content(content)
+        conn.execute(
+            "INSERT OR REPLACE INTO docops_quality_reports "
+            "(doc_id, version, source_sha256, report_sha256, validator_version, "
+            "status, report_json) VALUES (?,?,?,?,?,?,?)",
+            (
+                doc_id,
+                selected_version,
+                expected_sha,
+                report["report_sha256"],
+                report["validator_version"],
+                report["status"],
+                json.dumps(report, sort_keys=True),
+            ),
+        )
+    return {"doc_id": doc_id, "version": selected_version, **report}
 
 
 def list_documents(status: str = "all", query: str = "") -> dict:
@@ -2505,6 +2590,16 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
         }
 
     is_final = status == "final"
+    if is_final:
+        from ops.docs.governance import evaluate_document
+
+        governance = evaluate_document(p)
+        if governance["status"] == "blocked":
+            return {
+                "status": "blocked",
+                "reason": "document evidence governance failed",
+                "governance": governance,
+            }
     stem = f"{doc_id}-{_slug(title)}-v{ver}" + ("" if is_final else "-DRAFT")
     if format == "md":
         try:
@@ -2721,6 +2816,16 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
 
 # ------------------------------------------------------------ tool schemas
 DOCOPS_SCHEMAS = [
+    {
+        "type": "function",
+        "name": "validate_document",
+        "description": "Run deterministic completeness, security, structure, and accessibility quality gates.",
+        "parameters": {
+            "type": "object",
+            "properties": {"doc_id": {"type": "string"}, "version": {"type": "integer"}},
+            "required": ["doc_id"],
+        },
+    },
     {
         "type": "function",
         "name": "list_doc_templates",
@@ -2990,6 +3095,7 @@ DOCOPS_DISPATCH = {
     "list_export_artifacts": list_export_artifacts,
     "list_documents": list_documents,
     "get_document": get_document,
+    "validate_document": validate_document,
 }
 
 

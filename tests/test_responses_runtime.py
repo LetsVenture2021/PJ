@@ -1,8 +1,10 @@
 import hashlib
+import io
 import json
 import os
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -505,6 +507,43 @@ class TestResponsesRuntime(unittest.TestCase):
         ]
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["output"], '{"matches":3}')
+
+    def test_send_message_prints_native_tool_results_without_local_result_field(self):
+        final = obj(
+            id="resp_native",
+            output_text="Done.",
+            output=[
+                obj(
+                    type="mcp_call",
+                    id="mcp_call_1",
+                    server_label="codex",
+                    name="run_codex_task",
+                    status="completed",
+                )
+            ],
+        )
+        client = FakeClient(
+            [
+                [
+                    obj(
+                        type="response.mcp_call.completed",
+                        item_id="mcp_call_1",
+                        server_label="codex",
+                        name="run_codex_task",
+                    ),
+                    obj(type="response.completed", response=final),
+                ]
+            ]
+        )
+        state = {"previous_response_id": None}
+        output = io.StringIO()
+
+        with patch.object(responses_runtime, "save_state"), redirect_stdout(output):
+            reply = responses_runtime.send_message(client, self.cfg, state, "Run Codex")
+
+        self.assertEqual(reply, "Done.")
+        self.assertEqual(state["previous_response_id"], "resp_native")
+        self.assertIn('✅ {"status": "completed"}', output.getvalue())
 
     def test_server_paths_are_redacted_when_embedded_in_messages(self):
         value = {

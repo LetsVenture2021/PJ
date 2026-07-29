@@ -48,6 +48,7 @@ import docops
 import promptops
 import skills
 from ops.docs import formats as upload_formats
+from ops.productivity.ui import blueprint as productivity_blueprint
 from ops.docs import uploads as document_uploads
 from ops.artifacts import ArtifactError, ArtifactFacade
 from pj_contract import CONTRACT_VERSION, PROTOCOL_VERSION
@@ -65,6 +66,7 @@ from ops.realtime.payload_validation import (
     validate_outbound_event,
     validate_outbound_payload,
 )
+from ops.workflows.ui import create_workflow_blueprint
 from realtime_config import realtime_session_config, realtime_tool_schemas
 from responses_runtime import (
     capability_manifest,
@@ -134,6 +136,7 @@ class DurableExecutionOutcomeUnknown(RuntimeError):
 
 
 app = Flask(__name__, static_folder=str(BASE_DIR / "assets"), static_url_path="/assets")
+app.register_blueprint(productivity_blueprint)
 app.secret_key = os.getenv("PJ_LOCAL_WEB_SESSION_SECRET") or secrets.token_hex(32)
 app.config.update(
     LOCAL_WEB_OWNER_SESSION_ENABLED=(os.getenv("PJ_LOCAL_WEB_OWNER_SESSION_ENABLED") == "1"),
@@ -145,6 +148,7 @@ app.config.update(
 )
 app.config.setdefault("UPLOAD_SCANNER", None)
 CORS(app)  # allow local browser origins when running on localhost
+app.register_blueprint(create_workflow_blueprint())
 
 
 @app.before_request
