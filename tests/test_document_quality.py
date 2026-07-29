@@ -6,6 +6,7 @@ from unittest import mock
 
 from ops.docs.quality import validate_content, validate_path
 from ops.docs import service
+from ops.docs.quality.conflicts import GIT_CONFLICT_MARKER_LABEL
 
 
 class DocumentQualityTests(unittest.TestCase):
@@ -34,6 +35,23 @@ class DocumentQualityTests(unittest.TestCase):
         self.assertEqual(report["status"], "fail")
         self.assertIn("DOC-COMPLETE-002", {item["rule_id"] for item in report["findings"]})
         self.assertNotIn(confidential, str(report))
+
+    def test_git_conflict_marker_variants_are_blocked(self):
+        custom = validate_content("# Draft\n\n## Work\n\n<<<<< ours\nresolved text\n")
+        diff3 = validate_content("# Draft\n\n## Work\n\n||||||| base\nbase text\n")
+        self.assertIn("DOC-COMPLETE-002", {item["rule_id"] for item in custom["findings"]})
+        self.assertIn("DOC-COMPLETE-002", {item["rule_id"] for item in diff3["findings"]})
+
+    def test_equals_divider_is_not_a_merge_conflict_marker(self):
+        report = validate_content("# Draft\n\n## Work\n\n=======\n\nDone.\n")
+        self.assertNotIn("DOC-COMPLETE-002", {item["rule_id"] for item in report["findings"]})
+        self.assertFalse(service._unresolved_markers("# Draft\n\n=======\n"))
+
+    def test_docops_reports_conflict_marker_without_confidential_content(self):
+        confidential = "internal resolution details"
+        markers = service._unresolved_markers(f"# Draft\n\n<<<<< ours\n{confidential}\n")
+        self.assertEqual(markers, [GIT_CONFLICT_MARKER_LABEL])
+        self.assertNotIn(confidential, str(markers))
 
     def test_security_finding_does_not_echo_matched_value(self):
         secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
