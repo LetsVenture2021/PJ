@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,8 +44,58 @@ class RuntimeConfig:
     tool_policy: dict[str, Any]
     realtime: dict[str, Any]
     worker: dict[str, Any]
+    conversation_routing: ConversationRoutingSettings
+    providers: dict[str, Any]
+    execution_modes: dict[str, Any]
+    collaboration: dict[str, Any]
     memory: dict[str, Any]
     sources: dict[str, Path]
+
+
+@dataclass(frozen=True)
+class ConversationRoutingSettings:
+    enabled_routes: tuple[str, ...]
+    timeout_budgets_ms: dict[str, int]
+    maximum_estimated_spend_usd: float
+    safe_fallback_order: tuple[str, ...]
+
+
+EXECUTION_MODE_FIELDS = {"capability", "latency", "tools", "spend", "privacy"}
+
+
+def _validate_provider_routing(sections: dict[str, Any]) -> None:
+    providers = sections.get("providers")
+    modes = sections.get("execution_modes")
+    if not isinstance(providers, dict) or not providers:
+        raise ConfigError("providers must be a non-empty object")
+    for name, provider in providers.items():
+        if not isinstance(provider, dict):
+            raise ConfigError(f"providers.{name} must be an object")
+        models = provider.get("models")
+        if not isinstance(models, dict) or not models:
+            raise ConfigError(f"providers.{name}.models must be a non-empty object")
+        if provider.get("required") and not provider.get("available", False):
+            raise ConfigError(f"required provider {name!r} is unavailable")
+    if not isinstance(modes, dict) or not modes:
+        raise ConfigError("execution_modes must be a non-empty object")
+    for mode, policy in modes.items():
+        if not isinstance(policy, dict) or not EXECUTION_MODE_FIELDS <= policy.keys():
+            raise ConfigError(
+                f"execution_modes.{mode} must define capability, latency, tools, spend, and privacy"
+            )
+        fallbacks = policy.get("fallbacks", [])
+        if not isinstance(fallbacks, list):
+            raise ConfigError(f"execution_modes.{mode}.fallbacks must be a list")
+        for fallback in fallbacks:
+            if not isinstance(fallback, dict):
+                raise ConfigError(f"execution_modes.{mode} fallback must be an object")
+            provider = providers.get(fallback.get("provider"))
+            if provider is None or fallback.get("model") not in provider.get("models", {}):
+                raise ConfigError(f"execution_modes.{mode} has an unknown provider/model fallback")
+            if policy["privacy"] == "local" and not provider.get("local", False):
+                raise ConfigError(
+                    f"execution_modes.{mode} cannot fall back to a non-local provider"
+                )
 
 
 def _read_json(path: Path, *, default: Any = None) -> Any:
@@ -188,7 +239,12 @@ def _normalize_mcp_servers(servers: Any, source: Path) -> list[dict[str, Any]]:
             raise ConfigError(f"{source}: server {index} must define a non-empty label")
         if label in labels:
             raise ConfigError(f"{source}: duplicate MCP server label {label!r}")
-        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        url_is_environment_reference = isinstance(url, str) and bool(
+            re.fullmatch(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})", url)
+        )
+        if not isinstance(url, str) or not (
+            url.startswith(("http://", "https://")) or url_is_environment_reference
+        ):
             raise ConfigError(f"{source}: MCP server {label!r} must define an HTTP(S) URL")
         labels.add(label)
         normalized.append(copy.deepcopy(server))
@@ -323,6 +379,74 @@ def load_runtime_config(
             "max_proposals_per_turn": 3,
             "database_path": str(base_dir / "pj_data.sqlite3"),
         },
+        "conversation_routing": assistant.pop(
+            "conversation_routing",
+            {
+                "enabled_routes": ["realtime", "responses", "local", "hosted", "delegated"],
+                "timeout_budgets_ms": {
+                    "realtime": 12000,
+                    "responses": 30000,
+                    "local": 5000,
+                    "hosted": 30000,
+                    "delegated": 300000,
+                },
+                "maximum_estimated_spend_usd": 5.0,
+                "safe_fallback_order": ["local", "responses", "realtime"],
+            },
+        ),
+        "providers": assistant.pop(
+            "providers",
+            {
+                "openai": {
+                    "available": bool(environ.get("OPENAI_API_KEY")) or selected == "dev",
+                    "required": selected in {"staging", "prod"},
+                    "local": False,
+                    "models": {"default": assistant["model"]},
+                }
+            },
+        ),
+        "execution_modes": assistant.pop(
+            "execution_modes",
+            {
+                "quick": {
+                    "capability": "standard",
+                    "latency": "low",
+                    "tools": "limited",
+                    "spend": "low",
+                    "privacy": "standard",
+                    "fallbacks": [{"provider": "openai", "model": "default"}],
+                },
+                "balanced": {
+                    "capability": "high",
+                    "latency": "medium",
+                    "tools": "standard",
+                    "spend": "medium",
+                    "privacy": "standard",
+                    "fallbacks": [{"provider": "openai", "model": "default"}],
+                },
+                "deep": {
+                    "capability": "highest",
+                    "latency": "high",
+                    "tools": "all",
+                    "spend": "high",
+                    "privacy": "standard",
+                    "fallbacks": [{"provider": "openai", "model": "default"}],
+                },
+                "local_private": {
+                    "capability": "standard",
+                    "latency": "medium",
+                    "tools": "local",
+                    "spend": "none",
+                    "privacy": "local",
+                    "fallbacks": [],
+                },
+            },
+        ),
+        "collaboration": {
+            "enabled": False,
+            "identity_provider": "",
+            "tenant_store": "",
+        },
     }
 
     if environ.get("PJ_MODEL"):
@@ -371,6 +495,48 @@ def load_runtime_config(
         or not 1 <= memory["max_proposals_per_turn"] <= 10
     ):
         raise ConfigError("memory.max_proposals_per_turn must be between 1 and 10")
+    routing = sections["conversation_routing"]
+    routes = {"realtime", "responses", "local", "hosted", "delegated"}
+    if not isinstance(routing, dict):
+        raise ConfigError("conversation_routing must be an object")
+    enabled = routing.get("enabled_routes")
+    fallbacks = routing.get("safe_fallback_order")
+    budgets = routing.get("timeout_budgets_ms")
+    spend = routing.get("maximum_estimated_spend_usd")
+    if not isinstance(enabled, list) or not enabled or not set(enabled) <= routes:
+        raise ConfigError("conversation_routing.enabled_routes contains invalid routes")
+    if not isinstance(fallbacks, list) or not fallbacks or not set(fallbacks) <= set(enabled):
+        raise ConfigError("conversation_routing.safe_fallback_order must contain enabled routes")
+    if (
+        not isinstance(budgets, dict)
+        or not set(enabled) <= set(budgets)
+        or any(not isinstance(value, int) or value <= 0 for value in budgets.values())
+    ):
+        raise ConfigError("conversation_routing.timeout_budgets_ms must contain positive integers")
+    if not isinstance(spend, (int, float)) or isinstance(spend, bool) or spend <= 0:
+        raise ConfigError("conversation_routing.maximum_estimated_spend_usd must be positive")
+    if selected == "prod" and ("responses" not in enabled or "responses" not in fallbacks):
+        raise ConfigError(
+            "production conversation routing requires Responses as an enabled safe fallback"
+        )
+    routing_settings = ConversationRoutingSettings(
+        tuple(enabled), copy.deepcopy(budgets), float(spend), tuple(fallbacks)
+    )
+    _validate_provider_routing(sections)
+    collaboration = sections["collaboration"]
+    if not isinstance(collaboration, dict) or not isinstance(collaboration.get("enabled"), bool):
+        raise ConfigError("collaboration.enabled must be a boolean")
+    if collaboration["enabled"] and selected == "prod":
+        missing = [
+            field
+            for field in ("identity_provider", "tenant_store")
+            if not isinstance(collaboration.get(field), str) or not collaboration[field].strip()
+        ]
+        if missing:
+            raise ConfigError(
+                "Production collaboration requires identity and tenant configuration: "
+                + ", ".join(missing)
+            )
 
     return RuntimeConfig(
         profile=selected,
@@ -379,6 +545,10 @@ def load_runtime_config(
         tool_policy=tool_policy,
         realtime=copy.deepcopy(realtime),
         worker=copy.deepcopy(worker),
+        conversation_routing=routing_settings,
+        providers=copy.deepcopy(sections["providers"]),
+        execution_modes=copy.deepcopy(sections["execution_modes"]),
+        collaboration=copy.deepcopy(collaboration),
         memory=copy.deepcopy(memory),
         sources={
             "assistant": assistant_path,

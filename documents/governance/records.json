@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "record_types": ["control", "script", "endpoint", "setting", "tool"],
+  "records": [
+    {"record_id": "SCRIPT-DOC-GOVERNANCE", "type": "script", "name": "validate_document_governance.py", "locator": "scripts/validate_document_governance.py", "status": "active", "successor_id": null}
+  ]
+}

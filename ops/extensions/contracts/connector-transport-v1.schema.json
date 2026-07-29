@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pj.local/contracts/extensions/connector-transport-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "transport",
+    "request_schema",
+    "response_schema"
+  ],
+  "properties": {
+    "transport": {
+      "enum": [
+        "https",
+        "stdio",
+        "local"
+      ]
+    },
+    "request_schema": {
+      "type": "object"
+    },
+    "response_schema": {
+      "type": "object"
+    }
+  }
+}

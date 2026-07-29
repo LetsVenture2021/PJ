@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "freshness_tiers": {
+    "volatile": {"review_days": 30, "scope": "deployment, security, and dependency facts"},
+    "operational": {"review_days": 90, "scope": "product capabilities and operational procedures"},
+    "architecture_policy": {"review_days": 180, "also_review_on_code_change": true},
+    "historical_audit": {"immutable": true, "requires_bounded_observation_date": true}
+  },
+  "sources": []
+}

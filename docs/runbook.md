@@ -1,5 +1,11 @@
 # Incident runbook
 
+This operational document is governed by the
+[PJ document quality standard](document-quality-standard.md). Incident records,
+evidence, post-incident reviews, and exports produced from this runbook must
+apply that standard's applicable metadata, gates, retention, and supersession
+requirements.
+
 This runbook covers PJ's Responses and Realtime APIs, the Cloudflare Worker,
 the private `realtime_server.py` runtime, local tools, and configured upstream
 providers. Use it when realtime sessions, Full Power turns, or tool calls are

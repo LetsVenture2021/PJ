@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pj.local/schemas/documents/document-library-v1.json",
+  "title": "PJ document library",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "documents"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "documents": {
+      "type": "array",
+      "items": {"$ref": "document-metadata-v1.json"}
+    }
+  }
+}

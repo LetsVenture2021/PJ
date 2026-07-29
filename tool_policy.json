@@ -15,5 +15,10 @@
     "open_env_file": "approval",
     "run_codex_task": "approval",
     "deploy_generated_site": "approval"
+  },
+  "connector_actions": {
+    "connector.email.create_draft": "approval",
+    "connector.issue_tracking.create_issue": "approval",
+    "connector.notes.create_note": "approval"
   }
 }
