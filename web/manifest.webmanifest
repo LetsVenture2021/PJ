@@ -1,0 +1,19 @@
+{
+  "id": "/",
+  "name": "PJ Assistant",
+  "short_name": "PJ",
+  "description": "Private realtime and full-power assistant workspace",
+  "start_url": "/webrtc_client.html",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0b1220",
+  "theme_color": "#0b1220",
+  "icons": [
+    {
+      "src": "/assets/aimhi-logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -606,7 +606,7 @@ function stableJson(value) {
   return JSON.stringify(value);
 }
 
-function bridgeHeaders(env, requestId) {
+function bridgeHeaders(env, requestId, request = null) {
   // Construct a fresh allowlisted header set so Access assertions and browser
   // credentials can never be forwarded to the private tool runtime.
   const headers = {
@@ -615,6 +615,10 @@ function bridgeHeaders(env, requestId) {
     "x-pj-contract-version": CONTRACT_VERSION,
     "x-pj-protocol-version": String(PROTOCOL_VERSION),
   };
+  const idempotencyKey = request?.headers.get("x-pj-idempotency-key") || "";
+  if (/^[A-Za-z0-9._:-]{16,128}$/.test(idempotencyKey)) {
+    headers["x-pj-idempotency-key"] = idempotencyKey;
+  }
   if (env.PJ_TOOL_BRIDGE_TOKEN) {
     headers.authorization = `Bearer ${env.PJ_TOOL_BRIDGE_TOKEN}`;
   }
@@ -747,7 +751,7 @@ async function handleResponsesProxy(request, env, corsOrigin, requestId, fetchIm
   const isStreamingTurn = /\/turns$/.test(inboundUrl.pathname);
   const isArtifactDownload = /^\/responses\/artifacts\/ART-[a-f0-9]{32}$/.test(inboundUrl.pathname);
   const headers = {
-    ...bridgeHeaders(env, requestId),
+    ...bridgeHeaders(env, requestId, request),
     accept: isStreamingTurn
       ? "text/event-stream"
       : isArtifactDownload
@@ -927,6 +931,10 @@ async function handleUploadProxy(request, env, corsOrigin, requestId, fetchImpl 
   const sessionId = request.headers.get("x-pj-session-id") || "";
   if (/^[A-Za-z0-9_-]{8,128}$/.test(sessionId)) {
     headers["x-pj-session-id"] = sessionId;
+  }
+  const idempotencyKey = request.headers.get("x-pj-idempotency-key") || "";
+  if (/^[A-Za-z0-9._:-]{16,128}$/.test(idempotencyKey)) {
+    headers["x-pj-idempotency-key"] = idempotencyKey;
   }
   try {
     const bridgeResponse = await fetchImpl(target.toString(), {

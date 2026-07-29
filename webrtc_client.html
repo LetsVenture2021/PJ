@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1220">
+  <link rel="manifest" href="/manifest.webmanifest">
   <title>PJ Web App</title>
   <style>
     :root {
@@ -29,7 +31,7 @@
     .app {
       max-width: 1100px;
       margin: 0 auto;
-      padding: 24px 16px;
+      padding: max(24px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
       display: grid;
       grid-template-columns: 280px 1fr;
       gap: 16px;
@@ -158,6 +160,7 @@
       cursor: pointer;
       background: #1a2941;
       transition: 120ms ease;
+      min-height: 44px;
     }
     button:hover { transform: translateY(-1px); }
     button:disabled {
@@ -382,6 +385,9 @@
       display: flex;
       gap: 10px;
       align-items: flex-end;
+      position: sticky;
+      bottom: 0;
+      padding-bottom: max(14px, env(safe-area-inset-bottom));
     }
 
     .composer textarea {
@@ -443,11 +449,33 @@
       }
       .bubble { max-width: 94%; }
     }
+    :focus-visible { outline: 3px solid #93c5fd; outline-offset: 3px; }
+    .skip-link { position: fixed; left: 8px; top: -80px; z-index: 20; background: #fff; color: #07101f; padding: 12px; }
+    .skip-link:focus { top: 8px; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+    .nav-toggle { display: none; }
+    @media (max-width: 640px) {
+      .app { padding-top: max(8px, env(safe-area-inset-top)); gap: 8px; }
+      .nav-toggle { display: block; width: 100%; }
+      .sidebar.collapsed > :not(.nav-toggle):not(:first-child) { display: none; }
+      .chat { min-height: calc(100dvh - 90px); max-height: 100dvh; }
+      .chat-head, .messages { padding: 12px; }
+      .composer { flex-wrap: wrap; }
+      .composer textarea { order: -1; flex-basis: 100%; max-height: 30dvh; }
+      .composer #sendBtn { flex: 1; min-width: 80px; }
+      .artifact-card, .bubble { max-width: 100%; width: 100%; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
+    }
   </style>
 </head>
 <body>
+  <a class="skip-link" href="#messages">Skip to conversation</a>
+  <div id="announcer" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
   <div class="app">
-    <aside class="card sidebar">
+    <aside id="navigationPanel" class="card sidebar" aria-label="Navigation and conversation context">
+      <button id="navToggle" class="nav-toggle muted-btn" type="button" aria-expanded="true" aria-controls="navigationPanel">Hide navigation</button>
       <div>
         <h1 class="title">PJ Web App</h1>
         <p class="sub">Realtime voice and full-power PJ workspace</p>
@@ -455,7 +483,7 @@
 
       <div class="status">
         <span id="statusDot" class="dot"></span>
-        <span id="statusText">Idle</span>
+        <span id="statusText" role="status">Idle</span>
       </div>
 
       <div class="mode-switch" aria-label="Assistant mode">
@@ -514,7 +542,7 @@
           <button id="clearBtn" class="muted-btn">Clear</button>
         </div>
       </div>
-      <div id="messages" class="messages"></div>
+      <div id="messages" class="messages" tabindex="-1" role="log" aria-live="polite" aria-relevant="additions text" aria-label="Conversation timeline"></div>
       <div class="composer">
         <input id="filePicker" class="upload-input" type="file" multiple>
         <input
@@ -619,6 +647,9 @@
       composerFolderBtn: document.getElementById("composerFolderBtn"),
       filePicker: document.getElementById("filePicker"),
       folderPicker: document.getElementById("folderPicker"),
+      announcer: document.getElementById("announcer"),
+      navToggle: document.getElementById("navToggle"),
+      navigationPanel: document.getElementById("navigationPanel"),
     };
 
     const state = {
@@ -667,6 +698,7 @@
     function setStatus(text, kind = "idle") {
       el.statusText.textContent = text;
       el.statusDot.classList.toggle("live", kind === "live");
+      el.announcer.textContent = text;
     }
 
     function apiBase() {
@@ -681,6 +713,7 @@
         "x-pj-protocol-version": String(PROTOCOL_VERSION),
       };
       if (contentType) headers["Content-Type"] = contentType;
+      headers["x-pj-idempotency-key"] = window.crypto?.randomUUID?.() || `idem-${requestId}-00000000`;
       return headers;
     }
 
@@ -2770,6 +2803,15 @@
     }
 
     el.startBtn.addEventListener("click", startSelectedMode);
+    el.navToggle.addEventListener("click", () => {
+      const collapsed = el.navigationPanel.classList.toggle("collapsed");
+      el.navToggle.setAttribute("aria-expanded", String(!collapsed));
+      el.navToggle.textContent = collapsed ? "Show navigation" : "Hide navigation";
+    });
+    window.addEventListener?.("offline", () =>
+      setStatus("Offline — changes will retry when connected"),
+    );
+    window.addEventListener?.("online", () => setStatus("Online — reconnecting", "live"));
     el.stopBtn.addEventListener("click", stopSelectedMode);
     el.sendBtn.addEventListener("click", sendSelectedMessage);
     el.copyBtn.addEventListener("click", copyTranscript);
@@ -2839,6 +2881,11 @@
     setPhase(PHASE.IDLE, "Idle");
     appendBubble("system", "Ready. Click Start Session to connect to PJ.");
     refreshCurrentCapabilities({ forceRefresh: false });
+    if ("serviceWorker" in navigator && window.isSecureContext) {
+      navigator.serviceWorker.register("/service-worker.js").catch(() => {
+        setStatus("Offline support unavailable");
+      });
+    }
   </script>
 </body>
 </html>

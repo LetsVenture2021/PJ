@@ -89,6 +89,7 @@ DEFAULT_MAX_UPLOAD_TOTAL_BYTES = 100 * 1024 * 1024
 UPLOAD_MULTIPART_OVERHEAD_BYTES = 1024 * 1024
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 UPLOAD_ID_PATTERN = re.compile(r"^UPL-[a-f0-9]{32}$")
+IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{16,128}$")
 ALLOWED_UPLOAD_TYPES = {
     ".csv": {"text/csv", "application/vnd.ms-excel"},
     ".doc": {"application/msword"},
@@ -323,6 +324,14 @@ def _validate_protocol_request(req_id):
         if str(version) != str(PROTOCOL_VERSION)
     ]
     if not unsupported:
+        key = request.headers.get("x-pj-idempotency-key")
+        if key is not None and not IDEMPOTENCY_KEY_PATTERN.fullmatch(key):
+            return _error_response(
+                "invalid_idempotency_key",
+                "The idempotency key must be an opaque 16-128 character value.",
+                400,
+                req_id,
+            )
         return None
     return _error_response(
         "unsupported_protocol_version",
@@ -995,6 +1004,32 @@ def web_client():
     response = send_from_directory(BASE_DIR, "webrtc_client.html")
     response.headers["Cache-Control"] = "no-store"
     return response
+
+
+@app.route("/webrtc_client.html", methods=["GET"])
+def web_client_compatibility():
+    """Preserve the historic entry point without changing its authorization."""
+    return web_client()
+
+
+@app.route("/manifest.webmanifest", methods=["GET"])
+def web_manifest():
+    response = send_from_directory(BASE_DIR / "web", "manifest.webmanifest")
+    response.headers["Cache-Control"] = "public, max-age=3600"
+    return response
+
+
+@app.route("/service-worker.js", methods=["GET"])
+def service_worker():
+    response = send_from_directory(BASE_DIR / "web", "service-worker.js")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["Service-Worker-Allowed"] = "/"
+    return response
+
+
+@app.route("/web/<path:filename>", methods=["GET"])
+def web_module(filename):
+    return send_from_directory(BASE_DIR / "web", filename)
 
 
 @app.route("/health", methods=["GET"])
