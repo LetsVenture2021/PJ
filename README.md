@@ -13,6 +13,7 @@ voice, a local browser client, and an optional Cloudflare Worker edge proxy.
   differentiation across assistant, research, work-copilot, and agent markets.
 - [Product and technology report (July 28, 2026)](docs/product-technology-report-2026-07-28.md)
 - [Product vision: the governed personal intelligence layer](docs/product-vision.md)
+- [Repository-scoped Codex specialist agents](docs/codex-agents.md)
 - [End-to-end architecture](docs/architecture.md)
 - [Current application workflow diagrams](docs/workflow-diagrams.md)
 - [Realtime protocol compatibility](docs/realtime-protocol.md)
