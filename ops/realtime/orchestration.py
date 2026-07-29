@@ -114,15 +114,24 @@ def prepare_mcp_servers(servers=None, *, environ=None, base_dir=BASE_DIR):
     for raw in servers:
         if not isinstance(raw, dict):
             continue
+        raw_url = raw.get("url")
+        expanded_url, url_missing = (
+            _expand_secret_value(raw_url, environ) if isinstance(raw_url, str) else (raw_url, [])
+        )
         item = {
             "label": raw.get("label"),
-            "url": raw.get("url"),
+            "url": expanded_url,
             "enabled": bool(raw.get("enabled", True)),
             "require_approval": raw.get("require_approval", "always"),
             "allowed_tools": raw.get("allowed_tools"),
             "headers": {},
-            "missing_secrets": [],
+            "missing_secrets": list(url_missing),
         }
+        if not url_missing and (
+            not isinstance(expanded_url, str)
+            or not expanded_url.startswith(("http://", "https://"))
+        ):
+            item["missing_secrets"].append("invalid_server_url")
         for name, value in raw.get("headers", {}).items():
             if not isinstance(name, str) or not isinstance(value, str):
                 continue
@@ -234,7 +243,7 @@ def capability_manifest(cfg=None, *, mcp_servers=None, environ=None):
         mcp.append(
             {
                 "label": server["label"],
-                "url": _public_url(server["url"]),
+                "url": (None if server["missing_secrets"] else _public_url(server["url"])),
                 "status": status,
                 "configured": True,
                 "enabled": server["enabled"],
