@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""Normalize local EML/MBOX exports into bounded, untrusted JSONL records."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import mailbox
+import os
+import re
+import tempfile
+from datetime import timezone
+from email.header import decode_header
+from email.message import Message
+from email.parser import BytesParser
+from email.policy import default
+from email.utils import getaddresses, parsedate_to_datetime
+from html.parser import HTMLParser
+from pathlib import Path
+from typing import Iterable
+
+ALLOWED_SUFFIXES = {".eml", ".mbox"}
+SUSPICIOUS_NAME = re.compile(
+    r"(^|[._-])(credential|credentials|password|passwd|secret|token|api[_-]?key)([._-]|$)",
+    re.IGNORECASE,
+)
+MAX_HEADER_CHARS = 4_096
+MAX_BODY_CHARS = 1_000_000
+
+
+class _VisibleText(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._hidden = 0
+        self.chunks: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        del attrs
+        if tag.lower() in {"script", "style", "template"}:
+            self._hidden += 1
+        elif tag.lower() in {"br", "p", "div", "li", "tr"}:
+            self.chunks.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in {"script", "style", "template"} and self._hidden:
+            self._hidden -= 1
+
+    def handle_data(self, data: str) -> None:
+        if not self._hidden:
+            self.chunks.append(data)
+
+
+def _decode_header(value: str | None) -> str:
+    pieces: list[str] = []
+    for chunk, charset in decode_header(value or ""):
+        if isinstance(chunk, bytes):
+            pieces.append(chunk.decode(charset or "utf-8", errors="replace"))
+        else:
+            pieces.append(chunk)
+    return " ".join("".join(pieces).split())[:MAX_HEADER_CHARS]
+
+
+def _addresses(message: Message, header: str) -> list[str]:
+    values = [_decode_header(value) for value in message.get_all(header, [])]
+    return [address[:MAX_HEADER_CHARS] for _, address in getaddresses(values) if address]
+
+
+def _payload_text(part: Message) -> str:
+    try:
+        payload = part.get_payload(decode=True)
+    except (LookupError, UnicodeError, ValueError):
+        return ""
+    if not isinstance(payload, bytes):
+        return ""
+    charset = part.get_content_charset() or "utf-8"
+    try:
+        return payload.decode(charset, errors="replace")
+    except LookupError:
+        return payload.decode("utf-8", errors="replace")
+
+
+def _body(message: Message) -> str:
+    plain: list[str] = []
+    html: list[str] = []
+    for part in message.walk():
+        if part.is_multipart() or part.get_content_disposition() == "attachment":
+            continue
+        content_type = part.get_content_type().lower()
+        if content_type not in {"text/plain", "text/html"}:
+            continue
+        text = _payload_text(part)
+        if content_type == "text/plain":
+            plain.append(text)
+        else:
+            parser = _VisibleText()
+            parser.feed(text)
+            html.append("".join(parser.chunks))
+    return "\n".join(" ".join((plain or html)).splitlines()).strip()[:MAX_BODY_CHARS]
+
+
+def _date(message: Message) -> str | None:
+    try:
+        parsed = parsedate_to_datetime(message.get("Date", ""))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.isoformat()
+
+
+def _record(message: Message, source: str) -> dict[str, object]:
+    content = _body(message)
+    identity = {
+        "message_id": _decode_header(message.get("Message-ID")) or None,
+        "date": _date(message),
+        "from": _addresses(message, "From"),
+        "to": _addresses(message, "To"),
+        "cc": _addresses(message, "Cc"),
+        "subject": _decode_header(message.get("Subject")),
+        "content": content,
+    }
+    canonical = json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return {
+        "schema_version": 1,
+        "trust": "untrusted_email_content",
+        "source": source,
+        "digest": hashlib.sha256(canonical).hexdigest(),
+        **identity,
+    }
+
+
+def _input_files(source: Path) -> list[Path]:
+    candidates = [source] if source.is_file() else sorted(source.rglob("*"))
+    return [
+        path for path in candidates if path.is_file() and path.suffix.lower() in ALLOWED_SUFFIXES
+    ]
+
+
+def _messages(path: Path, max_bytes: int) -> Iterable[tuple[str, Message]]:
+    if path.is_symlink():
+        raise ValueError("symlink refused")
+    if SUSPICIOUS_NAME.search(path.name):
+        raise ValueError("credential-shaped filename refused")
+    if path.stat().st_size > max_bytes:
+        raise ValueError("file exceeds byte limit")
+    if path.suffix.lower() == ".eml":
+        yield str(path), BytesParser(policy=default).parsebytes(path.read_bytes())
+        return
+    box = mailbox.mbox(path, create=False)
+    try:
+        for index, message in enumerate(box):
+            yield f"{path}#{index + 1}", BytesParser(policy=default).parsebytes(message.as_bytes())
+    finally:
+        box.close()
+
+
+def normalize(source: Path, output: Path, max_bytes: int, max_messages: int) -> dict[str, int]:
+    if not source.exists() or source.is_symlink():
+        raise ValueError("source must be an existing, non-symlink file or directory")
+    if output.exists() and output.samefile(source):
+        raise ValueError("output must not overwrite the source")
+    counts = {"discovered": 0, "written": 0, "duplicates": 0, "skipped": 0}
+    seen: set[str] = set()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as destination:
+            for path in _input_files(source):
+                counts["discovered"] += 1
+                try:
+                    for source_name, message in _messages(path, max_bytes):
+                        if counts["written"] >= max_messages:
+                            raise ValueError("message limit reached")
+                        record = _record(message, source_name)
+                        digest = str(record["digest"])
+                        if digest in seen:
+                            counts["duplicates"] += 1
+                            continue
+                        seen.add(digest)
+                        destination.write(json.dumps(record, ensure_ascii=False) + "\n")
+                        counts["written"] += 1
+                except (OSError, ValueError, mailbox.Error):
+                    counts["skipped"] += 1
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.replace(temporary_name, output)
+    except BaseException:
+        Path(temporary_name).unlink(missing_ok=True)
+        raise
+    return counts
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("source", type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--max-message-bytes", type=int, default=50_000_000)
+    parser.add_argument("--max-messages", type=int, default=100_000)
+    args = parser.parse_args()
+    if args.max_message_bytes < 1 or args.max_messages < 1:
+        parser.error("limits must be positive")
+    counts = normalize(args.source, args.output, args.max_message_bytes, args.max_messages)
+    print(json.dumps(counts, sort_keys=True), file=os.sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
