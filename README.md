@@ -260,6 +260,17 @@ The development server binds to `127.0.0.1:3001` by default. Opening `/` creates
 a same-origin loopback owner session, allowing the browser to use protected
 tool and Responses routes without exposing a bearer token to JavaScript.
 
+Uploaded-document extraction and indexing are intentionally split:
+
+- Local extraction/classification/summarization runs only through the upload
+  processor (`scripts/upload_processor.py`) and never sends source content to
+  remote services.
+- Remote vector indexing is a separate approval-gated action
+  (`index_uploaded_documents`) and is available only through trusted Full Power
+  approval flow after local extraction completes.
+- Indexing deduplicates by canonical source hash plus extractor version and
+  reuses existing OpenAI file/vector memberships for identical content.
+
 For a non-development process, Gunicorn is included in `requirements.txt`:
 
 ```bash
@@ -267,6 +278,20 @@ export OPENAI_API_KEY=...
 export PJ_TOOL_BRIDGE_TOKEN='a-long-random-secret'
 gunicorn --bind 127.0.0.1:3001 realtime_server:app
 ```
+
+Run the local upload processor separately:
+
+```bash
+# Process queued extraction jobs once
+python scripts/upload_processor.py --once
+
+# Continuous processor loop
+python scripts/upload_processor.py --watch --interval 2.0
+```
+
+Use `GET /health` on the private runtime to monitor `upload_processor.processing`
+and `upload_processor.indexing` queue depths, stale processor heartbeats,
+awaiting approvals, extraction failures, and indexing failures.
 
 Keep this service private or place it behind TLS and access controls. Set
 `PJ_REALTIME_BIND_HOST` only for the Flask development command; Gunicorn's

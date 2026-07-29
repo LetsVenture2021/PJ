@@ -132,6 +132,7 @@ class TestDocumentUploads(unittest.TestCase):
         self.assertIn("status_url", first_doc)
         self.assertIn("preview_url", first_doc)
         self.assertIn("retry_url", first_doc)
+        self.assertIn("index_url", first_doc)
         self.assertEqual(first_doc["canonical_document_id"], first_doc["document_id"])
         self.assertIn(
             first_doc["queue_state"], {"queued", "running", "retry", "failed", "complete"}
@@ -153,6 +154,7 @@ class TestDocumentUploads(unittest.TestCase):
         self.assertIn("/status", first["status_url"])
         self.assertIn("/preview", first["preview_url"])
         self.assertIn("/retry", first["retry_url"])
+        self.assertIn("/index", first["index_url"])
         self.assertEqual(first["queue_status_url"], payload["status_urls"]["batch_status"])
 
     def test_multiple_file_upload(self):
@@ -371,6 +373,7 @@ class TestDocumentUploads(unittest.TestCase):
         )
         self.assertEqual(status.status_code, 200)
         self.assertEqual(status.get_json()["document"]["document_id"], document_id)
+        self.assertIn("indexing", status.get_json()["document"])
         self.assertIn(
             status.get_json()["document"]["processing"]["queue_state"],
             {"queued", "running", "retry", "failed", "complete"},
@@ -425,6 +428,48 @@ class TestDocumentUploads(unittest.TestCase):
         self.assertEqual(searched.status_code, 200)
         if searched.get_json()["matches"]:
             self.assertIn("linked_uploads", searched.get_json()["matches"][0])
+
+    def test_index_request_route_prepares_approval_prompt_and_updates_status(self):
+        uploaded = self._upload(
+            "/upload/files",
+            [("draft.md", b"# Draft\n\nApproval-gated indexing.", "text/markdown")],
+            ["draft.md"],
+            session_id="upload_index_request",
+        )
+        self.assertEqual(uploaded.status_code, 201)
+        document_id = uploaded.get_json()["files"][0]["document_id"]
+        created = self.client.post(
+            "/responses/sessions",
+            json={"title": "indexing request", "channel": "web"},
+            headers=self.auth,
+        )
+        self.assertEqual(created.status_code, 201)
+        chat_session_id = created.get_json()["session"]["id"]
+        linked = self.client.post(
+            f"/responses/sessions/{chat_session_id}/uploads/link",
+            json={"source_session_id": "upload_index_request"},
+            headers=self.auth,
+        )
+        self.assertEqual(linked.status_code, 200)
+        document_uploads.run_upload_processor_once("worker-index-request")
+
+        requested = self.client.post(
+            f"/responses/sessions/{chat_session_id}/uploads/documents/{document_id}/index",
+            json={},
+            headers=self.auth,
+        )
+        self.assertEqual(requested.status_code, 200)
+        payload = requested.get_json()
+        self.assertIn("approval_prompt", payload)
+        self.assertIn("index_uploaded_documents", payload["approval_prompt"])
+        self.assertEqual(payload["indexing"]["status"], "awaiting_approval")
+
+        status = self.client.get(
+            f"/responses/sessions/{chat_session_id}/uploads/documents/{document_id}/status",
+            headers=self.auth,
+        )
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(status.get_json()["document"]["indexing"]["status"], "awaiting_approval")
 
     def test_upload_linking_rejects_cross_session_real_session_source(self):
         source = self.client.post(

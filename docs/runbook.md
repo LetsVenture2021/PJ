@@ -12,9 +12,10 @@ unavailable, slow, unsafe, or returning unexpected policy decisions.
 - The private runtime (`pj-realtime-server`) owns Responses sessions, durable
   local tool execution, approvals, and local state. The Worker cannot execute
   local tools without its authenticated bridge to this runtime.
-- Layer-2 upload sync routes (`/upload/*` ingestion plus
-  `/responses/sessions/<id>/uploads*` status/link/preview/retry) are private
-  runtime responsibilities and are mirrored through the Worker with Access auth.
+- Upload sync routes (`/upload/*` ingestion plus
+  `/responses/sessions/<id>/uploads*` status/link/preview/retry/index) are
+  private runtime responsibilities and are mirrored through the Worker with
+  Access auth.
 - Fast Voice uses OpenAI Realtime directly. Full Power Voice delegates advanced
   work to the Responses runtime. Approval-sensitive and long-running tools are
   deliberately excluded from Realtime.
@@ -97,7 +98,9 @@ tests pass but the same Worker route fails.
    `tool_schema_reconciliation_status`, `tool_schema_cache_source`,
    `last_successful_reconciliation_at`, hashes, and realtime model. Record the
    private runtime's `contract_version`, `protocol_version`, `tool_count`,
-   `tool_policy_sha256`, and `bridge_auth_enabled`.
+   `tool_policy_sha256`, `bridge_auth_enabled`, and `upload_processor`
+   (processing/indexing queue depths, stale heartbeats, awaiting approvals,
+   extraction failures, indexing failures).
 4. **Correlate without collecting payloads.** Preserve the response
    `x-request-id` or structured `error.request_id`, session ID, route, status,
    error code, timestamp, and duration. Search JSON logs for that request ID
@@ -164,6 +167,21 @@ request rather than resuming a timed-out transport. Leave unknown durable
 outcomes quarantined. Do not raise timeout values until measurements prove the
 normal operation legitimately exceeds the current bound and the edge,
 runtime, and client budgets remain aligned.
+
+## Upload indexing governance checks
+
+Use this checklist when upload indexing behavior is in scope:
+
+1. Confirm no remote indexing call happened before approval by checking the
+   session timeline and tool execution records.
+2. Confirm the approved session owns the indexed document link
+   (`docops_chat_session_upload_documents`) and the integrity recheck passed.
+3. Confirm `docops_upload_indexing_state` is in a bounded status transition:
+   `awaiting_approval -> queued -> indexing -> indexed|failed`.
+4. For retries/crashes, confirm idempotent reuse of `openai_file_id` and
+   `vector_store_file_id` without duplicate file creation.
+5. For partial recovery (`openai_file_id` exists, membership absent), confirm
+   recovery resumed from membership creation and did not re-upload file bytes.
 
 ## Playbook: provider or upstream errors
 

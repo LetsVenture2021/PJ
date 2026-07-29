@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import socket
 import sqlite3
 import subprocess
@@ -8,6 +9,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import chatlog
 import docops
 from ops.docs import uploads as document_uploads
 
@@ -24,8 +26,10 @@ class TestUploadProcessing(unittest.TestCase):
         }
         self.old_uploads_dir = document_uploads.UPLOADS_DIR
         self.old_derived_dir = document_uploads.DERIVED_DIR
+        self.old_chatlog_db_path = chatlog._DB_PATH
 
         docops._DB_PATH = root / "test.sqlite3"
+        chatlog._DB_PATH = root / "test.sqlite3"
         docops.DOCS_DIR = root / "documents"
         docops.EXPORTS_DIR = docops.DOCS_DIR / "exports"
         docops.ARTIFACTS_DIR = docops.EXPORTS_DIR / ".artifacts"
@@ -41,6 +45,7 @@ class TestUploadProcessing(unittest.TestCase):
             setattr(docops, name, value)
         document_uploads.UPLOADS_DIR = self.old_uploads_dir
         document_uploads.DERIVED_DIR = self.old_derived_dir
+        chatlog._DB_PATH = self.old_chatlog_db_path
         self.temp_dir.cleanup()
 
     def _managed_file(
@@ -83,6 +88,33 @@ class TestUploadProcessing(unittest.TestCase):
                 }
             ],
         )
+
+    def _linked_processed_document(
+        self, *, session_id: str = "upload_anon_test"
+    ) -> tuple[str, str]:
+        registered = self._register(
+            "UPL-78787878787878787878787878787878",
+            "index.txt",
+            b"ready for indexing",
+            "text/plain",
+            session_id=session_id,
+        )
+        document_id = registered["documents"][0]["document_id"]
+        document_uploads.run_upload_processor_once("worker-index-ready")
+        with document_uploads._db() as conn:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS chat_sessions (id TEXT PRIMARY KEY, title TEXT, channel TEXT)"
+            )
+            conn.execute(
+                "INSERT INTO chat_sessions (id, title, channel) VALUES (?,?,?)",
+                ("session-real-index", "index", "web"),
+            )
+        document_uploads.link_upload_session_to_chat_session(
+            chat_session_id="session-real-index",
+            source_session_id=session_id,
+            limit=20,
+        )
+        return "session-real-index", document_id
 
     def test_legacy_backfill_migrates_to_canonical_tables(self):
         payload = b"legacy text"
@@ -307,6 +339,165 @@ class TestUploadProcessing(unittest.TestCase):
         )
         self.assertFalse(second["retried"])
         self.assertEqual(second["queue_state"], "queued")
+
+    def test_prepare_indexing_sets_awaiting_approval_without_network(self):
+        session_id, document_id = self._linked_processed_document()
+        with patch.object(document_uploads.requests, "request") as request_mock:
+            prepared = document_uploads.prepare_uploaded_document_indexing(
+                session_id=session_id,
+                document_id=document_id,
+                request_id="req-test",
+            )
+        self.assertFalse(prepared.get("already_indexed"))
+        self.assertEqual(prepared["indexing"]["status"], "awaiting_approval")
+        request_mock.assert_not_called()
+
+    def test_indexing_rejects_cross_session_and_integrity_failure(self):
+        session_id, document_id = self._linked_processed_document()
+        rejected = document_uploads.index_uploaded_documents(
+            session_id="session-other",
+            document_id=document_id,
+        )
+        self.assertIn("error", rejected)
+        with document_uploads._db() as conn:
+            path = conn.execute(
+                "SELECT canonical_path FROM docops_upload_documents WHERE document_id=?",
+                (document_id,),
+            ).fetchone()["canonical_path"]
+        Path(path).write_text("tampered", encoding="utf-8")
+        with (
+            patch.dict(
+                os.environ,
+                {"OPENAI_API_KEY": "test-key", "OPENAI_VECTOR_STORE_ID": "vs_test"},
+                clear=False,
+            ),
+            patch.object(document_uploads.requests, "request") as request_mock,
+        ):
+            failed = document_uploads.index_uploaded_documents(
+                session_id=session_id,
+                document_id=document_id,
+                _approval_id="approval-1",
+                _execution_key="exec-1",
+            )
+        self.assertEqual(failed["indexing"]["status"], "failed")
+        request_mock.assert_not_called()
+
+    def test_indexing_first_run_and_retry_are_idempotent(self):
+        session_id, document_id = self._linked_processed_document()
+
+        class Resp:
+            def __init__(self, code, payload):
+                self.status_code = code
+                self.text = json.dumps(payload)
+
+        calls = []
+
+        def fake_request(method, url, **kwargs):
+            calls.append((method, url))
+            if method == "POST" and url.endswith("/v1/files"):
+                return Resp(200, {"id": "file_123"})
+            if method == "GET" and "/vector_stores/" in url and "/files/" in url:
+                return Resp(404, {"error": "not found"})
+            if method == "POST" and "/vector_stores/" in url and url.endswith("/files"):
+                return Resp(200, {"id": "vsf_123", "status": "completed"})
+            raise AssertionError(f"Unexpected request: {method} {url}")
+
+        with (
+            patch.dict(
+                os.environ,
+                {"OPENAI_API_KEY": "test-key", "OPENAI_VECTOR_STORE_ID": "vs_test"},
+                clear=False,
+            ),
+            patch.object(document_uploads.requests, "request", side_effect=fake_request),
+        ):
+            first = document_uploads.index_uploaded_documents(
+                session_id=session_id,
+                document_id=document_id,
+                _approval_id="approval-2",
+                _execution_key="exec-2",
+            )
+            second = document_uploads.index_uploaded_documents(
+                session_id=session_id,
+                document_id=document_id,
+                _approval_id="approval-3",
+                _execution_key="exec-3",
+            )
+        self.assertEqual(first["indexing"]["status"], "indexed")
+        self.assertFalse(first["reused"])
+        self.assertEqual(second["indexing"]["status"], "indexed")
+        self.assertTrue(second["reused"])
+        self.assertEqual(len(calls), 2)
+
+    def test_indexing_recovers_from_partial_file_uploaded_state(self):
+        session_id, document_id = self._linked_processed_document()
+        with document_uploads._db() as conn:
+            source = conn.execute(
+                "SELECT sha256 FROM docops_upload_documents WHERE document_id=?",
+                (document_id,),
+            ).fetchone()
+            conn.execute(
+                "INSERT INTO docops_upload_indexing_state "
+                "(document_id, session_id, source_sha256, extractor_version, source_cache_key, "
+                "status, openai_file_id, vector_store_id, vector_store_file_id, vector_status, metadata_json, updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    document_id,
+                    session_id,
+                    source["sha256"],
+                    document_uploads.CURRENT_EXTRACTOR_VERSION,
+                    document_uploads._source_cache_key(
+                        source["sha256"], document_uploads.CURRENT_EXTRACTOR_VERSION
+                    ),
+                    "indexing",
+                    "file_partial",
+                    document_uploads._load_vector_store_id() or "vs_test",
+                    "",
+                    "",
+                    "{}",
+                    "2026-01-01 00:00:00",
+                ),
+            )
+
+        class Resp:
+            def __init__(self, code, payload):
+                self.status_code = code
+                self.text = json.dumps(payload)
+
+        def fake_request(method, url, **kwargs):
+            if method == "GET" and "/vector_stores/" in url and "/files/" in url:
+                return Resp(404, {"error": "missing"})
+            if method == "POST" and "/vector_stores/" in url and url.endswith("/files"):
+                return Resp(200, {"id": "vsf_partial", "status": "completed"})
+            raise AssertionError(f"Unexpected request: {method} {url}")
+
+        with (
+            patch.dict(
+                os.environ,
+                {"OPENAI_API_KEY": "test-key", "OPENAI_VECTOR_STORE_ID": "vs_test"},
+                clear=False,
+            ),
+            patch.object(document_uploads.requests, "request", side_effect=fake_request),
+        ):
+            result = document_uploads.index_uploaded_documents(
+                session_id=session_id,
+                document_id=document_id,
+                _approval_id="approval-partial",
+                _execution_key="exec-partial",
+            )
+        self.assertEqual(result["indexing"]["status"], "indexed")
+        self.assertEqual(result["indexing"]["openai_file_id"], "file_partial")
+
+    def test_upload_processor_health_reports_indexing_queue_depths(self):
+        session_id, document_id = self._linked_processed_document()
+        document_uploads.prepare_uploaded_document_indexing(
+            session_id=session_id,
+            document_id=document_id,
+            request_id="req-health",
+        )
+        health = document_uploads.get_upload_processor_health()
+        self.assertIn("processing", health)
+        self.assertIn("indexing", health)
+        self.assertGreaterEqual(health["indexing"]["queue_depths"]["awaiting_approval"], 1)
 
 
 if __name__ == "__main__":

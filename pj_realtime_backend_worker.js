@@ -692,6 +692,9 @@ function isResponsesRoute(method, pathname) {
       /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/uploads\/documents\/DOC-[a-f0-9]{32}\/retry$/.test(
         pathname,
       ) ||
+      /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/uploads\/documents\/DOC-[a-f0-9]{32}\/index$/.test(
+        pathname,
+      ) ||
       /^\/responses\/sessions\/[A-Za-z0-9_-]{8,128}\/approvals\/[A-Za-z0-9_-]{8,128}$/.test(
         pathname,
       ))
@@ -1836,6 +1839,7 @@ export default {
             "/responses/sessions/<id>/uploads/documents/<id>/status",
             "/responses/sessions/<id>/uploads/documents/<id>/preview",
             "/responses/sessions/<id>/uploads/documents/<id>/retry",
+            "/responses/sessions/<id>/uploads/documents/<id>/index",
             "/responses/sessions/<id>/artifacts",
             "/responses/sessions/<id>/approvals/<id>",
             "/responses/artifacts/<artifact-id>",

@@ -1,1941 +1,2103 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>PJ Web App</title>
-  <style>
-    :root {
-      --bg: #0b1220;
-      --panel: #111a2b;
-      --panel-2: #172338;
-      --text: #e6edf7;
-      --muted: #9fb1c9;
-      --line: #243149;
-      --ok: #22c55e;
-      --warn: #f59e0b;
-      --danger: #ef4444;
-      --brand: #3b82f6;
-    }
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PJ Web App</title>
+    <style>
+      :root {
+        --bg: #0b1220;
+        --panel: #111a2b;
+        --panel-2: #172338;
+        --text: #e6edf7;
+        --muted: #9fb1c9;
+        --line: #243149;
+        --ok: #22c55e;
+        --warn: #f59e0b;
+        --danger: #ef4444;
+        --brand: #3b82f6;
+      }
 
-    * { box-sizing: border-box; }
-    html, body { margin: 0; height: 100%; }
-    body {
-      background: radial-gradient(circle at top, #15233a 0%, var(--bg) 42%);
-      color: var(--text);
-      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+      }
+      body {
+        background: radial-gradient(circle at top, #15233a 0%, var(--bg) 42%);
+        color: var(--text);
+        font-family:
+          Inter,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          Roboto,
+          sans-serif;
+      }
 
-    .app {
-      max-width: 1100px;
-      margin: 0 auto;
-      padding: 24px 16px;
-      display: grid;
-      grid-template-columns: 280px 1fr;
-      gap: 16px;
-      min-height: 100%;
-    }
-
-    .card {
-      background: linear-gradient(180deg, var(--panel) 0%, #0f1828 100%);
-      border: 1px solid var(--line);
-      border-radius: 14px;
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
-    }
-
-    .sidebar {
-      padding: 16px;
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-      height: fit-content;
-      position: sticky;
-      top: 16px;
-    }
-
-    .title {
-      margin: 0;
-      font-size: 20px;
-      font-weight: 700;
-      letter-spacing: 0.2px;
-    }
-
-    .sub {
-      margin: 4px 0 0;
-      font-size: 13px;
-      color: var(--muted);
-    }
-
-    .status {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      margin-top: 10px;
-      font-size: 13px;
-      color: var(--muted);
-    }
-
-    .dot {
-      width: 9px;
-      height: 9px;
-      border-radius: 999px;
-      background: var(--danger);
-      box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.12);
-    }
-
-    .dot.live {
-      background: var(--ok);
-      box-shadow: 0 0 0 6px rgba(34, 197, 94, 0.13);
-    }
-
-    .field {
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      margin-top: 4px;
-    }
-
-    label {
-      font-size: 12px;
-      color: var(--muted);
-      font-weight: 600;
-      letter-spacing: 0.3px;
-      text-transform: uppercase;
-    }
-
-    input, button, textarea, select {
-      font: inherit;
-      color: inherit;
-    }
-
-    input[type="text"], select {
-      width: 100%;
-      background: #0d1524;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 10px 12px;
-      color: var(--text);
-      outline: none;
-    }
-    input[type="text"]:focus, select:focus {
-      border-color: #3b82f680;
-      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
-    }
-
-    .mode-switch {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 6px;
-      padding: 4px;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      background: #0d1524;
-    }
-
-    .mode-switch button {
-      padding: 8px 6px;
-      background: transparent;
-      color: var(--muted);
-    }
-
-    .mode-switch button.active {
-      background: #1f4f87;
-      color: #fff;
-      border-color: #3b82f6;
-    }
-
-    .button-row {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-      margin-top: 8px;
-    }
-
-    button {
-      border: 1px solid transparent;
-      border-radius: 10px;
-      padding: 10px 12px;
-      cursor: pointer;
-      background: #1a2941;
-      transition: 120ms ease;
-    }
-    button:hover { transform: translateY(-1px); }
-    button:disabled {
-      opacity: 0.45;
-      cursor: not-allowed;
-      transform: none;
-    }
-
-    .primary { background: var(--brand); color: #fff; border-color: #4f93ff; }
-    .danger { background: #3a1a20; color: #fecaca; border-color: #7f1d1d; }
-    .muted-btn { background: #102036; border-color: var(--line); color: #d8e5f8; }
-
-    .note {
-      font-size: 12px;
-      line-height: 1.35;
-      color: var(--muted);
-      background: #0d1524;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 10px;
-    }
-
-    .hidden { display: none !important; }
-
-    .full-power-controls {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-    }
-
-    .search-row {
-      display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 6px;
-    }
-
-    details.structured-output {
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      background: #0d1524;
-      padding: 9px 10px;
-    }
-
-    details.structured-output summary {
-      cursor: pointer;
-      color: var(--muted);
-      font-size: 12px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.3px;
-    }
-
-    details.structured-output textarea {
-      width: 100%;
-      min-height: 130px;
-      resize: vertical;
-      margin-top: 8px;
-      padding: 8px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #09111f;
-      color: var(--text);
-    }
-
-    .full-width-btn {
-      width: 100%;
-    }
-
-    .chat {
-      display: grid;
-      grid-template-rows: auto 1fr auto;
-      min-height: 72vh;
-      overflow: hidden;
-    }
-
-    .chat-head {
-      padding: 16px 18px;
-      border-bottom: 1px solid var(--line);
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      background: linear-gradient(180deg, #172338, #152136);
-    }
-
-    .chat-head h2 {
-      margin: 0;
-      font-size: 18px;
-      font-weight: 700;
-    }
-
-    .head-actions {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-
-    .messages {
-      padding: 18px;
-      overflow: auto;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      background:
-        linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0)),
-        #0c1526;
-    }
-
-    .bubble {
-      max-width: 85%;
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 10px 12px;
-      line-height: 1.4;
-      white-space: pre-wrap;
-      word-break: break-word;
-      font-size: 14px;
-    }
-
-    .bubble.user {
-      align-self: flex-end;
-      background: #12355f;
-      border-color: #2b5d95;
-    }
-
-    .bubble.assistant {
-      align-self: flex-start;
-      background: #15243b;
-    }
-
-    .bubble.system {
-      align-self: center;
-      max-width: 92%;
-      background: #251f10;
-      border-color: #6a4f1e;
-      color: #fde68a;
-      font-size: 13px;
-    }
-
-    .approval-actions {
-      display: flex;
-      gap: 8px;
-      justify-content: center;
-      margin-top: 10px;
-    }
-
-    .approval-actions button {
-      padding: 7px 12px;
-    }
-
-    .bubble.tool-status {
-      display: grid;
-      grid-template-columns: auto 1fr;
-      align-items: center;
-      gap: 8px;
-      width: min(92%, 680px);
-    }
-
-    .tool-status-indicator {
-      width: 9px;
-      height: 9px;
-      border-radius: 999px;
-      background: var(--warn);
-    }
-
-    .tool-status.completed .tool-status-indicator {
-      background: var(--ok);
-    }
-
-    .artifact-card {
-      align-self: flex-start;
-      width: min(92%, 680px);
-      padding: 14px;
-      border: 1px solid #2b5d95;
-      border-radius: 12px;
-      background: linear-gradient(135deg, #142a47, #102036);
-      display: grid;
-      gap: 9px;
-    }
-
-    .artifact-card-title {
-      font-weight: 700;
-      word-break: break-word;
-      color: #fff;
-    }
-
-    .artifact-image-preview {
-      display: block;
-      width: 100%;
-      max-height: 360px;
-      object-fit: contain;
-      border-radius: 8px;
-      background: #0b1422;
-    }
-
-    .artifact-card-meta {
-      color: var(--muted);
-      font-size: 12px;
-      word-break: break-all;
-    }
-
-    .artifact-download {
-      width: fit-content;
-      color: #fff;
-      background: var(--brand);
-      border: 1px solid #4f93ff;
-      border-radius: 9px;
-      padding: 8px 12px;
-      text-decoration: none;
-      font-weight: 700;
-      font-size: 13px;
-    }
-
-    .upload-panel {
-      display: grid;
-      gap: 9px;
-      padding: 11px;
-      border: 1px solid var(--line);
-      border-radius: 11px;
-      background: #0d1524;
-    }
-
-    .upload-panel h2 {
-      margin: 0;
-      font-size: 13px;
-    }
-
-    .upload-picker-row {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 6px;
-    }
-
-    .upload-input {
-      display: none;
-    }
-
-    .upload-list {
-      display: grid;
-      gap: 6px;
-      max-height: 150px;
-      margin: 0;
-      padding: 0;
-      overflow: auto;
-      list-style: none;
-    }
-
-    .upload-item {
-      display: grid;
-      gap: 2px;
-      padding: 7px 8px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #09111f;
-      font-size: 12px;
-    }
-
-    .upload-item-name {
-      overflow-wrap: anywhere;
-    }
-
-    .upload-item-status {
-      color: var(--muted);
-      overflow-wrap: anywhere;
-    }
-
-    .upload-item-status.success { color: var(--ok); }
-    .upload-item-status.error { color: #fca5a5; }
-    .upload-item-status.warning { color: var(--warn); }
-    .upload-item-status.muted { color: var(--muted); }
-    .upload-retry-btn {
-      width: fit-content;
-      margin-top: 4px;
-      font-size: 11px;
-      padding: 4px 8px;
-      border-radius: 7px;
-    }
-
-    .upload-progress {
-      width: 100%;
-      height: 8px;
-      accent-color: var(--brand);
-    }
-
-    .composer {
-      padding: 14px 16px;
-      border-top: 1px solid var(--line);
-      background: #101b2e;
-      display: flex;
-      gap: 10px;
-      align-items: flex-end;
-    }
-
-    .composer textarea {
-      flex: 1;
-      min-height: 52px;
-      max-height: 160px;
-      resize: vertical;
-      background: #0d1524;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      padding: 10px 12px;
-      color: var(--text);
-      outline: none;
-    }
-    .composer textarea:focus {
-      border-color: #3b82f680;
-      box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
-    }
-
-    .composer button {
-      min-width: 120px;
-      align-self: stretch;
-    }
-
-    @media (max-width: 940px) {
       .app {
-        grid-template-columns: 1fr;
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 24px 16px;
+        display: grid;
+        grid-template-columns: 280px 1fr;
+        gap: 16px;
+        min-height: 100%;
       }
+
+      .card {
+        background: linear-gradient(180deg, var(--panel) 0%, #0f1828 100%);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+      }
+
       .sidebar {
-        position: static;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+        height: fit-content;
+        position: sticky;
+        top: 16px;
       }
+
+      .title {
+        margin: 0;
+        font-size: 20px;
+        font-weight: 700;
+        letter-spacing: 0.2px;
+      }
+
+      .sub {
+        margin: 4px 0 0;
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 10px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+
+      .dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 999px;
+        background: var(--danger);
+        box-shadow: 0 0 0 6px rgba(239, 68, 68, 0.12);
+      }
+
+      .dot.live {
+        background: var(--ok);
+        box-shadow: 0 0 0 6px rgba(34, 197, 94, 0.13);
+      }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin-top: 4px;
+      }
+
+      label {
+        font-size: 12px;
+        color: var(--muted);
+        font-weight: 600;
+        letter-spacing: 0.3px;
+        text-transform: uppercase;
+      }
+
+      input,
+      button,
+      textarea,
+      select {
+        font: inherit;
+        color: inherit;
+      }
+
+      input[type="text"],
+      select {
+        width: 100%;
+        background: #0d1524;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 10px 12px;
+        color: var(--text);
+        outline: none;
+      }
+      input[type="text"]:focus,
+      select:focus {
+        border-color: #3b82f680;
+        box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+      }
+
+      .mode-switch {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 6px;
+        padding: 4px;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: #0d1524;
+      }
+
+      .mode-switch button {
+        padding: 8px 6px;
+        background: transparent;
+        color: var(--muted);
+      }
+
+      .mode-switch button.active {
+        background: #1f4f87;
+        color: #fff;
+        border-color: #3b82f6;
+      }
+
+      .button-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin-top: 8px;
+      }
+
+      button {
+        border: 1px solid transparent;
+        border-radius: 10px;
+        padding: 10px 12px;
+        cursor: pointer;
+        background: #1a2941;
+        transition: 120ms ease;
+      }
+      button:hover {
+        transform: translateY(-1px);
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+        transform: none;
+      }
+
+      .primary {
+        background: var(--brand);
+        color: #fff;
+        border-color: #4f93ff;
+      }
+      .danger {
+        background: #3a1a20;
+        color: #fecaca;
+        border-color: #7f1d1d;
+      }
+      .muted-btn {
+        background: #102036;
+        border-color: var(--line);
+        color: #d8e5f8;
+      }
+
+      .note {
+        font-size: 12px;
+        line-height: 1.35;
+        color: var(--muted);
+        background: #0d1524;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 10px;
+      }
+
+      .hidden {
+        display: none !important;
+      }
+
+      .full-power-controls {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+
+      .search-row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 6px;
+      }
+
+      details.structured-output {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        background: #0d1524;
+        padding: 9px 10px;
+      }
+
+      details.structured-output summary {
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.3px;
+      }
+
+      details.structured-output textarea {
+        width: 100%;
+        min-height: 130px;
+        resize: vertical;
+        margin-top: 8px;
+        padding: 8px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #09111f;
+        color: var(--text);
+      }
+
+      .full-width-btn {
+        width: 100%;
+      }
+
       .chat {
-        min-height: 65vh;
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        min-height: 72vh;
+        overflow: hidden;
       }
-      .bubble { max-width: 94%; }
-    }
-  </style>
-</head>
-<body>
-  <div class="app">
-    <aside class="card sidebar">
-      <div>
-        <h1 class="title">PJ Web App</h1>
-        <p class="sub">Realtime voice and full-power PJ workspace</p>
-      </div>
 
-      <div class="status">
-        <span id="statusDot" class="dot"></span>
-        <span id="statusText">Idle</span>
-      </div>
+      .chat-head {
+        padding: 16px 18px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        background: linear-gradient(180deg, #172338, #152136);
+      }
 
-      <div class="mode-switch" aria-label="Assistant mode">
-        <button id="realtimeModeBtn" class="active" type="button">Fast Voice</button>
-        <button id="fullPowerVoiceModeBtn" type="button">Full Power Voice</button>
-        <button id="fullPowerModeBtn" type="button">Full Power Text</button>
-      </div>
+      .chat-head h2 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 700;
+      }
 
-      <div class="field">
-        <label for="apiBase">Server URL</label>
-        <input id="apiBase" type="text" placeholder="http://localhost:3001">
-      </div>
+      .head-actions {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
 
-      <div class="button-row">
-        <button id="startBtn" class="primary">Start Session</button>
-        <button id="stopBtn" class="danger" disabled>End Session</button>
-      </div>
+      .messages {
+        padding: 18px;
+        overflow: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0)), #0c1526;
+      }
 
-      <div id="modeNote" class="note">
-        Voice mode requires microphone permission. You can still send text
-        messages once the realtime session is connected.
-      </div>
+      .bubble {
+        max-width: 85%;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 10px 12px;
+        line-height: 1.4;
+        white-space: pre-wrap;
+        word-break: break-word;
+        font-size: 14px;
+      }
 
-      <section class="upload-panel" aria-labelledby="uploadHeading">
-        <h2 id="uploadHeading">Upload documents</h2>
-        <div class="upload-picker-row">
-          <button id="chooseFilesBtn" class="muted-btn" type="button">Choose Files</button>
-          <button id="chooseFolderBtn" class="muted-btn" type="button">Choose Folder</button>
+      .bubble.user {
+        align-self: flex-end;
+        background: #12355f;
+        border-color: #2b5d95;
+      }
+
+      .bubble.assistant {
+        align-self: flex-start;
+        background: #15243b;
+      }
+
+      .bubble.system {
+        align-self: center;
+        max-width: 92%;
+        background: #251f10;
+        border-color: #6a4f1e;
+        color: #fde68a;
+        font-size: 13px;
+      }
+
+      .approval-actions {
+        display: flex;
+        gap: 8px;
+        justify-content: center;
+        margin-top: 10px;
+      }
+
+      .approval-actions button {
+        padding: 7px 12px;
+      }
+
+      .bubble.tool-status {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        align-items: center;
+        gap: 8px;
+        width: min(92%, 680px);
+      }
+
+      .tool-status-indicator {
+        width: 9px;
+        height: 9px;
+        border-radius: 999px;
+        background: var(--warn);
+      }
+
+      .tool-status.completed .tool-status-indicator {
+        background: var(--ok);
+      }
+
+      .artifact-card {
+        align-self: flex-start;
+        width: min(92%, 680px);
+        padding: 14px;
+        border: 1px solid #2b5d95;
+        border-radius: 12px;
+        background: linear-gradient(135deg, #142a47, #102036);
+        display: grid;
+        gap: 9px;
+      }
+
+      .artifact-card-title {
+        font-weight: 700;
+        word-break: break-word;
+        color: #fff;
+      }
+
+      .artifact-image-preview {
+        display: block;
+        width: 100%;
+        max-height: 360px;
+        object-fit: contain;
+        border-radius: 8px;
+        background: #0b1422;
+      }
+
+      .artifact-card-meta {
+        color: var(--muted);
+        font-size: 12px;
+        word-break: break-all;
+      }
+
+      .artifact-download {
+        width: fit-content;
+        color: #fff;
+        background: var(--brand);
+        border: 1px solid #4f93ff;
+        border-radius: 9px;
+        padding: 8px 12px;
+        text-decoration: none;
+        font-weight: 700;
+        font-size: 13px;
+      }
+
+      .upload-panel {
+        display: grid;
+        gap: 9px;
+        padding: 11px;
+        border: 1px solid var(--line);
+        border-radius: 11px;
+        background: #0d1524;
+      }
+
+      .upload-panel h2 {
+        margin: 0;
+        font-size: 13px;
+      }
+
+      .upload-picker-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+      }
+
+      .upload-input {
+        display: none;
+      }
+
+      .upload-list {
+        display: grid;
+        gap: 6px;
+        max-height: 150px;
+        margin: 0;
+        padding: 0;
+        overflow: auto;
+        list-style: none;
+      }
+
+      .upload-item {
+        display: grid;
+        gap: 2px;
+        padding: 7px 8px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: #09111f;
+        font-size: 12px;
+      }
+
+      .upload-item-name {
+        overflow-wrap: anywhere;
+      }
+
+      .upload-item-status {
+        color: var(--muted);
+        overflow-wrap: anywhere;
+      }
+
+      .upload-item-status.success {
+        color: var(--ok);
+      }
+      .upload-item-status.error {
+        color: #fca5a5;
+      }
+      .upload-item-status.warning {
+        color: var(--warn);
+      }
+      .upload-item-status.muted {
+        color: var(--muted);
+      }
+      .upload-retry-btn {
+        width: fit-content;
+        margin-top: 4px;
+        font-size: 11px;
+        padding: 4px 8px;
+        border-radius: 7px;
+      }
+
+      .upload-progress {
+        width: 100%;
+        height: 8px;
+        accent-color: var(--brand);
+      }
+
+      .composer {
+        padding: 14px 16px;
+        border-top: 1px solid var(--line);
+        background: #101b2e;
+        display: flex;
+        gap: 10px;
+        align-items: flex-end;
+      }
+
+      .composer textarea {
+        flex: 1;
+        min-height: 52px;
+        max-height: 160px;
+        resize: vertical;
+        background: #0d1524;
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 10px 12px;
+        color: var(--text);
+        outline: none;
+      }
+      .composer textarea:focus {
+        border-color: #3b82f680;
+        box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+      }
+
+      .composer button {
+        min-width: 120px;
+        align-self: stretch;
+      }
+
+      @media (max-width: 940px) {
+        .app {
+          grid-template-columns: 1fr;
+        }
+        .sidebar {
+          position: static;
+        }
+        .chat {
+          min-height: 65vh;
+        }
+        .bubble {
+          max-width: 94%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <aside class="card sidebar">
+        <div>
+          <h1 class="title">PJ Web App</h1>
+          <p class="sub">Realtime voice and full-power PJ workspace</p>
         </div>
-        <input id="filePicker" class="upload-input" type="file" multiple>
-        <input
-          id="folderPicker"
-          class="upload-input"
-          type="file"
-          webkitdirectory
-          directory
-          multiple
-        >
-        <div id="uploadSummary" class="sub">No files selected.</div>
-        <ul id="uploadList" class="upload-list" aria-live="polite"></ul>
-        <progress id="uploadProgress" class="upload-progress" max="100" value="0"></progress>
-        <button id="uploadBtn" class="primary full-width-btn" type="button" disabled>Upload</button>
-      </section>
 
-      <div id="fullPowerControls" class="full-power-controls hidden">
+        <div class="status">
+          <span id="statusDot" class="dot"></span>
+          <span id="statusText">Idle</span>
+        </div>
+
+        <div class="mode-switch" aria-label="Assistant mode">
+          <button id="realtimeModeBtn" class="active" type="button">Fast Voice</button>
+          <button id="fullPowerVoiceModeBtn" type="button">Full Power Voice</button>
+          <button id="fullPowerModeBtn" type="button">Full Power Text</button>
+        </div>
+
         <div class="field">
-          <label for="sessionSelect">Conversation history</label>
-          <select id="sessionSelect">
-            <option value="">No saved conversations loaded</option>
-          </select>
+          <label for="apiBase">Server URL</label>
+          <input id="apiBase" type="text" placeholder="http://localhost:3001" />
         </div>
-        <button id="refreshSessionsBtn" class="muted-btn full-width-btn" type="button">Refresh History</button>
-        <div class="search-row">
-          <input id="historySearch" type="text" placeholder="Search chat history">
-          <button id="searchHistoryBtn" class="muted-btn" type="button">Search</button>
+
+        <div class="button-row">
+          <button id="startBtn" class="primary">Start Session</button>
+          <button id="stopBtn" class="danger" disabled>End Session</button>
         </div>
-        <details id="structuredOutputPanel" class="structured-output">
-          <summary>Structured JSON output</summary>
-          <div class="field">
-            <label for="schemaName">Schema name</label>
-            <input id="schemaName" type="text" value="pj_response">
+
+        <div id="modeNote" class="note">
+          Voice mode requires microphone permission. You can still send text messages once the
+          realtime session is connected.
+        </div>
+
+        <section class="upload-panel" aria-labelledby="uploadHeading">
+          <h2 id="uploadHeading">Upload documents</h2>
+          <div class="upload-picker-row">
+            <button id="chooseFilesBtn" class="muted-btn" type="button">Choose Files</button>
+            <button id="chooseFolderBtn" class="muted-btn" type="button">Choose Folder</button>
           </div>
-          <textarea id="schemaJson" spellcheck="false" placeholder='{"type":"object","properties":{},"additionalProperties":false}'></textarea>
-        </details>
-      </div>
+          <input id="filePicker" class="upload-input" type="file" multiple />
+          <input
+            id="folderPicker"
+            class="upload-input"
+            type="file"
+            webkitdirectory
+            directory
+            multiple
+          />
+          <div id="uploadSummary" class="sub">No files selected.</div>
+          <ul id="uploadList" class="upload-list" aria-live="polite"></ul>
+          <progress id="uploadProgress" class="upload-progress" max="100" value="0"></progress>
+          <button id="uploadBtn" class="primary full-width-btn" type="button" disabled>
+            Upload
+          </button>
+        </section>
 
-      <button id="refreshCapabilitiesBtn" class="muted-btn full-width-btn">Refresh Capabilities</button>
-      <div id="capabilityStatus" class="note">Capability mode: checking...</div>
-      <div id="toolSummary" class="note">Tool catalog not loaded yet.</div>
-    </aside>
-
-    <main class="card chat">
-      <div class="chat-head">
-        <h2>Conversation</h2>
-        <div class="head-actions">
-          <button id="copyBtn" class="muted-btn">Copy Transcript</button>
-          <button id="clearBtn" class="muted-btn">Clear</button>
+        <div id="fullPowerControls" class="full-power-controls hidden">
+          <div class="field">
+            <label for="sessionSelect">Conversation history</label>
+            <select id="sessionSelect">
+              <option value="">No saved conversations loaded</option>
+            </select>
+          </div>
+          <button id="refreshSessionsBtn" class="muted-btn full-width-btn" type="button">
+            Refresh History
+          </button>
+          <div class="search-row">
+            <input id="historySearch" type="text" placeholder="Search chat history" />
+            <button id="searchHistoryBtn" class="muted-btn" type="button">Search</button>
+          </div>
+          <details id="structuredOutputPanel" class="structured-output">
+            <summary>Structured JSON output</summary>
+            <div class="field">
+              <label for="schemaName">Schema name</label>
+              <input id="schemaName" type="text" value="pj_response" />
+            </div>
+            <textarea
+              id="schemaJson"
+              spellcheck="false"
+              placeholder='{"type":"object","properties":{},"additionalProperties":false}'
+            ></textarea>
+          </details>
         </div>
-      </div>
-      <div id="messages" class="messages"></div>
-      <div class="composer">
-        <textarea id="textInput" placeholder="Type a message to PJ..." disabled></textarea>
-        <button id="sendBtn" class="primary" disabled>Send</button>
-      </div>
-    </main>
-  </div>
 
-  <audio id="pjAudio" autoplay></audio>
+        <button id="refreshCapabilitiesBtn" class="muted-btn full-width-btn">
+          Refresh Capabilities
+        </button>
+        <div id="capabilityStatus" class="note">Capability mode: checking...</div>
+        <div id="toolSummary" class="note">Tool catalog not loaded yet.</div>
+      </aside>
 
-  <script type="module">
-    import {
-      CONTRACT_VERSION,
-      PROTOCOL_VERSION,
-      assertProtocolResponse,
-      createRequestId,
-      protocolMessage,
-      shorten,
-      parseErrorBody,
-      fetchWithTimeout,
-    } from "/assets/pj_web_utils.js";
+      <main class="card chat">
+        <div class="chat-head">
+          <h2>Conversation</h2>
+          <div class="head-actions">
+            <button id="copyBtn" class="muted-btn">Copy Transcript</button>
+            <button id="clearBtn" class="muted-btn">Clear</button>
+          </div>
+        </div>
+        <div id="messages" class="messages"></div>
+        <div class="composer">
+          <textarea id="textInput" placeholder="Type a message to PJ..." disabled></textarea>
+          <button id="sendBtn" class="primary" disabled>Send</button>
+        </div>
+      </main>
+    </div>
 
-    const localHostnames = new Set(["localhost", "127.0.0.1"]);
-    const DEFAULT_API_BASE = localHostnames.has(window.location.hostname)
-      ? `${window.location.protocol}//${window.location.hostname}:3001`
-      : window.location.hostname === "www.pj-assistant.ai"
-        ? "https://pj-assistant.ai"
-        : window.location.origin;
-    const STORAGE_KEY = "pj-web-app-api-base";
-    const PHASE = {
-      IDLE: "idle",
-      CONNECTING: "connecting",
-      LIVE: "live",
-      STOPPING: "stopping",
-    };
-    const MODE = {
-      REALTIME: "fast_voice",
-      FULL_POWER_VOICE: "full_power_voice",
-      FULL_POWER: "full_power_text",
-    };
+    <audio id="pjAudio" autoplay></audio>
 
-    const el = {
-      apiBase: document.getElementById("apiBase"),
-      startBtn: document.getElementById("startBtn"),
-      stopBtn: document.getElementById("stopBtn"),
-      statusDot: document.getElementById("statusDot"),
-      statusText: document.getElementById("statusText"),
-      messages: document.getElementById("messages"),
-      textInput: document.getElementById("textInput"),
-      sendBtn: document.getElementById("sendBtn"),
-      copyBtn: document.getElementById("copyBtn"),
-      clearBtn: document.getElementById("clearBtn"),
-      pjAudio: document.getElementById("pjAudio"),
-      refreshCapabilitiesBtn: document.getElementById("refreshCapabilitiesBtn"),
-      capabilityStatus: document.getElementById("capabilityStatus"),
-      toolSummary: document.getElementById("toolSummary"),
-      realtimeModeBtn: document.getElementById("realtimeModeBtn"),
-      fullPowerVoiceModeBtn: document.getElementById("fullPowerVoiceModeBtn"),
-      fullPowerModeBtn: document.getElementById("fullPowerModeBtn"),
-      modeNote: document.getElementById("modeNote"),
-      fullPowerControls: document.getElementById("fullPowerControls"),
-      sessionSelect: document.getElementById("sessionSelect"),
-      refreshSessionsBtn: document.getElementById("refreshSessionsBtn"),
-      historySearch: document.getElementById("historySearch"),
-      searchHistoryBtn: document.getElementById("searchHistoryBtn"),
-      structuredOutputPanel: document.getElementById("structuredOutputPanel"),
-      schemaName: document.getElementById("schemaName"),
-      schemaJson: document.getElementById("schemaJson"),
-      chooseFilesBtn: document.getElementById("chooseFilesBtn"),
-      chooseFolderBtn: document.getElementById("chooseFolderBtn"),
-      filePicker: document.getElementById("filePicker"),
-      folderPicker: document.getElementById("folderPicker"),
-      uploadSummary: document.getElementById("uploadSummary"),
-      uploadList: document.getElementById("uploadList"),
-      uploadProgress: document.getElementById("uploadProgress"),
-      uploadBtn: document.getElementById("uploadBtn"),
-    };
+    <script type="module">
+      import {
+        CONTRACT_VERSION,
+        PROTOCOL_VERSION,
+        assertProtocolResponse,
+        createRequestId,
+        protocolMessage,
+        shorten,
+        parseErrorBody,
+        fetchWithTimeout,
+      } from "/assets/pj_web_utils.js";
 
-    const state = {
-      pc: null,
-      dataChannel: null,
-      micStream: null,
-      pendingCalls: {},
-      activeAssistantBubble: null,
-      phase: PHASE.IDLE,
-      activeStartRequestId: null,
-      liveAnnounced: false,
-      toolCatalog: null,
-      mode: MODE.REALTIME,
-      fullPowerSessionId: null,
-      activeSessionId: null,
-      fullPowerBusy: false,
-      responsesAbortController: null,
-      capabilityManifest: null,
-      pendingApprovals: {},
-      fullPowerToolRows: new Map(),
-      artifactCards: new Map(),
-      realtimeItems: new Map(),
-      responseItems: new Map(),
-      activeAssistantItemId: null,
-      activeResponseId: null,
-      pendingSeedHistory: [],
-      seededSessionIds: new Set(),
-      perfectedInputItems: new Set(),
-      processedRealtimeEventIds: new Set(),
-      persistedRealtimeStates: new Map(),
-      missingRealtimeIds: new Set(),
-      activePlaybackStartSeconds: null,
-      uploadMode: "files",
-      uploadItems: [],
-      uploadBusy: false,
-      uploadSessionId: `upload_${createRequestId().replace(/[^A-Za-z0-9_-]/g, "_")}`,
-      uploadPolls: new Map(),
-    };
-
-    const savedBase = localStorage.getItem(STORAGE_KEY);
-    el.apiBase.value = savedBase || DEFAULT_API_BASE;
-
-    function setStatus(text, kind = "idle") {
-      el.statusText.textContent = text;
-      el.statusDot.classList.toggle("live", kind === "live");
-    }
-
-    function apiBase() {
-      return el.apiBase.value.trim().replace(/\/+$/, "");
-    }
-
-    function requestHeaders(requestId, contentType = null) {
-      const headers = {
-        Accept: "application/json",
-        "x-pj-client-request-id": requestId,
-        "x-pj-contract-version": CONTRACT_VERSION,
-        "x-pj-protocol-version": String(PROTOCOL_VERSION),
+      const localHostnames = new Set(["localhost", "127.0.0.1"]);
+      const DEFAULT_API_BASE = localHostnames.has(window.location.hostname)
+        ? `${window.location.protocol}//${window.location.hostname}:3001`
+        : window.location.hostname === "www.pj-assistant.ai"
+          ? "https://pj-assistant.ai"
+          : window.location.origin;
+      const STORAGE_KEY = "pj-web-app-api-base";
+      const PHASE = {
+        IDLE: "idle",
+        CONNECTING: "connecting",
+        LIVE: "live",
+        STOPPING: "stopping",
       };
-      if (contentType) headers["Content-Type"] = contentType;
-      return headers;
-    }
-
-    function renderUploadItems() {
-      el.uploadList.replaceChildren();
-      for (const item of state.uploadItems) {
-        const row = document.createElement("li");
-        row.className = "upload-item";
-        const name = document.createElement("span");
-        name.className = "upload-item-name";
-        const duplicateBadge = item.reused ? " (duplicate)" : "";
-        name.textContent = `${item.path || item.savedPath || item.name || "uploaded document"}${duplicateBadge}`;
-        const status = document.createElement("span");
-        const queueState = item.queueState || item.processing?.queue_state || "";
-        const warningState = queueState === "failed" || queueState === "unavailable";
-        status.className = `upload-item-status ${item.resultKind || (warningState ? "error" : "muted")}`.trim();
-        const summary = item.summary ? ` · ${shorten(item.summary, 120)}` : "";
-        const tags = Array.isArray(item.classification) && item.classification.length
-          ? ` · ${item.classification.slice(0, 3).join(", ")}`
-          : "";
-        status.textContent = item.status
-          || `${queueState || "ready"}${summary}${tags}`;
-        row.append(name, status);
-        if (Array.isArray(item.warnings) && item.warnings.length) {
-          const warning = document.createElement("span");
-          warning.className = "upload-item-status warning";
-          warning.textContent = shorten(item.warnings[0], 180);
-          row.appendChild(warning);
-        }
-        if (warningState && item.documentId && state.activeSessionId) {
-          const retryBtn = document.createElement("button");
-          retryBtn.type = "button";
-          retryBtn.className = "muted-btn upload-retry-btn";
-          retryBtn.textContent = "Retry processing";
-          retryBtn.disabled = state.uploadBusy;
-          retryBtn.addEventListener("click", () => retryUploadProcessing(item.documentId));
-          row.appendChild(retryBtn);
-        }
-        el.uploadList.appendChild(row);
-      }
-      const count = state.uploadItems.length;
-      el.uploadSummary.textContent = count
-        ? `${count} item${count === 1 ? "" : "s"} selected for ${state.uploadMode} upload.`
-        : "No files selected.";
-      el.uploadBtn.disabled = state.uploadBusy || count === 0;
-      el.chooseFilesBtn.disabled = state.uploadBusy;
-      el.chooseFolderBtn.disabled = state.uploadBusy;
-    }
-
-    function selectUploadItems(fileList, mode) {
-      state.uploadMode = mode;
-      state.uploadItems = Array.from(fileList).slice(0, 200).map((file) => ({
-        file,
-        path: mode === "folder" ? file.webkitRelativePath : file.name,
-        status: "",
-        resultKind: "",
-      }));
-      el.uploadProgress.value = 0;
-      renderUploadItems();
-    }
-
-    function uploadSessionId() {
-      return state.activeSessionId || state.fullPowerSessionId || state.uploadSessionId;
-    }
-
-    function clearUploadPolls() {
-      for (const timer of state.uploadPolls.values()) {
-        clearTimeout(timer);
-      }
-      state.uploadPolls.clear();
-    }
-
-    function scheduleUploadPoll(sessionId, documentId, attempt = 0) {
-      const key = `${sessionId}:${documentId}`;
-      const previous = state.uploadPolls.get(key);
-      if (previous) clearTimeout(previous);
-      const delay = Math.min(15000, 1200 * Math.max(1, attempt + 1));
-      const timer = setTimeout(async () => {
-        try {
-          const payload = await fetchJson(
-            `${apiBase()}/responses/sessions/${encodeURIComponent(sessionId)}/uploads/documents/${encodeURIComponent(documentId)}/status`,
-            { headers: requestHeaders(createRequestId()) },
-            12000,
-          );
-          const doc = payload.document || {};
-          const item = state.uploadItems.find((candidate) => candidate.documentId === documentId);
-          if (item) {
-            item.queueState = doc.processing?.queue_state || "queued";
-            item.status = `${item.queueState}`;
-            item.summary = doc.summary || "";
-            item.classification = doc.classification || [];
-            item.warnings = doc.warnings || [];
-            item.previewAvailable = Boolean(doc.preview_available);
-            item.reused = Boolean(doc.reused);
-            item.resultKind = item.queueState === "failed" ? "error" : "success";
-          }
-          renderUploadItems();
-          if (!["failed", "unavailable", "complete"].includes(doc.processing?.queue_state || "")) {
-            scheduleUploadPoll(sessionId, documentId, attempt + 1);
-            return;
-          }
-        } catch (_) {
-          scheduleUploadPoll(sessionId, documentId, attempt + 1);
-          return;
-        }
-        state.uploadPolls.delete(key);
-      }, delay);
-      state.uploadPolls.set(key, timer);
-    }
-
-    async function retryUploadProcessing(documentId) {
-      if (!state.activeSessionId || !documentId) return;
-      try {
-        const payload = await fetchJson(
-          `${apiBase()}/responses/sessions/${encodeURIComponent(state.activeSessionId)}/uploads/documents/${encodeURIComponent(documentId)}/retry`,
-          {
-            method: "POST",
-            headers: requestHeaders(createRequestId(), "application/json"),
-            body: JSON.stringify(protocolMessage({})),
-          },
-        );
-        const item = state.uploadItems.find((candidate) => candidate.documentId === documentId);
-        if (item) {
-          item.queueState = payload.queue_state || "queued";
-          item.status = `${item.queueState}`;
-          item.resultKind = "muted";
-        }
-        renderUploadItems();
-        scheduleUploadPoll(state.activeSessionId, documentId, 0);
-      } catch (error) {
-        appendBubble("system", `Retry failed: ${shorten(String(error), 220)}`);
-      }
-    }
-
-    async function syncLinkedUploadsForSession(sessionId) {
-      if (!sessionId || !apiBase()) return;
-      try {
-        const payload = await fetchJson(
-          `${apiBase()}/responses/sessions/${encodeURIComponent(sessionId)}/uploads?limit=100`,
-          { headers: requestHeaders(createRequestId()) },
-          12000,
-        );
-        clearUploadPolls();
-        state.uploadItems = (payload.documents || []).slice(0, 200).map((doc) => ({
-          file: null,
-          path: doc.saved_path,
-          savedPath: doc.saved_path,
-          name: doc.name,
-          documentId: doc.document_id,
-          queueState: doc.processing?.queue_state || "queued",
-          status: `${doc.processing?.queue_state || "queued"}`,
-          resultKind: doc.processing?.queue_state === "failed" ? "error" : "success",
-          reused: Boolean(doc.reused),
-          summary: doc.summary || "",
-          classification: doc.classification || [],
-          warnings: doc.warnings || [],
-          previewAvailable: Boolean(doc.preview_available),
-        }));
-        renderUploadItems();
-        for (const item of state.uploadItems) {
-          if (
-            item.documentId
-            && !["failed", "unavailable", "complete"].includes(item.queueState)
-          ) {
-            scheduleUploadPoll(sessionId, item.documentId, 0);
-          }
-        }
-      } catch (_) {
-        // Keep current upload list when sync is unavailable.
-      }
-    }
-
-    async function linkAnonymousUploadsIfNeeded(sessionId) {
-      if (!sessionId || !state.uploadSessionId || !state.uploadSessionId.startsWith("upload_")) return;
-      if (sessionId === state.uploadSessionId) return;
-      try {
-        await fetchJson(
-          `${apiBase()}/responses/sessions/${encodeURIComponent(sessionId)}/uploads/link`,
-          {
-            method: "POST",
-            headers: requestHeaders(createRequestId(), "application/json"),
-            body: JSON.stringify(protocolMessage({ source_session_id: state.uploadSessionId })),
-          },
-          12000,
-        );
-        state.uploadSessionId = sessionId;
-      } catch (_) {
-        // Linking is best effort and can be retried on next session sync.
-      }
-    }
-
-    async function uploadSelectedDocuments() {
-      if (state.uploadBusy || !state.uploadItems.length) return;
-      if (!apiBase()) {
-        setStatus("Set a valid server URL");
-        return;
-      }
-
-      state.uploadBusy = true;
-      for (const item of state.uploadItems) {
-        item.status = "Uploading...";
-        item.resultKind = "";
-      }
-      renderUploadItems();
-      el.uploadProgress.value = 0;
-
-      const form = new FormData();
-      form.append("session_id", uploadSessionId());
-      for (const item of state.uploadItems) {
-        form.append("files", item.file, item.file.name);
-        form.append("paths", item.path);
-      }
-      const requestId = createRequestId();
-      const endpoint = state.uploadMode === "folder" ? "/upload/folder" : "/upload/files";
-
-      try {
-        const parsed = await new Promise((resolve, reject) => {
-          const xhr = new XMLHttpRequest();
-          xhr.open("POST", `${apiBase()}${endpoint}`);
-          xhr.withCredentials = true;
-          xhr.timeout = 120000;
-          for (const [name, value] of Object.entries(requestHeaders(requestId))) {
-            xhr.setRequestHeader(name, value);
-          }
-          xhr.setRequestHeader("x-pj-session-id", uploadSessionId());
-          xhr.upload.addEventListener("progress", (event) => {
-            if (event.lengthComputable) {
-              el.uploadProgress.value = Math.round((event.loaded / event.total) * 100);
-            }
-          });
-          xhr.addEventListener("load", () => {
-            let payload;
-            try {
-              payload = xhr.responseText ? JSON.parse(xhr.responseText) : {};
-              assertProtocolResponse(
-                { headers: { get: (name) => xhr.getResponseHeader(name) } },
-                payload,
-              );
-            } catch (_) {
-              reject(new Error("Upload response was not valid PJ JSON."));
-              return;
-            }
-            if (xhr.status < 200 || xhr.status >= 300) {
-              const detail = parseErrorBody(xhr.responseText);
-              reject(new Error(`Upload failed (${xhr.status})${detail ? `: ${detail}` : ""}`));
-              return;
-            }
-            resolve(payload);
-          });
-          xhr.addEventListener("error", () => reject(new Error("Upload network request failed.")));
-          xhr.addEventListener("timeout", () => reject(new Error("Upload request timed out.")));
-          xhr.send(form);
-        });
-
-        const prefix = `uploads/${parsed.session_id}/${parsed.upload_id}/`;
-        for (const item of state.uploadItems) {
-          const result = (parsed.files || []).find(
-            (file) => file.saved_path === `${prefix}${item.path}`,
-          );
-          if (!result) continue;
-          item.documentId = result.document_id;
-          item.savedPath = result.saved_path;
-          item.reused = Boolean(result.reused);
-          item.queueState = result.queue_state || result.processing?.job_status || "queued";
-          item.summary = result.processing?.summary || "";
-          item.classification = result.processing?.classification || [];
-          item.warnings = result.processing?.warnings || [];
-          item.previewAvailable = Boolean(result.preview_url);
-          item.status = `Uploaded · ${item.queueState} · ${formatBytes(result.size)}`;
-          item.resultKind = "success";
-          if (state.activeSessionId && item.documentId) {
-            scheduleUploadPoll(state.activeSessionId, item.documentId, 0);
-          }
-        }
-        el.uploadProgress.value = 100;
-        if (parsed.session_id?.startsWith("upload_")) {
-          state.uploadSessionId = parsed.session_id;
-        }
-        if (state.activeSessionId) {
-          await linkAnonymousUploadsIfNeeded(state.activeSessionId);
-          await syncLinkedUploadsForSession(state.activeSessionId);
-        }
-        appendBubble(
-          "system",
-          `Uploaded ${parsed.count} document${parsed.count === 1 ? "" : "s"} to DocOps.`,
-        );
-      } catch (error) {
-        const detail = shorten(String(error), 300);
-        for (const item of state.uploadItems) {
-          item.status = detail;
-          item.resultKind = "error";
-        }
-        appendBubble("system", detail);
-      } finally {
-        state.uploadBusy = false;
-        renderUploadItems();
-      }
-    }
-
-    function validateOutboundRealtimeEvent(payload) {
-      if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-        return "payload must be an object";
-      }
-      if (typeof payload.type !== "string" || !payload.type) {
-        return "type is required";
-      }
-      if (payload.type === "conversation.item.create") {
-        if (!payload.item || typeof payload.item !== "object" || Array.isArray(payload.item)) {
-          return "item is required";
-        }
-        if (payload.item.type === "message") {
-          if (!["user", "assistant"].includes(payload.item.role)) {
-            return "item.role must be user or assistant";
-          }
-          if (
-            !Array.isArray(payload.item.content)
-            || !payload.item.content.length
-            || payload.item.content.some(
-              (part) => !part || typeof part.type !== "string" || typeof part.text !== "string",
-            )
-          ) {
-            return "item.content must contain typed text parts";
-          }
-        } else if (payload.item.type === "function_call_output") {
-          if (typeof payload.item.call_id !== "string" || !payload.item.call_id) {
-            return "item.call_id is required";
-          }
-          if (typeof payload.item.output !== "string") {
-            return "item.output must be a string";
-          }
-        } else {
-          return "item.type is unsupported";
-        }
-      } else if (["conversation.item.delete", "conversation.item.truncate"].includes(payload.type)) {
-        if (typeof payload.item_id !== "string" || !payload.item_id) {
-          return "item_id is required";
-        }
-        if (
-          payload.type === "conversation.item.truncate"
-          && (
-            !Number.isInteger(payload.content_index)
-            || !Number.isInteger(payload.audio_end_ms)
-            || payload.audio_end_ms < 0
-          )
-        ) {
-          return "truncate offsets must be non-negative integers";
-        }
-      } else if (!["response.create", "response.cancel"].includes(payload.type)) {
-        return `unsupported type ${payload.type}`;
-      }
-      return null;
-    }
-
-    function sendRealtimeEvent(payload) {
-      const issue = validateOutboundRealtimeEvent(payload);
-      if (issue) {
-        throw new Error(`Invalid outbound realtime payload: ${issue}.`);
-      }
-      if (!state.dataChannel || state.dataChannel.readyState !== "open") {
-        throw new Error("Realtime data channel is not open.");
-      }
-      state.dataChannel.send(JSON.stringify(payload));
-    }
-
-    function validateInboundRealtimeEvent(event) {
-      if (!event || typeof event !== "object" || Array.isArray(event)) {
-        return "payload must be an object";
-      }
-      if (typeof event.type !== "string" || !event.type) {
-        return "type is required";
-      }
-      const hasItemId = Boolean(realtimeItemId(event, "item"));
-      if (event.type === "error") {
-        if (!event.error || typeof event.error.message !== "string") {
-          return "error.message is required";
-        }
-      } else if (event.type === "response.created") {
-        if (typeof (event.response?.id || event.response_id) !== "string") {
-          return "response identifier is required";
-        }
-      } else if (
-        event.type === "conversation.item.input_audio_transcription.delta"
-        || event.type === "response.output_text.delta"
-        || event.type === "response.output_audio_transcript.delta"
-      ) {
-        if (!hasItemId) return "item identifier is required";
-        if (typeof event.delta !== "string") return "delta must be a string";
-      } else if (
-        event.type === "conversation.item.input_audio_transcription.completed"
-        || event.type === "response.output_text.done"
-        || event.type === "response.output_audio_transcript.done"
-      ) {
-        if (!hasItemId) return "item identifier is required";
-        if (typeof (event.transcript ?? event.text) !== "string") {
-          return "completed transcript text is required";
-        }
-      } else if (event.type === "response.done") {
-        if (
-          !event.response
-          || typeof event.response !== "object"
-          || typeof event.response.id !== "string"
-          || typeof event.response.status !== "string"
-        ) {
-          return "response.id and response.status are required";
-        }
-        if (event.response.output !== undefined && !Array.isArray(event.response.output)) {
-          return "response.output must be an array";
-        }
-      } else if (event.type === "response.function_call_arguments.delta") {
-        if (typeof event.call_id !== "string" || !event.call_id) return "call_id is required";
-        if (typeof event.delta !== "string") return "delta must be a string";
-      } else if (event.type === "response.function_call_arguments.done") {
-        if (typeof event.call_id !== "string" || !event.call_id) return "call_id is required";
-        const pendingCall = state.pendingCalls[event.call_id];
-        if (
-          typeof event.name !== "string"
-          && typeof pendingCall?.name !== "string"
-        ) return "name is required";
-        if (
-          typeof event.arguments !== "string"
-          && typeof pendingCall?.args !== "string"
-        ) return "arguments must be a string";
-      } else if (
-        event.type === "response.output_item.done"
-        && event.item?.type === "function_call"
-      ) {
-        if (
-          typeof event.item.call_id !== "string"
-          || typeof event.item.name !== "string"
-          || typeof event.item.arguments !== "string"
-        ) {
-          return "function call item fields are required";
-        }
-      }
-      return null;
-    }
-
-    function validateFullPowerEvent(event) {
-      if (!event || typeof event !== "object" || Array.isArray(event)) {
-        return "payload must be an object";
-      }
-      if (typeof event.type !== "string" || !event.type) return "type is required";
-      const requiredFields = {
-        "text.delta": ["delta"],
-        "tool.call": ["call_id", "tool_type"],
-        "tool.call.delta": ["call_id", "delta"],
-        "tool.result": ["call_id"],
-        "artifact.ready": ["artifact_id", "filename", "download_url"],
-        "deliverable.incomplete": ["requested_format"],
-        citation: ["citation"],
-        source: ["source"],
-        "approval.required": ["approval_id", "approval_kind", "session_id"],
-        "approval.executing": ["approval_id", "approval_kind", "approved"],
-        "approval.resolved": ["approval_id", "approval_kind", "approved"],
-        completion: ["text", "session_id"],
-        error: ["error"],
+      const MODE = {
+        REALTIME: "fast_voice",
+        FULL_POWER_VOICE: "full_power_voice",
+        FULL_POWER: "full_power_text",
       };
-      for (const field of requiredFields[event.type] || []) {
-        if (!(field in event)) {
-          return `${field} is required for ${event.type}`;
-        }
-      }
-      return null;
-    }
 
-    function setPhase(phase, statusText = null) {
-      state.phase = phase;
-      if (phase === PHASE.IDLE) {
-        el.startBtn.disabled = false;
-        el.stopBtn.disabled = true;
-        el.sendBtn.disabled = true;
-        el.textInput.disabled = true;
-      } else if (phase === PHASE.CONNECTING) {
-        el.startBtn.disabled = true;
-        el.stopBtn.disabled = false;
-        el.sendBtn.disabled = true;
-        el.textInput.disabled = true;
-      } else if (phase === PHASE.LIVE) {
-        el.startBtn.disabled = true;
-        el.stopBtn.disabled = false;
-        el.sendBtn.disabled = state.fullPowerBusy;
-        el.textInput.disabled = false;
-      } else {
-        el.startBtn.disabled = true;
-        el.stopBtn.disabled = true;
-        el.sendBtn.disabled = true;
-        el.textInput.disabled = true;
-      }
-
-      if (statusText) {
-        setStatus(statusText, phase === PHASE.LIVE ? "live" : "idle");
-      }
-    }
-
-    function setMode(mode) {
-      if (!Object.values(MODE).includes(mode) || state.mode === mode) return;
-      if (state.mode !== MODE.FULL_POWER) {
-        stopSession({ announce: false });
-      } else {
-        stopFullPowerSession({ announce: false, preserveSession: true });
-      }
-      state.mode = mode;
-      el.realtimeModeBtn.classList.toggle("active", mode === MODE.REALTIME);
-      el.fullPowerVoiceModeBtn.classList.toggle(
-        "active", mode === MODE.FULL_POWER_VOICE
-      );
-      el.fullPowerModeBtn.classList.toggle("active", mode === MODE.FULL_POWER);
-      el.fullPowerControls.classList.toggle("hidden", mode !== MODE.FULL_POWER);
-      el.startBtn.textContent = mode !== MODE.FULL_POWER
-        ? "Start Session"
-        : "New Conversation";
-      el.stopBtn.textContent = mode !== MODE.FULL_POWER
-        ? "End Session"
-        : "Close Conversation";
-      el.modeNote.textContent = mode === MODE.REALTIME
-        ? "Fast Voice responds immediately through Realtime and stores finalized transcripts."
-        : mode === MODE.FULL_POWER_VOICE
-          ? "Full Power Voice refines each completed transcript before PJ responds and preserves the original wording in shared history."
-          : "Full Power Text uses PJ's terminal-equivalent Responses runtime: web and file search, MCP, local tools, citations, structured output, and shared history.";
-      const idleText = mode === MODE.REALTIME
-        ? "Fast Voice idle"
-        : mode === MODE.FULL_POWER_VOICE
-          ? "Full Power Voice idle"
-          : "Full Power Text idle";
-      setPhase(PHASE.IDLE, idleText);
-      appendBubble(
-        "system",
-        mode === MODE.REALTIME
-          ? "Fast Voice selected."
-          : mode === MODE.FULL_POWER_VOICE
-            ? "Full Power Voice selected."
-            : "Full Power Text selected. Start or resume a conversation.",
-      );
-      refreshCurrentCapabilities({ forceRefresh: false });
-      if (mode === MODE.FULL_POWER) refreshFullPowerSessions();
-    }
-
-    function appendBubble(role, text, append = false) {
-      if (append && role === "assistant" && state.activeAssistantBubble) {
-        state.activeAssistantBubble.textContent += text;
-        scrollMessagesToBottom();
-        return state.activeAssistantBubble;
-      }
-
-      const bubble = document.createElement("div");
-      bubble.className = `bubble ${role}`;
-      bubble.textContent = text;
-      el.messages.appendChild(bubble);
-      scrollMessagesToBottom();
-
-      if (role === "assistant") {
-        state.activeAssistantBubble = bubble;
-      }
-      return bubble;
-    }
-
-    function finalizeAssistantBubble() {
-      state.activeAssistantBubble = null;
-    }
-
-    function resetFullPowerRenderState() {
-      state.fullPowerToolRows.clear();
-      state.artifactCards.clear();
-    }
-
-    function scrollMessagesToBottom() {
-      el.messages.scrollTop = el.messages.scrollHeight;
-    }
-
-    async function checkBackendHealth(apiBase, requestId) {
-      const response = await fetchWithTimeout(`${apiBase}/health`, {
-        headers: requestHeaders(requestId),
-        credentials: "include",
-      }, 8000);
-
-      const body = await response.text();
-      if (!response.ok) {
-        const detail = parseErrorBody(body);
-        throw new Error(`Backend health check failed (${response.status})${detail ? `: ${detail}` : ""}`);
-      }
-      let parsed = {};
-      try {
-        parsed = body ? JSON.parse(body) : {};
-      } catch (_) {
-        parsed = {};
-      }
-      assertProtocolResponse(response, parsed);
-      if (!parsed.ok) {
-        throw new Error("Backend health endpoint did not return ok=true.");
-      }
-      return parsed;
-    }
-
-    function summarizeToolNames(tools, limit = 8) {
-      if (!Array.isArray(tools) || !tools.length) {
-        return "";
-      }
-      const names = tools
-        .map((tool) => (tool && typeof tool.name === "string" ? tool.name : ""))
-        .filter(Boolean);
-      if (!names.length) {
-        return "";
-      }
-      const shown = names.slice(0, limit);
-      const remainder = names.length - shown.length;
-      return remainder > 0
-        ? `${shown.join(", ")} +${remainder} more`
-        : shown.join(", ");
-    }
-
-    async function fetchToolSchemas(apiBase, requestId, forceRefresh = false) {
-      const url = new URL(`${apiBase}/tool-schemas`);
-      if (forceRefresh) {
-        url.searchParams.set("refresh", "1");
-      }
-      const response = await fetchWithTimeout(url.toString(), {
-        headers: requestHeaders(requestId),
-        credentials: "include",
-      }, 12000);
-
-      const body = await response.text();
-      if (!response.ok) {
-        const detail = parseErrorBody(body);
-        throw new Error(`Tool schema fetch failed (${response.status})${detail ? `: ${detail}` : ""}`);
-      }
-
-      let parsed = {};
-      try {
-        parsed = body ? JSON.parse(body) : {};
-      } catch (_) {
-        parsed = {};
-      }
-      assertProtocolResponse(response, parsed);
-      const tools = Array.isArray(parsed.tools) ? parsed.tools : [];
-      return {
-        count: typeof parsed.count === "number" ? parsed.count : tools.length,
-        source: typeof parsed.source === "string" ? parsed.source : "unknown",
-        detail: typeof parsed.detail === "string" ? parsed.detail : "",
-        tools,
+      const el = {
+        apiBase: document.getElementById("apiBase"),
+        startBtn: document.getElementById("startBtn"),
+        stopBtn: document.getElementById("stopBtn"),
+        statusDot: document.getElementById("statusDot"),
+        statusText: document.getElementById("statusText"),
+        messages: document.getElementById("messages"),
+        textInput: document.getElementById("textInput"),
+        sendBtn: document.getElementById("sendBtn"),
+        copyBtn: document.getElementById("copyBtn"),
+        clearBtn: document.getElementById("clearBtn"),
+        pjAudio: document.getElementById("pjAudio"),
+        refreshCapabilitiesBtn: document.getElementById("refreshCapabilitiesBtn"),
+        capabilityStatus: document.getElementById("capabilityStatus"),
+        toolSummary: document.getElementById("toolSummary"),
+        realtimeModeBtn: document.getElementById("realtimeModeBtn"),
+        fullPowerVoiceModeBtn: document.getElementById("fullPowerVoiceModeBtn"),
+        fullPowerModeBtn: document.getElementById("fullPowerModeBtn"),
+        modeNote: document.getElementById("modeNote"),
+        fullPowerControls: document.getElementById("fullPowerControls"),
+        sessionSelect: document.getElementById("sessionSelect"),
+        refreshSessionsBtn: document.getElementById("refreshSessionsBtn"),
+        historySearch: document.getElementById("historySearch"),
+        searchHistoryBtn: document.getElementById("searchHistoryBtn"),
+        structuredOutputPanel: document.getElementById("structuredOutputPanel"),
+        schemaName: document.getElementById("schemaName"),
+        schemaJson: document.getElementById("schemaJson"),
+        chooseFilesBtn: document.getElementById("chooseFilesBtn"),
+        chooseFolderBtn: document.getElementById("chooseFolderBtn"),
+        filePicker: document.getElementById("filePicker"),
+        folderPicker: document.getElementById("folderPicker"),
+        uploadSummary: document.getElementById("uploadSummary"),
+        uploadList: document.getElementById("uploadList"),
+        uploadProgress: document.getElementById("uploadProgress"),
+        uploadBtn: document.getElementById("uploadBtn"),
       };
-    }
 
-    async function fetchJson(url, options = {}, timeoutMs = 15000) {
-      const response = await fetchWithTimeout(url, {
-        credentials: "include",
-        ...options,
-      }, timeoutMs);
-      const body = await response.text();
-      let parsed = {};
-      try {
-        parsed = body ? JSON.parse(body) : {};
-      } catch (_) {
-        throw new Error("Response payload was not valid JSON.");
+      const state = {
+        pc: null,
+        dataChannel: null,
+        micStream: null,
+        pendingCalls: {},
+        activeAssistantBubble: null,
+        phase: PHASE.IDLE,
+        activeStartRequestId: null,
+        liveAnnounced: false,
+        toolCatalog: null,
+        mode: MODE.REALTIME,
+        fullPowerSessionId: null,
+        activeSessionId: null,
+        fullPowerBusy: false,
+        responsesAbortController: null,
+        capabilityManifest: null,
+        pendingApprovals: {},
+        fullPowerToolRows: new Map(),
+        artifactCards: new Map(),
+        realtimeItems: new Map(),
+        responseItems: new Map(),
+        activeAssistantItemId: null,
+        activeResponseId: null,
+        pendingSeedHistory: [],
+        seededSessionIds: new Set(),
+        perfectedInputItems: new Set(),
+        processedRealtimeEventIds: new Set(),
+        persistedRealtimeStates: new Map(),
+        missingRealtimeIds: new Set(),
+        activePlaybackStartSeconds: null,
+        uploadMode: "files",
+        uploadItems: [],
+        uploadBusy: false,
+        uploadSessionId: `upload_${createRequestId().replace(/[^A-Za-z0-9_-]/g, "_")}`,
+        uploadPolls: new Map(),
+      };
+
+      const savedBase = localStorage.getItem(STORAGE_KEY);
+      el.apiBase.value = savedBase || DEFAULT_API_BASE;
+
+      function setStatus(text, kind = "idle") {
+        el.statusText.textContent = text;
+        el.statusDot.classList.toggle("live", kind === "live");
       }
-      assertProtocolResponse(response, parsed);
-      if (!response.ok) {
-        const detail = parseErrorBody(body);
-        throw new Error(`Request failed (${response.status})${detail ? `: ${detail}` : ""}`);
+
+      function apiBase() {
+        return el.apiBase.value.trim().replace(/\/+$/, "");
       }
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new Error("Response payload did not match the JSON object contract.");
-      }
-      return parsed;
-    }
 
-    async function ensureActiveSession(channel = "realtime") {
-      if (state.activeSessionId) return state.activeSessionId;
-      const parsed = await fetchJson(`${apiBase()}/responses/sessions`, {
-        method: "POST",
-        headers: requestHeaders(createRequestId(), "application/json"),
-        body: JSON.stringify(protocolMessage({ title: "", channel })),
-      });
-      const sessionId = parsed.session?.id;
-      if (!sessionId) throw new Error("Session response did not include an ID.");
-      state.activeSessionId = sessionId;
-      state.fullPowerSessionId = sessionId;
-      state.pendingSeedHistory = [];
-      return sessionId;
-    }
-
-    function upsertRealtimeBubble(
-      externalId,
-      role,
-      text,
-      {
-        append = false,
-        status = "streaming",
-        responseId = null,
-        source = null,
-      } = {},
-    ) {
-      if (!externalId) return null;
-      let item = state.realtimeItems.get(externalId);
-      if (!item) {
-        const bubble = appendBubble(role, "");
-        finalizeAssistantBubble();
-        item = {
-          bubble,
-          role,
-          text: "",
-          status,
-          responseId,
-          source,
-        };
-        state.realtimeItems.set(externalId, item);
-      }
-      item.text = append ? `${item.text}${text || ""}` : String(text || "");
-      const nextStatus = item.status === "interrupted" ? "interrupted" : status;
-      item.status = nextStatus;
-      item.responseId = responseId || item.responseId;
-      item.source = source || item.source;
-      item.bubble.textContent = item.text;
-      item.bubble.dataset.externalId = externalId;
-      item.bubble.dataset.status = nextStatus;
-      scrollMessagesToBottom();
-      return item;
-    }
-
-    async function persistRealtimeMessage({
-      externalId,
-      role,
-      content,
-      source,
-      responseId = null,
-      status = "completed",
-      playbackMs = null,
-      metadata = {},
-    }) {
-      if (!state.activeSessionId || !externalId) return;
-      await fetchJson(
-        `${apiBase()}/responses/sessions/${encodeURIComponent(state.activeSessionId)}/realtime-messages`,
-        {
-          method: "POST",
-          headers: requestHeaders(createRequestId(), "application/json"),
-          body: JSON.stringify(protocolMessage({
-            external_id: externalId,
-            role,
-            content,
-            source,
-            response_id: responseId,
-            status,
-            playback_ms: playbackMs,
-            metadata,
-          })),
-        },
-      );
-    }
-
-    async function loadSharedSessionHistory(sessionId, { clear = true } = {}) {
-      const parsed = await fetchJson(
-        `${apiBase()}/responses/sessions/${encodeURIComponent(sessionId)}/resume`,
-        {
-          method: "POST",
-          headers: requestHeaders(createRequestId(), "application/json"),
-          body: JSON.stringify(protocolMessage()),
-        },
-      );
-      const session = parsed.session;
-      if (!session?.id) throw new Error("Resume response did not include a session.");
-      state.activeSessionId = session.id;
-      state.fullPowerSessionId = session.id;
-      state.pendingSeedHistory = (session.history || []).slice(-20);
-      if (clear) {
-        el.messages.innerHTML = "";
-        state.realtimeItems.clear();
-        resetFullPowerRenderState();
-        finalizeAssistantBubble();
-      }
-      for (const item of session.history || []) {
-        if (item.external_id) {
-          upsertRealtimeBubble(
-            item.external_id,
-            item.role === "assistant" ? "assistant" : "user",
-            item.content || "",
-            {
-              status: item.status || "completed",
-              responseId: item.response_id || null,
-            },
-          );
-        } else {
-          appendBubble(
-            item.role === "assistant" ? "assistant" : "user",
-            item.content || "",
-          );
-          finalizeAssistantBubble();
-        }
-      }
-      for (const artifact of session.artifacts || []) {
-        renderArtifactCard(artifact);
-      }
-      await linkAnonymousUploadsIfNeeded(session.id);
-      await syncLinkedUploadsForSession(session.id);
-      return session;
-    }
-
-    function seedRealtimeConversation() {
-      if (
-        !state.activeSessionId ||
-        state.seededSessionIds.has(state.activeSessionId) ||
-        !state.dataChannel ||
-        state.dataChannel.readyState !== "open"
-      ) {
-        return;
-      }
-      for (const item of state.pendingSeedHistory) {
-        if (
-          !["user", "assistant"].includes(item.role)
-          || !item.content
-          || (item.status && item.status !== "completed")
-        ) continue;
-        sendRealtimeEvent({
-          type: "conversation.item.create",
-          item: {
-            type: "message",
-            role: item.role,
-            content: [{
-              type: item.role === "assistant" ? "output_text" : "input_text",
-              text: item.content,
-            }],
-          },
-        });
-      }
-      state.seededSessionIds.add(state.activeSessionId);
-    }
-
-    function capabilityNames(manifest) {
-      const native = Object.entries(manifest?.native || {})
-        .filter(([, value]) => value?.status === "active")
-        .map(([name]) => name);
-      const mcp = (manifest?.mcp_servers || [])
-        .filter((server) => ["active", "configured"].includes(server?.status))
-        .map((server) => `mcp:${server.label}`);
-      return [...native, ...mcp];
-    }
-
-    async function refreshFullPowerCapabilities(base, requestId) {
-      try {
-        const parsed = await fetchJson(
-          `${base}/responses/capabilities`,
-          { headers: requestHeaders(requestId) },
-          12000,
-        );
-        const manifest = parsed.capabilities || {};
-        state.capabilityManifest = manifest;
-        const functionCount = manifest.local_functions?.count || 0;
-        const names = capabilityNames(manifest);
-        el.capabilityStatus.textContent =
-          `Capability mode: Full Power [${functionCount} local functions] model ${manifest.model?.id || "unknown"}`;
-        el.toolSummary.textContent = names.length
-          ? `Native and connected tools: ${names.join(", ")}`
-          : "Native and connected tools are unavailable.";
-        return manifest;
-      } catch (error) {
-        state.capabilityManifest = null;
-        el.capabilityStatus.textContent = "Capability mode: Full Power unavailable";
-        el.toolSummary.textContent = `Capability error: ${shorten(String(error), 240)}`;
-        return null;
-      }
-    }
-
-    async function refreshCurrentCapabilities({ forceRefresh = false } = {}) {
-      const base = apiBase();
-      if (!base) return null;
-      const requestId = createRequestId();
-      if (state.mode === MODE.FULL_POWER) {
-        return refreshFullPowerCapabilities(base, requestId);
-      }
-      return refreshCapabilities(base, requestId, { forceRefresh });
-    }
-
-    async function refreshCapabilities(apiBase, requestId, { health = null, forceRefresh = false } = {}) {
-      try {
-        const capabilityHealth = health || await checkBackendHealth(apiBase, requestId);
-        const fallbackStatus = capabilityHealth.tool_bridge_configured
-          ? "Capability mode: bridge configured, loading tool catalog..."
-          : "Capability mode: direct realtime only (bridge not configured)";
-        el.capabilityStatus.textContent = fallbackStatus;
-
-        const schemaInfo = await fetchToolSchemas(apiBase, requestId, forceRefresh);
-        state.toolCatalog = schemaInfo;
-
-        const modePrefix = schemaInfo.count > 0
-          ? "Capability mode: full tool catalog loaded"
-          : "Capability mode: tool catalog empty";
-        const detailSuffix = schemaInfo.detail ? ` (${schemaInfo.detail})` : "";
-        el.capabilityStatus.textContent = `${modePrefix} [${schemaInfo.count}] via ${schemaInfo.source}${detailSuffix}`;
-
-        const preview = summarizeToolNames(schemaInfo.tools);
-        el.toolSummary.textContent = preview
-          ? `Available tools: ${preview}`
-          : "Available tools: none exposed by backend yet.";
-        return schemaInfo;
-      } catch (error) {
-        state.toolCatalog = null;
-        el.capabilityStatus.textContent = "Capability mode: tool catalog unavailable";
-        el.toolSummary.textContent = `Tool catalog error: ${shorten(String(error), 240)}`;
-        return null;
-      }
-    }
-
-    function shouldUseEphemeralSignalingFallback(status, detail) {
-      if (status >= 500 && status <= 599) {
-        return true;
-      }
-      if (status !== 400) {
-        return false;
-      }
-      const lowered = (detail || "").toLowerCase();
-      return (
-        lowered.includes("invalid_offer") ||
-        lowered.includes("failed to parse offer") ||
-        lowered.includes("unmarshal sdp") ||
-        lowered.includes("eof")
-      );
-    }
-
-    async function requestEphemeralClientSecret(apiBase, requestId) {
-      const response = await fetchWithTimeout(`${apiBase}/token`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
+      function requestHeaders(requestId, contentType = null) {
+        const headers = {
+          Accept: "application/json",
           "x-pj-client-request-id": requestId,
           "x-pj-contract-version": CONTRACT_VERSION,
           "x-pj-protocol-version": String(PROTOCOL_VERSION),
-        },
-        body: JSON.stringify(protocolMessage({
-          session_id: state.activeSessionId,
-          voice_mode: state.mode === MODE.FULL_POWER_VOICE
-            ? "full_power"
-            : "fast",
-        })),
-        credentials: "include",
-      }, 15000);
-
-      const body = await response.text();
-      if (!response.ok) {
-        const detail = parseErrorBody(body);
-        throw new Error(`Token minting failed (${response.status})${detail ? `: ${detail}` : ""}`);
+        };
+        if (contentType) headers["Content-Type"] = contentType;
+        return headers;
       }
 
-      let parsed = {};
-      try {
-        parsed = body ? JSON.parse(body) : {};
-      } catch (_) {
-        throw new Error("Token minting response was not valid JSON.");
-      }
-      assertProtocolResponse(response, parsed);
-
-      const tokenValue =
-        (parsed.client_secret && parsed.client_secret.value) ||
-        parsed.value ||
-        null;
-      if (!tokenValue) {
-        throw new Error("Token minting response did not include a client secret.");
-      }
-      return tokenValue;
-    }
-
-    async function negotiateWithEphemeralToken(apiBase, localSdp, requestId) {
-      const ephemeralToken = await requestEphemeralClientSecret(apiBase, requestId);
-      const response = await fetchWithTimeout("https://api.openai.com/v1/realtime/calls", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${ephemeralToken}`,
-          "Content-Type": "application/sdp",
-        },
-        body: localSdp,
-      }, 35000);
-
-      const answerSdp = await response.text();
-      if (!response.ok) {
-        const detail = parseErrorBody(answerSdp);
-        throw new Error(`Fallback signaling failed (${response.status})${detail ? `: ${detail}` : ""}`);
-      }
-      return answerSdp;
-    }
-
-    function markSessionLive() {
-      setPhase(PHASE.LIVE, "Live");
-      seedRealtimeConversation();
-      if (!state.liveAnnounced) {
-        appendBubble("system", "Session connected. You can speak or type.");
-        state.liveAnnounced = true;
-      }
-      el.textInput.focus();
-    }
-
-    async function startSession() {
-      if (state.phase !== PHASE.IDLE) return;
-
-      const apiBase = el.apiBase.value.trim().replace(/\/+$/, "");
-      if (!apiBase) {
-        setStatus("Set a valid server URL");
-        return;
-      }
-      localStorage.setItem(STORAGE_KEY, apiBase);
-
-      const requestId = createRequestId();
-      state.activeStartRequestId = requestId;
-      state.liveAnnounced = false;
-
-      try {
-        setPhase(PHASE.CONNECTING, "Checking backend...");
-        appendBubble(
-          "system",
-          state.mode === MODE.FULL_POWER_VOICE
-            ? "Starting Full Power Voice session..."
-            : "Starting Fast Voice session...",
-        );
-        const health = await checkBackendHealth(apiBase, requestId);
-        await refreshCapabilities(apiBase, requestId, { health, forceRefresh: false });
-        const hadSession = Boolean(state.activeSessionId);
-        const sessionId = await ensureActiveSession("realtime");
-        await linkAnonymousUploadsIfNeeded(sessionId);
-        await syncLinkedUploadsForSession(sessionId);
-        if (hadSession) {
-          await loadSharedSessionHistory(sessionId, { clear: true });
+      function renderUploadItems() {
+        el.uploadList.replaceChildren();
+        for (const item of state.uploadItems) {
+          const row = document.createElement("li");
+          row.className = "upload-item";
+          const name = document.createElement("span");
+          name.className = "upload-item-name";
+          const duplicateBadge = item.reused ? " (duplicate)" : "";
+          name.textContent = `${item.path || item.savedPath || item.name || "uploaded document"}${duplicateBadge}`;
+          const status = document.createElement("span");
+          const queueState = item.queueState || item.processing?.queue_state || "";
+          const indexingState = item.indexingState || item.indexing?.status || "";
+          const effectiveState = indexingState || queueState;
+          const warningState = ["failed", "unavailable"].includes(effectiveState);
+          status.className =
+            `upload-item-status ${item.resultKind || (warningState ? "error" : "muted")}`.trim();
+          const summary = item.summary ? ` · ${shorten(item.summary, 120)}` : "";
+          const tags =
+            Array.isArray(item.classification) && item.classification.length
+              ? ` · ${item.classification.slice(0, 3).join(", ")}`
+              : "";
+          status.textContent = item.status || `${effectiveState || "ready"}${summary}${tags}`;
+          row.append(name, status);
+          if (Array.isArray(item.warnings) && item.warnings.length) {
+            const warning = document.createElement("span");
+            warning.className = "upload-item-status warning";
+            warning.textContent = shorten(item.warnings[0], 180);
+            row.appendChild(warning);
+          }
+          if (warningState && item.documentId && state.activeSessionId) {
+            const retryBtn = document.createElement("button");
+            retryBtn.type = "button";
+            retryBtn.className = "muted-btn upload-retry-btn";
+            retryBtn.textContent = "Retry processing";
+            retryBtn.disabled = state.uploadBusy;
+            retryBtn.addEventListener("click", () => retryUploadProcessing(item.documentId));
+            row.appendChild(retryBtn);
+          }
+          if (
+            item.documentId &&
+            state.activeSessionId &&
+            queueState === "complete" &&
+            !["awaiting_approval", "queued", "indexing", "indexed"].includes(indexingState)
+          ) {
+            const indexBtn = document.createElement("button");
+            indexBtn.type = "button";
+            indexBtn.className = "muted-btn upload-retry-btn";
+            indexBtn.textContent = "Request indexing approval";
+            indexBtn.disabled = state.uploadBusy;
+            indexBtn.addEventListener("click", () => requestUploadIndexing(item.documentId));
+            row.appendChild(indexBtn);
+          }
+          el.uploadList.appendChild(row);
         }
-        state.seededSessionIds.delete(sessionId);
-        if (state.activeStartRequestId !== requestId) return;
+        const count = state.uploadItems.length;
+        el.uploadSummary.textContent = count
+          ? `${count} item${count === 1 ? "" : "s"} selected for ${state.uploadMode} upload.`
+          : "No files selected.";
+        el.uploadBtn.disabled = state.uploadBusy || count === 0;
+        el.chooseFilesBtn.disabled = state.uploadBusy;
+        el.chooseFolderBtn.disabled = state.uploadBusy;
+      }
 
-        setStatus("Requesting microphone...");
-        state.micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        if (state.activeStartRequestId !== requestId) {
-          stopSession({ announce: false });
-          return;
+      function selectUploadItems(fileList, mode) {
+        state.uploadMode = mode;
+        state.uploadItems = Array.from(fileList)
+          .slice(0, 200)
+          .map((file) => ({
+            file,
+            path: mode === "folder" ? file.webkitRelativePath : file.name,
+            status: "",
+            resultKind: "",
+          }));
+        el.uploadProgress.value = 0;
+        renderUploadItems();
+      }
+
+      function uploadSessionId() {
+        return state.activeSessionId || state.fullPowerSessionId || state.uploadSessionId;
+      }
+
+      function clearUploadPolls() {
+        for (const timer of state.uploadPolls.values()) {
+          clearTimeout(timer);
         }
+        state.uploadPolls.clear();
+      }
 
-        state.pc = new RTCPeerConnection();
-        state.pc.ontrack = (event) => {
-          el.pjAudio.srcObject = event.streams[0];
-        };
-        state.pc.oniceconnectionstatechange = () => {
-          const ice = state.pc ? state.pc.iceConnectionState : "closed";
-          if (ice === "failed" || ice === "disconnected") {
-            setStatus(`Connection ${ice}`);
-          }
-        };
-
-        state.micStream.getTracks().forEach((track) => {
-          state.pc.addTrack(track, state.micStream);
-        });
-
-        state.dataChannel = state.pc.createDataChannel("oai-events");
-        state.dataChannel.onopen = () => {
-          if (state.phase === PHASE.CONNECTING) {
-            markSessionLive();
-          }
-        };
-        state.dataChannel.onclose = () => {
-          if (state.phase !== PHASE.IDLE && state.phase !== PHASE.STOPPING) {
-            appendBubble("system", "Realtime channel closed.");
-            stopSession({ announce: false });
-          }
-        };
-        state.dataChannel.onmessage = (event) => {
-          let parsed;
+      function scheduleUploadPoll(sessionId, documentId, attempt = 0) {
+        const key = `${sessionId}:${documentId}`;
+        const previous = state.uploadPolls.get(key);
+        if (previous) clearTimeout(previous);
+        const delay = Math.min(15000, 1200 * Math.max(1, attempt + 1));
+        const timer = setTimeout(async () => {
           try {
-            parsed = JSON.parse(event.data);
+            const payload = await fetchJson(
+              `${apiBase()}/responses/sessions/${encodeURIComponent(sessionId)}/uploads/documents/${encodeURIComponent(documentId)}/status`,
+              { headers: requestHeaders(createRequestId()) },
+              12000,
+            );
+            const doc = payload.document || {};
+            const item = state.uploadItems.find((candidate) => candidate.documentId === documentId);
+            if (item) {
+              item.queueState = doc.processing?.queue_state || "queued";
+              item.indexingState = doc.indexing?.status || doc.indexing_state || "";
+              item.status = `${item.indexingState || item.queueState}`;
+              item.summary = doc.summary || "";
+              item.classification = doc.classification || [];
+              item.warnings = doc.warnings || [];
+              item.previewAvailable = Boolean(doc.preview_available);
+              item.reused = Boolean(doc.reused);
+              item.resultKind = ["failed", "unavailable"].includes(
+                item.indexingState || item.queueState,
+              )
+                ? "error"
+                : "success";
+            }
+            renderUploadItems();
+            const terminalState =
+              doc.indexing?.status || doc.indexing_state || doc.processing?.queue_state || "";
+            if (!["failed", "unavailable", "complete", "indexed"].includes(terminalState)) {
+              scheduleUploadPoll(sessionId, documentId, attempt + 1);
+              return;
+            }
           } catch (_) {
-            appendBubble("system", "Invalid inbound realtime payload: malformed JSON.");
+            scheduleUploadPoll(sessionId, documentId, attempt + 1);
             return;
           }
-          handleRealtimeEvent(parsed, apiBase);
-        };
+          state.uploadPolls.delete(key);
+        }, delay);
+        state.uploadPolls.set(key, timer);
+      }
 
-        const offer = await state.pc.createOffer();
-        await state.pc.setLocalDescription(offer);
-        const localSdp = (
-          state.pc.localDescription && state.pc.localDescription.sdp
-        ) || offer.sdp || "";
-        if (!localSdp.trim()) {
-          throw new Error("Local SDP offer was empty before signaling.");
-        }
-
-        setStatus("Negotiating realtime session...");
-        const voiceMode = state.mode === MODE.FULL_POWER_VOICE
-          ? "full_power"
-          : "fast";
-        const signalingUrl = new URL(`${apiBase}/session`);
-        signalingUrl.searchParams.set("session_id", state.activeSessionId);
-        signalingUrl.searchParams.set("voice_mode", voiceMode);
-        const response = await fetchWithTimeout(signalingUrl.href, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/sdp",
-            "x-pj-client-request-id": requestId,
-            "x-pj-contract-version": CONTRACT_VERSION,
-            "x-pj-protocol-version": String(PROTOCOL_VERSION),
-          },
-          body: localSdp,
-          credentials: "include",
-        }, 35000);
-
-        let answerSdp = await response.text();
-        assertProtocolResponse(response);
-        if (!response.ok) {
-          const detail = parseErrorBody(answerSdp);
-          if (shouldUseEphemeralSignalingFallback(response.status, detail)) {
-            appendBubble("system", "Primary signaling rejected SDP. Retrying with ephemeral token fallback...");
-            setStatus("Retrying signaling with fallback...");
-            answerSdp = await negotiateWithEphemeralToken(apiBase, localSdp, requestId);
-          } else {
-            throw new Error(`Signaling failed (${response.status})${detail ? `: ${detail}` : ""}`);
+      async function retryUploadProcessing(documentId) {
+        if (!state.activeSessionId || !documentId) return;
+        try {
+          const payload = await fetchJson(
+            `${apiBase()}/responses/sessions/${encodeURIComponent(state.activeSessionId)}/uploads/documents/${encodeURIComponent(documentId)}/retry`,
+            {
+              method: "POST",
+              headers: requestHeaders(createRequestId(), "application/json"),
+              body: JSON.stringify(protocolMessage({})),
+            },
+          );
+          const item = state.uploadItems.find((candidate) => candidate.documentId === documentId);
+          if (item) {
+            item.queueState = payload.queue_state || "queued";
+            item.status = `${item.indexingState || item.queueState}`;
+            item.resultKind = "muted";
           }
+          renderUploadItems();
+          scheduleUploadPoll(state.activeSessionId, documentId, 0);
+        } catch (error) {
+          appendBubble("system", `Retry failed: ${shorten(String(error), 220)}`);
         }
+      }
 
-        if (state.activeStartRequestId !== requestId) {
-          stopSession({ announce: false });
+      async function syncLinkedUploadsForSession(sessionId) {
+        if (!sessionId || !apiBase()) return;
+        try {
+          const payload = await fetchJson(
+            `${apiBase()}/responses/sessions/${encodeURIComponent(sessionId)}/uploads?limit=100`,
+            { headers: requestHeaders(createRequestId()) },
+            12000,
+          );
+          clearUploadPolls();
+          state.uploadItems = (payload.documents || []).slice(0, 200).map((doc) => ({
+            file: null,
+            path: doc.saved_path,
+            savedPath: doc.saved_path,
+            name: doc.name,
+            documentId: doc.document_id,
+            queueState: doc.processing?.queue_state || "queued",
+            indexingState: doc.indexing?.status || doc.indexing_state || "",
+            status: `${doc.indexing?.status || doc.indexing_state || doc.processing?.queue_state || "queued"}`,
+            resultKind:
+              (doc.indexing?.status || doc.indexing_state || doc.processing?.queue_state) ===
+              "failed"
+                ? "error"
+                : "success",
+            reused: Boolean(doc.reused),
+            summary: doc.summary || "",
+            classification: doc.classification || [],
+            warnings: doc.warnings || [],
+            previewAvailable: Boolean(doc.preview_available),
+          }));
+          renderUploadItems();
+          for (const item of state.uploadItems) {
+            if (
+              item.documentId &&
+              !["failed", "unavailable", "complete", "indexed"].includes(
+                item.indexingState || item.queueState,
+              )
+            ) {
+              scheduleUploadPoll(sessionId, item.documentId, 0);
+            }
+          }
+        } catch (_) {
+          // Keep current upload list when sync is unavailable.
+        }
+      }
+
+      async function linkAnonymousUploadsIfNeeded(sessionId) {
+        if (!sessionId || !state.uploadSessionId || !state.uploadSessionId.startsWith("upload_"))
+          return;
+        if (sessionId === state.uploadSessionId) return;
+        try {
+          await fetchJson(
+            `${apiBase()}/responses/sessions/${encodeURIComponent(sessionId)}/uploads/link`,
+            {
+              method: "POST",
+              headers: requestHeaders(createRequestId(), "application/json"),
+              body: JSON.stringify(protocolMessage({ source_session_id: state.uploadSessionId })),
+            },
+            12000,
+          );
+          state.uploadSessionId = sessionId;
+        } catch (_) {
+          // Linking is best effort and can be retried on next session sync.
+        }
+      }
+
+      async function uploadSelectedDocuments() {
+        if (state.uploadBusy || !state.uploadItems.length) return;
+        if (!apiBase()) {
+          setStatus("Set a valid server URL");
           return;
         }
 
-        await state.pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
-        if (state.dataChannel && state.dataChannel.readyState === "open") {
-          markSessionLive();
-        } else {
-          setStatus("Awaiting realtime channel...");
+        state.uploadBusy = true;
+        for (const item of state.uploadItems) {
+          item.status = "Uploading...";
+          item.resultKind = "";
         }
-      } catch (error) {
-        appendBubble("system", `Failed to start session: ${String(error)}`);
-        stopSession({ announce: false });
-        setPhase(PHASE.IDLE, "Idle");
-      } finally {
-        state.activeStartRequestId = null;
-      }
-    }
+        renderUploadItems();
+        el.uploadProgress.value = 0;
 
-    function stopSession({ announce = true } = {}) {
-      const hadSession =
-        state.phase !== PHASE.IDLE || state.pc || state.dataChannel || state.micStream;
+        const form = new FormData();
+        form.append("session_id", uploadSessionId());
+        for (const item of state.uploadItems) {
+          form.append("files", item.file, item.file.name);
+          form.append("paths", item.path);
+        }
+        const requestId = createRequestId();
+        const endpoint = state.uploadMode === "folder" ? "/upload/folder" : "/upload/files";
 
-      state.activeStartRequestId = null;
-      setPhase(PHASE.STOPPING, "Closing session...");
+        try {
+          const parsed = await new Promise((resolve, reject) => {
+            const xhr = new XMLHttpRequest();
+            xhr.open("POST", `${apiBase()}${endpoint}`);
+            xhr.withCredentials = true;
+            xhr.timeout = 120000;
+            for (const [name, value] of Object.entries(requestHeaders(requestId))) {
+              xhr.setRequestHeader(name, value);
+            }
+            xhr.setRequestHeader("x-pj-session-id", uploadSessionId());
+            xhr.upload.addEventListener("progress", (event) => {
+              if (event.lengthComputable) {
+                el.uploadProgress.value = Math.round((event.loaded / event.total) * 100);
+              }
+            });
+            xhr.addEventListener("load", () => {
+              let payload;
+              try {
+                payload = xhr.responseText ? JSON.parse(xhr.responseText) : {};
+                assertProtocolResponse(
+                  { headers: { get: (name) => xhr.getResponseHeader(name) } },
+                  payload,
+                );
+              } catch (_) {
+                reject(new Error("Upload response was not valid PJ JSON."));
+                return;
+              }
+              if (xhr.status < 200 || xhr.status >= 300) {
+                const detail = parseErrorBody(xhr.responseText);
+                reject(new Error(`Upload failed (${xhr.status})${detail ? `: ${detail}` : ""}`));
+                return;
+              }
+              resolve(payload);
+            });
+            xhr.addEventListener("error", () =>
+              reject(new Error("Upload network request failed.")),
+            );
+            xhr.addEventListener("timeout", () => reject(new Error("Upload request timed out.")));
+            xhr.send(form);
+          });
 
-      if (state.dataChannel) {
-        try { state.dataChannel.close(); } catch (_) {}
-      }
-      if (state.pc) {
-        try { state.pc.close(); } catch (_) {}
-      }
-      if (state.micStream) {
-        state.micStream.getTracks().forEach((track) => track.stop());
-      }
+          const prefix = `uploads/${parsed.session_id}/${parsed.upload_id}/`;
+          for (const item of state.uploadItems) {
+            const result = (parsed.files || []).find(
+              (file) => file.saved_path === `${prefix}${item.path}`,
+            );
+            if (!result) continue;
+            item.documentId = result.document_id;
+            item.savedPath = result.saved_path;
+            item.reused = Boolean(result.reused);
+            item.queueState = result.queue_state || result.processing?.job_status || "queued";
+            item.indexingState = result.indexing?.status || result.indexing_state || "";
+            item.summary = result.processing?.summary || "";
+            item.classification = result.processing?.classification || [];
+            item.warnings = result.processing?.warnings || [];
+            item.previewAvailable = Boolean(result.preview_url);
+            item.status = `Uploaded · ${item.indexingState || item.queueState} · ${formatBytes(result.size)}`;
+            item.resultKind = "success";
+            if (state.activeSessionId && item.documentId) {
+              scheduleUploadPoll(state.activeSessionId, item.documentId, 0);
+            }
 
-      state.pc = null;
-      state.dataChannel = null;
-      state.micStream = null;
-      state.pendingCalls = {};
-      state.liveAnnounced = false;
-      state.activePlaybackStartSeconds = null;
-      clearUploadPolls();
-      finalizeAssistantBubble();
-
-      setPhase(PHASE.IDLE, "Idle");
-      if (announce && hadSession) {
-        appendBubble("system", "Session ended.");
-      }
-    }
-
-    async function sendTextMessage() {
-      const message = el.textInput.value.trim();
-      if (!message || state.phase !== PHASE.LIVE || !state.dataChannel || state.dataChannel.readyState !== "open") {
-        return;
-      }
-
-      const externalId = `item_${crypto.randomUUID().replaceAll("-", "")}`;
-      upsertRealtimeBubble(
-        externalId,
-        "user",
-        message,
-        { status: "completed" },
-      );
-      el.textInput.value = "";
-      try {
-        let submitted = message;
-        let metadata = {};
-        if (state.mode === MODE.FULL_POWER_VOICE) {
-          setStatus("Refining prompt...", "live");
-          const perfected = await perfectPrompt(
-            message, "full_power_voice"
+            async function requestUploadIndexing(documentId) {
+              if (
+                !state.activeSessionId ||
+                !state.fullPowerSessionId ||
+                !documentId ||
+                state.fullPowerBusy
+              )
+                return;
+              const item = state.uploadItems.find(
+                (candidate) => candidate.documentId === documentId,
+              );
+              const controller = new AbortController();
+              state.responsesAbortController = controller;
+              state.fullPowerBusy = true;
+              state.uploadBusy = true;
+              renderUploadItems();
+              setStatus("Requesting indexing approval...", "live");
+              try {
+                const prep = await fetchJson(
+                  `${apiBase()}/responses/sessions/${encodeURIComponent(state.activeSessionId)}/uploads/documents/${encodeURIComponent(documentId)}/index`,
+                  {
+                    method: "POST",
+                    credentials: "include",
+                    signal: controller.signal,
+                    headers: requestHeaders(createRequestId(), "application/json"),
+                    body: JSON.stringify(protocolMessage({})),
+                  },
+                );
+                if (item) {
+                  item.indexingState = prep.indexing?.status || "awaiting_approval";
+                  item.status = item.indexingState;
+                  item.resultKind = "muted";
+                }
+                renderUploadItems();
+                await streamFullPowerTurn(prep.approval_prompt || "");
+                await syncLinkedUploadsForSession(state.activeSessionId);
+              } catch (error) {
+                if (error.name !== "AbortError") {
+                  appendBubble(
+                    "system",
+                    `Indexing approval request failed: ${shorten(String(error), 240)}`,
+                  );
+                }
+              } finally {
+                setStatus("Full Power live", "live");
+                state.fullPowerBusy = false;
+                state.uploadBusy = false;
+                state.responsesAbortController = null;
+                renderUploadItems();
+              }
+            }
+          }
+          el.uploadProgress.value = 100;
+          if (parsed.session_id?.startsWith("upload_")) {
+            state.uploadSessionId = parsed.session_id;
+          }
+          if (state.activeSessionId) {
+            await linkAnonymousUploadsIfNeeded(state.activeSessionId);
+            await syncLinkedUploadsForSession(state.activeSessionId);
+          }
+          appendBubble(
+            "system",
+            `Uploaded ${parsed.count} document${parsed.count === 1 ? "" : "s"} to DocOps.`,
           );
-          submitted = perfected.refined_prompt;
-          metadata = {
-            prompt_perfecting_version: perfected.version,
-            refined_prompt: perfected.refined_prompt.slice(0, 4000),
-            refined_prompt_truncated: perfected.refined_prompt.length > 4000,
-            refined_sha256: perfected.refined_sha256,
-            changed: perfected.changed,
-          };
+        } catch (error) {
+          const detail = shorten(String(error), 300);
+          for (const item of state.uploadItems) {
+            item.status = detail;
+            item.resultKind = "error";
+          }
+          appendBubble("system", detail);
+        } finally {
+          state.uploadBusy = false;
+          renderUploadItems();
         }
-        await persistRealtimeMessage({
-          externalId,
-          role: "user",
-          content: message,
-          source: "typed",
-          metadata,
-        });
-        sendRealtimeEvent({
-          type: "conversation.item.create",
-          item: {
-            id: externalId,
-            type: "message",
-            role: "user",
-            content: [{ type: "input_text", text: submitted }],
-          },
-        });
-        sendRealtimeEvent({ type: "response.create" });
-        setStatus("Live", "live");
-      } catch (error) {
+      }
+
+      function validateOutboundRealtimeEvent(payload) {
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+          return "payload must be an object";
+        }
+        if (typeof payload.type !== "string" || !payload.type) {
+          return "type is required";
+        }
+        if (payload.type === "conversation.item.create") {
+          if (!payload.item || typeof payload.item !== "object" || Array.isArray(payload.item)) {
+            return "item is required";
+          }
+          if (payload.item.type === "message") {
+            if (!["user", "assistant"].includes(payload.item.role)) {
+              return "item.role must be user or assistant";
+            }
+            if (
+              !Array.isArray(payload.item.content) ||
+              !payload.item.content.length ||
+              payload.item.content.some(
+                (part) => !part || typeof part.type !== "string" || typeof part.text !== "string",
+              )
+            ) {
+              return "item.content must contain typed text parts";
+            }
+          } else if (payload.item.type === "function_call_output") {
+            if (typeof payload.item.call_id !== "string" || !payload.item.call_id) {
+              return "item.call_id is required";
+            }
+            if (typeof payload.item.output !== "string") {
+              return "item.output must be a string";
+            }
+          } else {
+            return "item.type is unsupported";
+          }
+        } else if (
+          ["conversation.item.delete", "conversation.item.truncate"].includes(payload.type)
+        ) {
+          if (typeof payload.item_id !== "string" || !payload.item_id) {
+            return "item_id is required";
+          }
+          if (
+            payload.type === "conversation.item.truncate" &&
+            (!Number.isInteger(payload.content_index) ||
+              !Number.isInteger(payload.audio_end_ms) ||
+              payload.audio_end_ms < 0)
+          ) {
+            return "truncate offsets must be non-negative integers";
+          }
+        } else if (!["response.create", "response.cancel"].includes(payload.type)) {
+          return `unsupported type ${payload.type}`;
+        }
+        return null;
+      }
+
+      function sendRealtimeEvent(payload) {
+        const issue = validateOutboundRealtimeEvent(payload);
+        if (issue) {
+          throw new Error(`Invalid outbound realtime payload: ${issue}.`);
+        }
+        if (!state.dataChannel || state.dataChannel.readyState !== "open") {
+          throw new Error("Realtime data channel is not open.");
+        }
+        state.dataChannel.send(JSON.stringify(payload));
+      }
+
+      function validateInboundRealtimeEvent(event) {
+        if (!event || typeof event !== "object" || Array.isArray(event)) {
+          return "payload must be an object";
+        }
+        if (typeof event.type !== "string" || !event.type) {
+          return "type is required";
+        }
+        const hasItemId = Boolean(realtimeItemId(event, "item"));
+        if (event.type === "error") {
+          if (!event.error || typeof event.error.message !== "string") {
+            return "error.message is required";
+          }
+        } else if (event.type === "response.created") {
+          if (typeof (event.response?.id || event.response_id) !== "string") {
+            return "response identifier is required";
+          }
+        } else if (
+          event.type === "conversation.item.input_audio_transcription.delta" ||
+          event.type === "response.output_text.delta" ||
+          event.type === "response.output_audio_transcript.delta"
+        ) {
+          if (!hasItemId) return "item identifier is required";
+          if (typeof event.delta !== "string") return "delta must be a string";
+        } else if (
+          event.type === "conversation.item.input_audio_transcription.completed" ||
+          event.type === "response.output_text.done" ||
+          event.type === "response.output_audio_transcript.done"
+        ) {
+          if (!hasItemId) return "item identifier is required";
+          if (typeof (event.transcript ?? event.text) !== "string") {
+            return "completed transcript text is required";
+          }
+        } else if (event.type === "response.done") {
+          if (
+            !event.response ||
+            typeof event.response !== "object" ||
+            typeof event.response.id !== "string" ||
+            typeof event.response.status !== "string"
+          ) {
+            return "response.id and response.status are required";
+          }
+          if (event.response.output !== undefined && !Array.isArray(event.response.output)) {
+            return "response.output must be an array";
+          }
+        } else if (event.type === "response.function_call_arguments.delta") {
+          if (typeof event.call_id !== "string" || !event.call_id) return "call_id is required";
+          if (typeof event.delta !== "string") return "delta must be a string";
+        } else if (event.type === "response.function_call_arguments.done") {
+          if (typeof event.call_id !== "string" || !event.call_id) return "call_id is required";
+          const pendingCall = state.pendingCalls[event.call_id];
+          if (typeof event.name !== "string" && typeof pendingCall?.name !== "string")
+            return "name is required";
+          if (typeof event.arguments !== "string" && typeof pendingCall?.args !== "string")
+            return "arguments must be a string";
+        } else if (
+          event.type === "response.output_item.done" &&
+          event.item?.type === "function_call"
+        ) {
+          if (
+            typeof event.item.call_id !== "string" ||
+            typeof event.item.name !== "string" ||
+            typeof event.item.arguments !== "string"
+          ) {
+            return "function call item fields are required";
+          }
+        }
+        return null;
+      }
+
+      function validateFullPowerEvent(event) {
+        if (!event || typeof event !== "object" || Array.isArray(event)) {
+          return "payload must be an object";
+        }
+        if (typeof event.type !== "string" || !event.type) return "type is required";
+        const requiredFields = {
+          "text.delta": ["delta"],
+          "tool.call": ["call_id", "tool_type"],
+          "tool.call.delta": ["call_id", "delta"],
+          "tool.result": ["call_id"],
+          "artifact.ready": ["artifact_id", "filename", "download_url"],
+          "deliverable.incomplete": ["requested_format"],
+          citation: ["citation"],
+          source: ["source"],
+          "approval.required": ["approval_id", "approval_kind", "session_id"],
+          "approval.executing": ["approval_id", "approval_kind", "approved"],
+          "approval.resolved": ["approval_id", "approval_kind", "approved"],
+          completion: ["text", "session_id"],
+          error: ["error"],
+        };
+        for (const field of requiredFields[event.type] || []) {
+          if (!(field in event)) {
+            return `${field} is required for ${event.type}`;
+          }
+        }
+        return null;
+      }
+
+      function setPhase(phase, statusText = null) {
+        state.phase = phase;
+        if (phase === PHASE.IDLE) {
+          el.startBtn.disabled = false;
+          el.stopBtn.disabled = true;
+          el.sendBtn.disabled = true;
+          el.textInput.disabled = true;
+        } else if (phase === PHASE.CONNECTING) {
+          el.startBtn.disabled = true;
+          el.stopBtn.disabled = false;
+          el.sendBtn.disabled = true;
+          el.textInput.disabled = true;
+        } else if (phase === PHASE.LIVE) {
+          el.startBtn.disabled = true;
+          el.stopBtn.disabled = false;
+          el.sendBtn.disabled = state.fullPowerBusy;
+          el.textInput.disabled = false;
+        } else {
+          el.startBtn.disabled = true;
+          el.stopBtn.disabled = true;
+          el.sendBtn.disabled = true;
+          el.textInput.disabled = true;
+        }
+
+        if (statusText) {
+          setStatus(statusText, phase === PHASE.LIVE ? "live" : "idle");
+        }
+      }
+
+      function setMode(mode) {
+        if (!Object.values(MODE).includes(mode) || state.mode === mode) return;
+        if (state.mode !== MODE.FULL_POWER) {
+          stopSession({ announce: false });
+        } else {
+          stopFullPowerSession({ announce: false, preserveSession: true });
+        }
+        state.mode = mode;
+        el.realtimeModeBtn.classList.toggle("active", mode === MODE.REALTIME);
+        el.fullPowerVoiceModeBtn.classList.toggle("active", mode === MODE.FULL_POWER_VOICE);
+        el.fullPowerModeBtn.classList.toggle("active", mode === MODE.FULL_POWER);
+        el.fullPowerControls.classList.toggle("hidden", mode !== MODE.FULL_POWER);
+        el.startBtn.textContent = mode !== MODE.FULL_POWER ? "Start Session" : "New Conversation";
+        el.stopBtn.textContent = mode !== MODE.FULL_POWER ? "End Session" : "Close Conversation";
+        el.modeNote.textContent =
+          mode === MODE.REALTIME
+            ? "Fast Voice responds immediately through Realtime and stores finalized transcripts."
+            : mode === MODE.FULL_POWER_VOICE
+              ? "Full Power Voice refines each completed transcript before PJ responds and preserves the original wording in shared history."
+              : "Full Power Text uses PJ's terminal-equivalent Responses runtime: web and file search, MCP, local tools, citations, structured output, and shared history.";
+        const idleText =
+          mode === MODE.REALTIME
+            ? "Fast Voice idle"
+            : mode === MODE.FULL_POWER_VOICE
+              ? "Full Power Voice idle"
+              : "Full Power Text idle";
+        setPhase(PHASE.IDLE, idleText);
         appendBubble(
           "system",
-          `Message was not submitted: ${shorten(String(error), 260)}`,
+          mode === MODE.REALTIME
+            ? "Fast Voice selected."
+            : mode === MODE.FULL_POWER_VOICE
+              ? "Full Power Voice selected."
+              : "Full Power Text selected. Start or resume a conversation.",
         );
-        setStatus("Live", "live");
+        refreshCurrentCapabilities({ forceRefresh: false });
+        if (mode === MODE.FULL_POWER) refreshFullPowerSessions();
       }
-    }
 
-    async function refreshFullPowerSessions() {
-        if (state.mode !== MODE.FULL_POWER || !apiBase()) return;
+      function appendBubble(role, text, append = false) {
+        if (append && role === "assistant" && state.activeAssistantBubble) {
+          state.activeAssistantBubble.textContent += text;
+          scrollMessagesToBottom();
+          return state.activeAssistantBubble;
+        }
+
+        const bubble = document.createElement("div");
+        bubble.className = `bubble ${role}`;
+        bubble.textContent = text;
+        el.messages.appendChild(bubble);
+        scrollMessagesToBottom();
+
+        if (role === "assistant") {
+          state.activeAssistantBubble = bubble;
+        }
+        return bubble;
+      }
+
+      function finalizeAssistantBubble() {
+        state.activeAssistantBubble = null;
+      }
+
+      function resetFullPowerRenderState() {
+        state.fullPowerToolRows.clear();
+        state.artifactCards.clear();
+      }
+
+      function scrollMessagesToBottom() {
+        el.messages.scrollTop = el.messages.scrollHeight;
+      }
+
+      async function checkBackendHealth(apiBase, requestId) {
+        const response = await fetchWithTimeout(
+          `${apiBase}/health`,
+          {
+            headers: requestHeaders(requestId),
+            credentials: "include",
+          },
+          8000,
+        );
+
+        const body = await response.text();
+        if (!response.ok) {
+          const detail = parseErrorBody(body);
+          throw new Error(
+            `Backend health check failed (${response.status})${detail ? `: ${detail}` : ""}`,
+          );
+        }
+        let parsed = {};
+        try {
+          parsed = body ? JSON.parse(body) : {};
+        } catch (_) {
+          parsed = {};
+        }
+        assertProtocolResponse(response, parsed);
+        if (!parsed.ok) {
+          throw new Error("Backend health endpoint did not return ok=true.");
+        }
+        return parsed;
+      }
+
+      function summarizeToolNames(tools, limit = 8) {
+        if (!Array.isArray(tools) || !tools.length) {
+          return "";
+        }
+        const names = tools
+          .map((tool) => (tool && typeof tool.name === "string" ? tool.name : ""))
+          .filter(Boolean);
+        if (!names.length) {
+          return "";
+        }
+        const shown = names.slice(0, limit);
+        const remainder = names.length - shown.length;
+        return remainder > 0 ? `${shown.join(", ")} +${remainder} more` : shown.join(", ");
+      }
+
+      async function fetchToolSchemas(apiBase, requestId, forceRefresh = false) {
+        const url = new URL(`${apiBase}/tool-schemas`);
+        if (forceRefresh) {
+          url.searchParams.set("refresh", "1");
+        }
+        const response = await fetchWithTimeout(
+          url.toString(),
+          {
+            headers: requestHeaders(requestId),
+            credentials: "include",
+          },
+          12000,
+        );
+
+        const body = await response.text();
+        if (!response.ok) {
+          const detail = parseErrorBody(body);
+          throw new Error(
+            `Tool schema fetch failed (${response.status})${detail ? `: ${detail}` : ""}`,
+          );
+        }
+
+        let parsed = {};
+        try {
+          parsed = body ? JSON.parse(body) : {};
+        } catch (_) {
+          parsed = {};
+        }
+        assertProtocolResponse(response, parsed);
+        const tools = Array.isArray(parsed.tools) ? parsed.tools : [];
+        return {
+          count: typeof parsed.count === "number" ? parsed.count : tools.length,
+          source: typeof parsed.source === "string" ? parsed.source : "unknown",
+          detail: typeof parsed.detail === "string" ? parsed.detail : "",
+          tools,
+        };
+      }
+
+      async function fetchJson(url, options = {}, timeoutMs = 15000) {
+        const response = await fetchWithTimeout(
+          url,
+          {
+            credentials: "include",
+            ...options,
+          },
+          timeoutMs,
+        );
+        const body = await response.text();
+        let parsed = {};
+        try {
+          parsed = body ? JSON.parse(body) : {};
+        } catch (_) {
+          throw new Error("Response payload was not valid JSON.");
+        }
+        assertProtocolResponse(response, parsed);
+        if (!response.ok) {
+          const detail = parseErrorBody(body);
+          throw new Error(`Request failed (${response.status})${detail ? `: ${detail}` : ""}`);
+        }
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+          throw new Error("Response payload did not match the JSON object contract.");
+        }
+        return parsed;
+      }
+
+      async function ensureActiveSession(channel = "realtime") {
+        if (state.activeSessionId) return state.activeSessionId;
+        const parsed = await fetchJson(`${apiBase()}/responses/sessions`, {
+          method: "POST",
+          headers: requestHeaders(createRequestId(), "application/json"),
+          body: JSON.stringify(protocolMessage({ title: "", channel })),
+        });
+        const sessionId = parsed.session?.id;
+        if (!sessionId) throw new Error("Session response did not include an ID.");
+        state.activeSessionId = sessionId;
+        state.fullPowerSessionId = sessionId;
+        state.pendingSeedHistory = [];
+        return sessionId;
+      }
+
+      function upsertRealtimeBubble(
+        externalId,
+        role,
+        text,
+        { append = false, status = "streaming", responseId = null, source = null } = {},
+      ) {
+        if (!externalId) return null;
+        let item = state.realtimeItems.get(externalId);
+        if (!item) {
+          const bubble = appendBubble(role, "");
+          finalizeAssistantBubble();
+          item = {
+            bubble,
+            role,
+            text: "",
+            status,
+            responseId,
+            source,
+          };
+          state.realtimeItems.set(externalId, item);
+        }
+        item.text = append ? `${item.text}${text || ""}` : String(text || "");
+        const nextStatus = item.status === "interrupted" ? "interrupted" : status;
+        item.status = nextStatus;
+        item.responseId = responseId || item.responseId;
+        item.source = source || item.source;
+        item.bubble.textContent = item.text;
+        item.bubble.dataset.externalId = externalId;
+        item.bubble.dataset.status = nextStatus;
+        scrollMessagesToBottom();
+        return item;
+      }
+
+      async function persistRealtimeMessage({
+        externalId,
+        role,
+        content,
+        source,
+        responseId = null,
+        status = "completed",
+        playbackMs = null,
+        metadata = {},
+      }) {
+        if (!state.activeSessionId || !externalId) return;
+        await fetchJson(
+          `${apiBase()}/responses/sessions/${encodeURIComponent(state.activeSessionId)}/realtime-messages`,
+          {
+            method: "POST",
+            headers: requestHeaders(createRequestId(), "application/json"),
+            body: JSON.stringify(
+              protocolMessage({
+                external_id: externalId,
+                role,
+                content,
+                source,
+                response_id: responseId,
+                status,
+                playback_ms: playbackMs,
+                metadata,
+              }),
+            ),
+          },
+        );
+      }
+
+      async function loadSharedSessionHistory(sessionId, { clear = true } = {}) {
+        const parsed = await fetchJson(
+          `${apiBase()}/responses/sessions/${encodeURIComponent(sessionId)}/resume`,
+          {
+            method: "POST",
+            headers: requestHeaders(createRequestId(), "application/json"),
+            body: JSON.stringify(protocolMessage()),
+          },
+        );
+        const session = parsed.session;
+        if (!session?.id) throw new Error("Resume response did not include a session.");
+        state.activeSessionId = session.id;
+        state.fullPowerSessionId = session.id;
+        state.pendingSeedHistory = (session.history || []).slice(-20);
+        if (clear) {
+          el.messages.innerHTML = "";
+          state.realtimeItems.clear();
+          resetFullPowerRenderState();
+          finalizeAssistantBubble();
+        }
+        for (const item of session.history || []) {
+          if (item.external_id) {
+            upsertRealtimeBubble(
+              item.external_id,
+              item.role === "assistant" ? "assistant" : "user",
+              item.content || "",
+              {
+                status: item.status || "completed",
+                responseId: item.response_id || null,
+              },
+            );
+          } else {
+            appendBubble(item.role === "assistant" ? "assistant" : "user", item.content || "");
+            finalizeAssistantBubble();
+          }
+        }
+        for (const artifact of session.artifacts || []) {
+          renderArtifactCard(artifact);
+        }
+        await linkAnonymousUploadsIfNeeded(session.id);
+        await syncLinkedUploadsForSession(session.id);
+        return session;
+      }
+
+      function seedRealtimeConversation() {
+        if (
+          !state.activeSessionId ||
+          state.seededSessionIds.has(state.activeSessionId) ||
+          !state.dataChannel ||
+          state.dataChannel.readyState !== "open"
+        ) {
+          return;
+        }
+        for (const item of state.pendingSeedHistory) {
+          if (
+            !["user", "assistant"].includes(item.role) ||
+            !item.content ||
+            (item.status && item.status !== "completed")
+          )
+            continue;
+          sendRealtimeEvent({
+            type: "conversation.item.create",
+            item: {
+              type: "message",
+              role: item.role,
+              content: [
+                {
+                  type: item.role === "assistant" ? "output_text" : "input_text",
+                  text: item.content,
+                },
+              ],
+            },
+          });
+        }
+        state.seededSessionIds.add(state.activeSessionId);
+      }
+
+      function capabilityNames(manifest) {
+        const native = Object.entries(manifest?.native || {})
+          .filter(([, value]) => value?.status === "active")
+          .map(([name]) => name);
+        const mcp = (manifest?.mcp_servers || [])
+          .filter((server) => ["active", "configured"].includes(server?.status))
+          .map((server) => `mcp:${server.label}`);
+        return [...native, ...mcp];
+      }
+
+      async function refreshFullPowerCapabilities(base, requestId) {
         try {
           const parsed = await fetchJson(
-            `${apiBase()}/responses/sessions?limit=50`,
-            { headers: requestHeaders(createRequestId()) },
+            `${base}/responses/capabilities`,
+            { headers: requestHeaders(requestId) },
+            12000,
           );
+          const manifest = parsed.capabilities || {};
+          state.capabilityManifest = manifest;
+          const functionCount = manifest.local_functions?.count || 0;
+          const names = capabilityNames(manifest);
+          el.capabilityStatus.textContent = `Capability mode: Full Power [${functionCount} local functions] model ${manifest.model?.id || "unknown"}`;
+          el.toolSummary.textContent = names.length
+            ? `Native and connected tools: ${names.join(", ")}`
+            : "Native and connected tools are unavailable.";
+          return manifest;
+        } catch (error) {
+          state.capabilityManifest = null;
+          el.capabilityStatus.textContent = "Capability mode: Full Power unavailable";
+          el.toolSummary.textContent = `Capability error: ${shorten(String(error), 240)}`;
+          return null;
+        }
+      }
+
+      async function refreshCurrentCapabilities({ forceRefresh = false } = {}) {
+        const base = apiBase();
+        if (!base) return null;
+        const requestId = createRequestId();
+        if (state.mode === MODE.FULL_POWER) {
+          return refreshFullPowerCapabilities(base, requestId);
+        }
+        return refreshCapabilities(base, requestId, { forceRefresh });
+      }
+
+      async function refreshCapabilities(
+        apiBase,
+        requestId,
+        { health = null, forceRefresh = false } = {},
+      ) {
+        try {
+          const capabilityHealth = health || (await checkBackendHealth(apiBase, requestId));
+          const fallbackStatus = capabilityHealth.tool_bridge_configured
+            ? "Capability mode: bridge configured, loading tool catalog..."
+            : "Capability mode: direct realtime only (bridge not configured)";
+          el.capabilityStatus.textContent = fallbackStatus;
+
+          const schemaInfo = await fetchToolSchemas(apiBase, requestId, forceRefresh);
+          state.toolCatalog = schemaInfo;
+
+          const modePrefix =
+            schemaInfo.count > 0
+              ? "Capability mode: full tool catalog loaded"
+              : "Capability mode: tool catalog empty";
+          const detailSuffix = schemaInfo.detail ? ` (${schemaInfo.detail})` : "";
+          el.capabilityStatus.textContent = `${modePrefix} [${schemaInfo.count}] via ${schemaInfo.source}${detailSuffix}`;
+
+          const preview = summarizeToolNames(schemaInfo.tools);
+          el.toolSummary.textContent = preview
+            ? `Available tools: ${preview}`
+            : "Available tools: none exposed by backend yet.";
+          return schemaInfo;
+        } catch (error) {
+          state.toolCatalog = null;
+          el.capabilityStatus.textContent = "Capability mode: tool catalog unavailable";
+          el.toolSummary.textContent = `Tool catalog error: ${shorten(String(error), 240)}`;
+          return null;
+        }
+      }
+
+      function shouldUseEphemeralSignalingFallback(status, detail) {
+        if (status >= 500 && status <= 599) {
+          return true;
+        }
+        if (status !== 400) {
+          return false;
+        }
+        const lowered = (detail || "").toLowerCase();
+        return (
+          lowered.includes("invalid_offer") ||
+          lowered.includes("failed to parse offer") ||
+          lowered.includes("unmarshal sdp") ||
+          lowered.includes("eof")
+        );
+      }
+
+      async function requestEphemeralClientSecret(apiBase, requestId) {
+        const response = await fetchWithTimeout(
+          `${apiBase}/token`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-pj-client-request-id": requestId,
+              "x-pj-contract-version": CONTRACT_VERSION,
+              "x-pj-protocol-version": String(PROTOCOL_VERSION),
+            },
+            body: JSON.stringify(
+              protocolMessage({
+                session_id: state.activeSessionId,
+                voice_mode: state.mode === MODE.FULL_POWER_VOICE ? "full_power" : "fast",
+              }),
+            ),
+            credentials: "include",
+          },
+          15000,
+        );
+
+        const body = await response.text();
+        if (!response.ok) {
+          const detail = parseErrorBody(body);
+          throw new Error(
+            `Token minting failed (${response.status})${detail ? `: ${detail}` : ""}`,
+          );
+        }
+
+        let parsed = {};
+        try {
+          parsed = body ? JSON.parse(body) : {};
+        } catch (_) {
+          throw new Error("Token minting response was not valid JSON.");
+        }
+        assertProtocolResponse(response, parsed);
+
+        const tokenValue =
+          (parsed.client_secret && parsed.client_secret.value) || parsed.value || null;
+        if (!tokenValue) {
+          throw new Error("Token minting response did not include a client secret.");
+        }
+        return tokenValue;
+      }
+
+      async function negotiateWithEphemeralToken(apiBase, localSdp, requestId) {
+        const ephemeralToken = await requestEphemeralClientSecret(apiBase, requestId);
+        const response = await fetchWithTimeout(
+          "https://api.openai.com/v1/realtime/calls",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${ephemeralToken}`,
+              "Content-Type": "application/sdp",
+            },
+            body: localSdp,
+          },
+          35000,
+        );
+
+        const answerSdp = await response.text();
+        if (!response.ok) {
+          const detail = parseErrorBody(answerSdp);
+          throw new Error(
+            `Fallback signaling failed (${response.status})${detail ? `: ${detail}` : ""}`,
+          );
+        }
+        return answerSdp;
+      }
+
+      function markSessionLive() {
+        setPhase(PHASE.LIVE, "Live");
+        seedRealtimeConversation();
+        if (!state.liveAnnounced) {
+          appendBubble("system", "Session connected. You can speak or type.");
+          state.liveAnnounced = true;
+        }
+        el.textInput.focus();
+      }
+
+      async function startSession() {
+        if (state.phase !== PHASE.IDLE) return;
+
+        const apiBase = el.apiBase.value.trim().replace(/\/+$/, "");
+        if (!apiBase) {
+          setStatus("Set a valid server URL");
+          return;
+        }
+        localStorage.setItem(STORAGE_KEY, apiBase);
+
+        const requestId = createRequestId();
+        state.activeStartRequestId = requestId;
+        state.liveAnnounced = false;
+
+        try {
+          setPhase(PHASE.CONNECTING, "Checking backend...");
+          appendBubble(
+            "system",
+            state.mode === MODE.FULL_POWER_VOICE
+              ? "Starting Full Power Voice session..."
+              : "Starting Fast Voice session...",
+          );
+          const health = await checkBackendHealth(apiBase, requestId);
+          await refreshCapabilities(apiBase, requestId, { health, forceRefresh: false });
+          const hadSession = Boolean(state.activeSessionId);
+          const sessionId = await ensureActiveSession("realtime");
+          await linkAnonymousUploadsIfNeeded(sessionId);
+          await syncLinkedUploadsForSession(sessionId);
+          if (hadSession) {
+            await loadSharedSessionHistory(sessionId, { clear: true });
+          }
+          state.seededSessionIds.delete(sessionId);
+          if (state.activeStartRequestId !== requestId) return;
+
+          setStatus("Requesting microphone...");
+          state.micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          if (state.activeStartRequestId !== requestId) {
+            stopSession({ announce: false });
+            return;
+          }
+
+          state.pc = new RTCPeerConnection();
+          state.pc.ontrack = (event) => {
+            el.pjAudio.srcObject = event.streams[0];
+          };
+          state.pc.oniceconnectionstatechange = () => {
+            const ice = state.pc ? state.pc.iceConnectionState : "closed";
+            if (ice === "failed" || ice === "disconnected") {
+              setStatus(`Connection ${ice}`);
+            }
+          };
+
+          state.micStream.getTracks().forEach((track) => {
+            state.pc.addTrack(track, state.micStream);
+          });
+
+          state.dataChannel = state.pc.createDataChannel("oai-events");
+          state.dataChannel.onopen = () => {
+            if (state.phase === PHASE.CONNECTING) {
+              markSessionLive();
+            }
+          };
+          state.dataChannel.onclose = () => {
+            if (state.phase !== PHASE.IDLE && state.phase !== PHASE.STOPPING) {
+              appendBubble("system", "Realtime channel closed.");
+              stopSession({ announce: false });
+            }
+          };
+          state.dataChannel.onmessage = (event) => {
+            let parsed;
+            try {
+              parsed = JSON.parse(event.data);
+            } catch (_) {
+              appendBubble("system", "Invalid inbound realtime payload: malformed JSON.");
+              return;
+            }
+            handleRealtimeEvent(parsed, apiBase);
+          };
+
+          const offer = await state.pc.createOffer();
+          await state.pc.setLocalDescription(offer);
+          const localSdp =
+            (state.pc.localDescription && state.pc.localDescription.sdp) || offer.sdp || "";
+          if (!localSdp.trim()) {
+            throw new Error("Local SDP offer was empty before signaling.");
+          }
+
+          setStatus("Negotiating realtime session...");
+          const voiceMode = state.mode === MODE.FULL_POWER_VOICE ? "full_power" : "fast";
+          const signalingUrl = new URL(`${apiBase}/session`);
+          signalingUrl.searchParams.set("session_id", state.activeSessionId);
+          signalingUrl.searchParams.set("voice_mode", voiceMode);
+          const response = await fetchWithTimeout(
+            signalingUrl.href,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/sdp",
+                "x-pj-client-request-id": requestId,
+                "x-pj-contract-version": CONTRACT_VERSION,
+                "x-pj-protocol-version": String(PROTOCOL_VERSION),
+              },
+              body: localSdp,
+              credentials: "include",
+            },
+            35000,
+          );
+
+          let answerSdp = await response.text();
+          assertProtocolResponse(response);
+          if (!response.ok) {
+            const detail = parseErrorBody(answerSdp);
+            if (shouldUseEphemeralSignalingFallback(response.status, detail)) {
+              appendBubble(
+                "system",
+                "Primary signaling rejected SDP. Retrying with ephemeral token fallback...",
+              );
+              setStatus("Retrying signaling with fallback...");
+              answerSdp = await negotiateWithEphemeralToken(apiBase, localSdp, requestId);
+            } else {
+              throw new Error(
+                `Signaling failed (${response.status})${detail ? `: ${detail}` : ""}`,
+              );
+            }
+          }
+
+          if (state.activeStartRequestId !== requestId) {
+            stopSession({ announce: false });
+            return;
+          }
+
+          await state.pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+          if (state.dataChannel && state.dataChannel.readyState === "open") {
+            markSessionLive();
+          } else {
+            setStatus("Awaiting realtime channel...");
+          }
+        } catch (error) {
+          appendBubble("system", `Failed to start session: ${String(error)}`);
+          stopSession({ announce: false });
+          setPhase(PHASE.IDLE, "Idle");
+        } finally {
+          state.activeStartRequestId = null;
+        }
+      }
+
+      function stopSession({ announce = true } = {}) {
+        const hadSession =
+          state.phase !== PHASE.IDLE || state.pc || state.dataChannel || state.micStream;
+
+        state.activeStartRequestId = null;
+        setPhase(PHASE.STOPPING, "Closing session...");
+
+        if (state.dataChannel) {
+          try {
+            state.dataChannel.close();
+          } catch (_) {}
+        }
+        if (state.pc) {
+          try {
+            state.pc.close();
+          } catch (_) {}
+        }
+        if (state.micStream) {
+          state.micStream.getTracks().forEach((track) => track.stop());
+        }
+
+        state.pc = null;
+        state.dataChannel = null;
+        state.micStream = null;
+        state.pendingCalls = {};
+        state.liveAnnounced = false;
+        state.activePlaybackStartSeconds = null;
+        clearUploadPolls();
+        finalizeAssistantBubble();
+
+        setPhase(PHASE.IDLE, "Idle");
+        if (announce && hadSession) {
+          appendBubble("system", "Session ended.");
+        }
+      }
+
+      async function sendTextMessage() {
+        const message = el.textInput.value.trim();
+        if (
+          !message ||
+          state.phase !== PHASE.LIVE ||
+          !state.dataChannel ||
+          state.dataChannel.readyState !== "open"
+        ) {
+          return;
+        }
+
+        const externalId = `item_${crypto.randomUUID().replaceAll("-", "")}`;
+        upsertRealtimeBubble(externalId, "user", message, { status: "completed" });
+        el.textInput.value = "";
+        try {
+          let submitted = message;
+          let metadata = {};
+          if (state.mode === MODE.FULL_POWER_VOICE) {
+            setStatus("Refining prompt...", "live");
+            const perfected = await perfectPrompt(message, "full_power_voice");
+            submitted = perfected.refined_prompt;
+            metadata = {
+              prompt_perfecting_version: perfected.version,
+              refined_prompt: perfected.refined_prompt.slice(0, 4000),
+              refined_prompt_truncated: perfected.refined_prompt.length > 4000,
+              refined_sha256: perfected.refined_sha256,
+              changed: perfected.changed,
+            };
+          }
+          await persistRealtimeMessage({
+            externalId,
+            role: "user",
+            content: message,
+            source: "typed",
+            metadata,
+          });
+          sendRealtimeEvent({
+            type: "conversation.item.create",
+            item: {
+              id: externalId,
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: submitted }],
+            },
+          });
+          sendRealtimeEvent({ type: "response.create" });
+          setStatus("Live", "live");
+        } catch (error) {
+          appendBubble("system", `Message was not submitted: ${shorten(String(error), 260)}`);
+          setStatus("Live", "live");
+        }
+      }
+
+      async function refreshFullPowerSessions() {
+        if (state.mode !== MODE.FULL_POWER || !apiBase()) return;
+        try {
+          const parsed = await fetchJson(`${apiBase()}/responses/sessions?limit=50`, {
+            headers: requestHeaders(createRequestId()),
+          });
           const sessions = Array.isArray(parsed.sessions) ? parsed.sessions : [];
           el.sessionSelect.replaceChildren();
           const placeholder = document.createElement("option");
@@ -1996,10 +2158,7 @@
         }
       }
 
-      function stopFullPowerSession({
-        announce = true,
-        preserveSession = false,
-      } = {}) {
+      function stopFullPowerSession({ announce = true, preserveSession = false } = {}) {
         if (state.responsesAbortController) {
           state.responsesAbortController.abort();
         }
@@ -2100,9 +2259,7 @@
         const approvalState = {
           approveButton,
           rejectButton,
-          decision: typeof event.execution_decision === "boolean"
-            ? event.execution_decision
-            : null,
+          decision: typeof event.execution_decision === "boolean" ? event.execution_decision : null,
         };
         state.pendingApprovals[event.approval_id] = approvalState;
         const decide = async (approve) => {
@@ -2123,10 +2280,7 @@
       }
 
       function fullPowerToolKey(event) {
-        return String(
-          event.call_id ||
-          `${event.tool_type || "tool"}:${event.name || "unnamed"}`,
-        );
+        return String(event.call_id || `${event.tool_type || "tool"}:${event.name || "unnamed"}`);
       }
 
       function renderFullPowerTool(event, completed) {
@@ -2229,10 +2383,16 @@
           );
         } else if (event.type === "citation") {
           const citation = event.citation || {};
-          appendBubble("system", `Citation: ${citation.title || citation.filename || "source"}${citation.url ? ` — ${citation.url}` : ""}`);
+          appendBubble(
+            "system",
+            `Citation: ${citation.title || citation.filename || "source"}${citation.url ? ` — ${citation.url}` : ""}`,
+          );
         } else if (event.type === "source") {
           const source = event.source || {};
-          appendBubble("system", `Source: ${source.filename || source.query || source.url || source.type || "retrieved evidence"}${source.text ? `\n${shorten(source.text, 500)}` : ""}`);
+          appendBubble(
+            "system",
+            `Source: ${source.filename || source.query || source.url || source.type || "retrieved evidence"}${source.text ? `\n${shorten(source.text, 500)}` : ""}`,
+          );
         } else if (event.type === "prompt.perfected") {
           appendBubble(
             "system",
@@ -2260,7 +2420,10 @@
             appendBubble("assistant", event.text);
           }
           if (event.structured_output) {
-            appendBubble("system", `Structured output:\n${JSON.stringify(event.structured_output, null, 2)}`);
+            appendBubble(
+              "system",
+              `Structured output:\n${JSON.stringify(event.structured_output, null, 2)}`,
+            );
           }
           for (const artifact of event.artifacts || []) {
             renderArtifactCard(artifact);
@@ -2268,7 +2431,10 @@
           finalizeAssistantBubble();
         } else if (event.type === "error") {
           const detail = event.error?.detail ? `: ${event.error.detail}` : "";
-          appendBubble("system", `Full Power error: ${event.error?.message || "Unknown error"}${detail}`);
+          appendBubble(
+            "system",
+            `Full Power error: ${event.error?.message || "Unknown error"}${detail}`,
+          );
         }
       }
 
@@ -2276,7 +2442,9 @@
         assertProtocolResponse(response);
         if (!response.ok) {
           const raw = await response.text();
-          throw new Error(`Request failed (${response.status})${parseErrorBody(raw) ? `: ${parseErrorBody(raw)}` : ""}`);
+          throw new Error(
+            `Request failed (${response.status})${parseErrorBody(raw) ? `: ${parseErrorBody(raw)}` : ""}`,
+          );
         }
         if (!response.body) throw new Error("Streaming response body was unavailable.");
 
@@ -2315,10 +2483,12 @@
             credentials: "include",
             signal: controller.signal,
             headers: requestHeaders(createRequestId(), "application/json"),
-            body: JSON.stringify(protocolMessage({
-              message,
-              ...(structuredOutput ? { structured_output: structuredOutput } : {}),
-            })),
+            body: JSON.stringify(
+              protocolMessage({
+                message,
+                ...(structuredOutput ? { structured_output: structuredOutput } : {}),
+              }),
+            ),
           },
         );
         await consumeFullPowerStream(response);
@@ -2378,7 +2548,13 @@
 
       async function sendFullPowerMessage() {
         const message = el.textInput.value.trim();
-        if (!message || state.phase !== PHASE.LIVE || !state.fullPowerSessionId || state.fullPowerBusy) return;
+        if (
+          !message ||
+          state.phase !== PHASE.LIVE ||
+          !state.fullPowerSessionId ||
+          state.fullPowerBusy
+        )
+          return;
         let structuredOutput;
         try {
           structuredOutput = structuredOutputRequest();
@@ -2422,507 +2598,485 @@
         return state.mode === MODE.FULL_POWER ? sendFullPowerMessage() : sendTextMessage();
       }
 
-    function realtimeItemId(event, prefix) {
-      return (
-        event.item_id ||
-        event.item?.id ||
-        (
-          event.response_id
-            ? `${prefix}_${event.response_id}_${event.output_index || 0}`
-            : null
-        )
-      );
-    }
-
-    function requireRealtimeItemId(event, prefix) {
-      const externalId = realtimeItemId(event, prefix);
-      if (externalId) return externalId;
-      if (!state.missingRealtimeIds.has(event.type)) {
-        state.missingRealtimeIds.add(event.type);
-        appendBubble(
-          "system",
-          `Realtime event ${event.type || "unknown"} omitted its item identifier.`,
+      function realtimeItemId(event, prefix) {
+        return (
+          event.item_id ||
+          event.item?.id ||
+          (event.response_id ? `${prefix}_${event.response_id}_${event.output_index || 0}` : null)
         );
       }
-      return null;
-    }
 
-    async function handleCompletedAudioTranscript(event) {
-      const externalId = requireRealtimeItemId(event, "input");
-      if (!externalId) return;
-      if (state.perfectedInputItems.has(externalId)) return;
-      state.perfectedInputItems.add(externalId);
-      const transcript = String(event.transcript || "").trim();
-      if (!transcript) {
-        state.perfectedInputItems.delete(externalId);
-        appendBubble(
-          "system",
-          "Audio transcription was unavailable, so no response was requested.",
-        );
-        return;
-      }
-      upsertRealtimeBubble(
-        externalId,
-        "user",
-        transcript,
-        { status: "completed" },
-      );
-      let metadata = {};
-      try {
-        if (state.mode === MODE.FULL_POWER_VOICE) {
-          setStatus("Refining transcript...", "live");
-          const perfected = await perfectPrompt(
-            transcript, "full_power_voice"
+      function requireRealtimeItemId(event, prefix) {
+        const externalId = realtimeItemId(event, prefix);
+        if (externalId) return externalId;
+        if (!state.missingRealtimeIds.has(event.type)) {
+          state.missingRealtimeIds.add(event.type);
+          appendBubble(
+            "system",
+            `Realtime event ${event.type || "unknown"} omitted its item identifier.`,
           );
-          metadata = {
-            prompt_perfecting_version: perfected.version,
-            refined_prompt: perfected.refined_prompt.slice(0, 4000),
-            refined_prompt_truncated: perfected.refined_prompt.length > 4000,
-            refined_sha256: perfected.refined_sha256,
-            changed: perfected.changed,
-          };
+        }
+        return null;
+      }
+
+      async function handleCompletedAudioTranscript(event) {
+        const externalId = requireRealtimeItemId(event, "input");
+        if (!externalId) return;
+        if (state.perfectedInputItems.has(externalId)) return;
+        state.perfectedInputItems.add(externalId);
+        const transcript = String(event.transcript || "").trim();
+        if (!transcript) {
+          state.perfectedInputItems.delete(externalId);
+          appendBubble(
+            "system",
+            "Audio transcription was unavailable, so no response was requested.",
+          );
+          return;
+        }
+        upsertRealtimeBubble(externalId, "user", transcript, { status: "completed" });
+        let metadata = {};
+        try {
+          if (state.mode === MODE.FULL_POWER_VOICE) {
+            setStatus("Refining transcript...", "live");
+            const perfected = await perfectPrompt(transcript, "full_power_voice");
+            metadata = {
+              prompt_perfecting_version: perfected.version,
+              refined_prompt: perfected.refined_prompt.slice(0, 4000),
+              refined_prompt_truncated: perfected.refined_prompt.length > 4000,
+              refined_sha256: perfected.refined_sha256,
+              changed: perfected.changed,
+            };
+            await persistRealtimeMessage({
+              externalId,
+              role: "user",
+              content: transcript,
+              source: "input_audio",
+              metadata,
+            });
+            if (!state.dataChannel || state.dataChannel.readyState !== "open") {
+              throw new Error("Realtime channel closed before transcript replacement.");
+            }
+            sendRealtimeEvent({
+              type: "conversation.item.delete",
+              item_id: externalId,
+            });
+            sendRealtimeEvent({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [
+                  {
+                    type: "input_text",
+                    text: perfected.refined_prompt,
+                  },
+                ],
+              },
+            });
+            sendRealtimeEvent({ type: "response.create" });
+            setStatus("Live", "live");
+            return;
+          }
           await persistRealtimeMessage({
             externalId,
             role: "user",
             content: transcript,
             source: "input_audio",
-            metadata,
           });
-          if (!state.dataChannel || state.dataChannel.readyState !== "open") {
-            throw new Error("Realtime channel closed before transcript replacement.");
-          }
-          sendRealtimeEvent({
-            type: "conversation.item.delete",
-            item_id: externalId,
-          });
-          sendRealtimeEvent({
-            type: "conversation.item.create",
-            item: {
-              type: "message",
-              role: "user",
-              content: [{
-                type: "input_text",
-                text: perfected.refined_prompt,
-              }],
-            },
-          });
-          sendRealtimeEvent({ type: "response.create" });
+        } catch (error) {
+          state.perfectedInputItems.delete(externalId);
+          appendBubble(
+            "system",
+            `Transcript was preserved but PJ did not respond: ${shorten(String(error), 280)}`,
+          );
           setStatus("Live", "live");
+        }
+      }
+
+      function persistAssistantRealtimeItem(item, status, playbackMs = null) {
+        if (!item || !item.text) return;
+        const signature = JSON.stringify([status, playbackMs, item.responseId || null, item.text]);
+        if (state.persistedRealtimeStates.get(item.externalId) === signature) return;
+        state.persistedRealtimeStates.set(item.externalId, signature);
+        persistRealtimeMessage({
+          externalId: item.externalId,
+          role: "assistant",
+          content: item.text,
+          source: item.source || "output_audio",
+          responseId: item.responseId,
+          status,
+          playbackMs,
+        }).catch((error) => {
+          if (state.persistedRealtimeStates.get(item.externalId) === signature) {
+            state.persistedRealtimeStates.delete(item.externalId);
+          }
+          appendBubble("system", `Transcript persistence failed: ${shorten(String(error), 220)}`);
+        });
+      }
+
+      function handleRealtimeEvent(event, apiBase) {
+        const validationIssue = validateInboundRealtimeEvent(event);
+        if (validationIssue) {
+          appendBubble("system", `Invalid inbound realtime payload: ${validationIssue}.`);
           return;
         }
-        await persistRealtimeMessage({
-          externalId,
-          role: "user",
-          content: transcript,
-          source: "input_audio",
-        });
-      } catch (error) {
-        state.perfectedInputItems.delete(externalId);
-        appendBubble(
-          "system",
-          `Transcript was preserved but PJ did not respond: ${shorten(String(error), 280)}`,
-        );
-        setStatus("Live", "live");
-      }
-    }
-
-    function persistAssistantRealtimeItem(item, status, playbackMs = null) {
-      if (!item || !item.text) return;
-      const signature = JSON.stringify([
-        status,
-        playbackMs,
-        item.responseId || null,
-        item.text,
-      ]);
-      if (state.persistedRealtimeStates.get(item.externalId) === signature) return;
-      state.persistedRealtimeStates.set(item.externalId, signature);
-      persistRealtimeMessage({
-        externalId: item.externalId,
-        role: "assistant",
-        content: item.text,
-        source: item.source || "output_audio",
-        responseId: item.responseId,
-        status,
-        playbackMs,
-      }).catch((error) => {
-        if (state.persistedRealtimeStates.get(item.externalId) === signature) {
-          state.persistedRealtimeStates.delete(item.externalId);
+        const realtimeEventId = typeof event?.event_id === "string" ? event.event_id : "";
+        if (realtimeEventId) {
+          if (state.processedRealtimeEventIds.has(realtimeEventId)) return;
+          state.processedRealtimeEventIds.add(realtimeEventId);
+          if (state.processedRealtimeEventIds.size > 2000) {
+            const oldest = state.processedRealtimeEventIds.values().next().value;
+            state.processedRealtimeEventIds.delete(oldest);
+          }
         }
-        appendBubble(
-          "system",
-          `Transcript persistence failed: ${shorten(String(error), 220)}`,
-        );
-      });
-    }
-
-    function handleRealtimeEvent(event, apiBase) {
-      const validationIssue = validateInboundRealtimeEvent(event);
-      if (validationIssue) {
-        appendBubble("system", `Invalid inbound realtime payload: ${validationIssue}.`);
-        return;
-      }
-      const realtimeEventId =
-        typeof event?.event_id === "string" ? event.event_id : "";
-      if (realtimeEventId) {
-        if (state.processedRealtimeEventIds.has(realtimeEventId)) return;
-        state.processedRealtimeEventIds.add(realtimeEventId);
-        if (state.processedRealtimeEventIds.size > 2000) {
-          const oldest = state.processedRealtimeEventIds.values().next().value;
-          state.processedRealtimeEventIds.delete(oldest);
+        if (event.type === "error") {
+          appendBubble("system", `Realtime error: ${event.error?.message || "Unknown error"}`);
+          return;
         }
-      }
-      if (event.type === "error") {
-        appendBubble("system", `Realtime error: ${event.error?.message || "Unknown error"}`);
-        return;
-      }
 
-      if (event.type === "response.created") {
-        state.activeResponseId = event.response?.id || event.response_id || null;
-        state.activePlaybackStartSeconds = Number(el.pjAudio.currentTime || 0);
-        el.pjAudio.play().catch(() => {});
-        return;
-      }
+        if (event.type === "response.created") {
+          state.activeResponseId = event.response?.id || event.response_id || null;
+          state.activePlaybackStartSeconds = Number(el.pjAudio.currentTime || 0);
+          el.pjAudio.play().catch(() => {});
+          return;
+        }
 
-      if (event.type === "input_audio_buffer.speech_started") {
-        const item = state.realtimeItems.get(state.activeAssistantItemId);
-        if (
-          item &&
-          state.dataChannel &&
-          state.dataChannel.readyState === "open"
-        ) {
-          const playbackStart = Number(
-            state.activePlaybackStartSeconds
-            ?? el.pjAudio.currentTime
-            ?? 0,
-          );
-          const playbackMs = Math.max(
-            0,
-            Math.floor(
-              (Number(el.pjAudio.currentTime || 0) - playbackStart) * 1000,
-            ),
-          );
-          el.pjAudio.pause();
-          sendRealtimeEvent({
-            type: "conversation.item.truncate",
-            item_id: state.activeAssistantItemId,
-            content_index: 0,
-            audio_end_ms: playbackMs,
+        if (event.type === "input_audio_buffer.speech_started") {
+          const item = state.realtimeItems.get(state.activeAssistantItemId);
+          if (item && state.dataChannel && state.dataChannel.readyState === "open") {
+            const playbackStart = Number(
+              state.activePlaybackStartSeconds ?? el.pjAudio.currentTime ?? 0,
+            );
+            const playbackMs = Math.max(
+              0,
+              Math.floor((Number(el.pjAudio.currentTime || 0) - playbackStart) * 1000),
+            );
+            el.pjAudio.pause();
+            sendRealtimeEvent({
+              type: "conversation.item.truncate",
+              item_id: state.activeAssistantItemId,
+              content_index: 0,
+              audio_end_ms: playbackMs,
+            });
+            sendRealtimeEvent({ type: "response.cancel" });
+            item.status = "interrupted";
+            item.playbackMs = playbackMs;
+            item.bubble.dataset.status = "interrupted";
+            persistAssistantRealtimeItem(item, "interrupted", playbackMs);
+          }
+          finalizeAssistantBubble();
+          return;
+        }
+
+        if (event.type === "conversation.item.input_audio_transcription.delta") {
+          const externalId = requireRealtimeItemId(event, "input");
+          if (!externalId) return;
+          upsertRealtimeBubble(externalId, "user", event.delta || "", {
+            append: true,
+            status: "streaming",
           });
-          sendRealtimeEvent({ type: "response.cancel" });
-          item.status = "interrupted";
-          item.playbackMs = playbackMs;
-          item.bubble.dataset.status = "interrupted";
-          persistAssistantRealtimeItem(item, "interrupted", playbackMs);
+          return;
         }
-        finalizeAssistantBubble();
-        return;
-      }
 
-      if (
-        event.type ===
-        "conversation.item.input_audio_transcription.delta"
-      ) {
-        const externalId = requireRealtimeItemId(event, "input");
-        if (!externalId) return;
-        upsertRealtimeBubble(
-          externalId,
-          "user",
-          event.delta || "",
-          { append: true, status: "streaming" },
-        );
-        return;
-      }
+        if (event.type === "conversation.item.input_audio_transcription.completed") {
+          handleCompletedAudioTranscript(event);
+          return;
+        }
 
-      if (event.type === "conversation.item.input_audio_transcription.completed") {
-        handleCompletedAudioTranscript(event);
-        return;
-      }
-
-      if (
-        event.type === "response.output_text.delta" ||
-        event.type === "response.output_audio_transcript.delta"
-      ) {
-        const externalId = requireRealtimeItemId(event, "output");
-        if (!externalId) return;
-        const item = upsertRealtimeBubble(
-          externalId,
-          "assistant",
-          event.delta || "",
-          {
+        if (
+          event.type === "response.output_text.delta" ||
+          event.type === "response.output_audio_transcript.delta"
+        ) {
+          const externalId = requireRealtimeItemId(event, "output");
+          if (!externalId) return;
+          const item = upsertRealtimeBubble(externalId, "assistant", event.delta || "", {
             append: true,
             status: "streaming",
             responseId: event.response_id || state.activeResponseId,
-            source: event.type.includes("output_audio")
-              ? "output_audio"
-              : "output_text",
-          },
-        );
-        item.externalId = externalId;
-        state.activeAssistantItemId = externalId;
-        if (item.responseId) {
-          state.responseItems.set(item.responseId, externalId);
-        }
-        return;
-      }
-
-      if (
-        event.type === "response.output_text.done" ||
-        event.type === "response.output_audio_transcript.done"
-      ) {
-        const externalId = requireRealtimeItemId(event, "output");
-        if (!externalId) return;
-        const finalText = event.transcript ?? event.text;
-        const item = upsertRealtimeBubble(
-          externalId,
-          "assistant",
-          finalText ?? state.realtimeItems.get(externalId)?.text ?? "",
-          {
-            status: "awaiting_response_status",
-            responseId: event.response_id || state.activeResponseId,
-            source: event.type.includes("output_audio")
-              ? "output_audio"
-              : "output_text",
-          },
-        );
-        item.externalId = externalId;
-        state.activeAssistantItemId = externalId;
-        finalizeAssistantBubble();
-        return;
-      }
-
-      if (event.type === "response.done") {
-        const response = event.response || {};
-        const status = response.status === "completed"
-          ? "completed"
-          : response.status === "cancelled"
-            ? "interrupted"
-            : "failed";
-        const outputIds = (response.output || [])
-          .map((item) => item?.id)
-          .filter(Boolean);
-        if (!outputIds.length && state.activeAssistantItemId) {
-          outputIds.push(state.activeAssistantItemId);
-        }
-        for (const externalId of outputIds) {
-          const item = state.realtimeItems.get(externalId);
-          if (!item) continue;
-          const finalStatus = item.status === "interrupted"
-            ? "interrupted"
-            : status;
-          item.status = finalStatus;
-          item.bubble.dataset.status = finalStatus;
-          persistAssistantRealtimeItem(
-            { ...item, externalId },
-            finalStatus,
-            finalStatus === "interrupted"
-              ? item.playbackMs ?? 0
-              : null,
-          );
-        }
-        state.activeAssistantItemId = null;
-        state.activeResponseId = null;
-        state.activePlaybackStartSeconds = null;
-        finalizeAssistantBubble();
-        return;
-      }
-
-      if (event.type === "response.function_call_arguments.delta") {
-        const call = state.pendingCalls[event.call_id] || (state.pendingCalls[event.call_id] = {
-          name: event.name,
-          args: "",
-          started: false,
-        });
-        call.args += event.delta || "";
-        if (!call.started) {
-          call.started = true;
-          renderFullPowerTool({
-            type: "tool.call",
-            call_id: event.call_id,
-            name: event.name || call.name,
-            tool_type: "function_call",
-          }, false);
-        }
-        return;
-      }
-
-      if (event.type === "response.function_call_arguments.done") {
-        const call = state.pendingCalls[event.call_id] || {
-          name: event.name,
-          args: event.arguments || "",
-        };
-        call.name = event.name || call.name;
-        call.args = event.arguments ?? call.args;
-        runFunctionCall(event.call_id, call.name, call.args, apiBase);
-        return;
-      }
-
-      if (event.type === "response.output_item.done" && event.item && event.item.type === "function_call") {
-        const item = event.item;
-        if (!(item.call_id in state.pendingCalls) || !state.pendingCalls[item.call_id].dispatched) {
-          runFunctionCall(item.call_id, item.name, item.arguments, apiBase);
-        }
-      }
-    }
-
-    async function runFunctionCall(callId, name, argsJson, apiBase) {
-      if (state.pendingCalls[callId]) state.pendingCalls[callId].dispatched = true;
-      else state.pendingCalls[callId] = { dispatched: true };
-
-      let args = {};
-      try {
-        args = argsJson ? JSON.parse(argsJson) : {};
-      } catch (error) {
-        appendBubble("system", `Tool argument parse failed (${name}): ${String(error)}`);
-      }
-
-      let output;
-      const requestId = createRequestId();
-      try {
-        const resp = await fetchWithTimeout(`${apiBase}/execute-tool`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-pj-client-request-id": requestId,
-            "x-pj-contract-version": CONTRACT_VERSION,
-            "x-pj-protocol-version": String(PROTOCOL_VERSION),
-          },
-          body: JSON.stringify(protocolMessage({
-            name,
-            arguments: args,
-            session_id: state.fullPowerSessionId || undefined,
-          })),
-        }, name === "delegate_advanced_task" ? 290000 : 90000);
-        const raw = await resp.text();
-        let protocolPayload = null;
-        try {
-          protocolPayload = raw ? JSON.parse(raw) : null;
-        } catch (_) {}
-        assertProtocolResponse(resp, protocolPayload);
-        if (!resp.ok) {
-          output = JSON.stringify({
-            error: `Tool call failed (${resp.status})`,
-            detail: parseErrorBody(raw),
+            source: event.type.includes("output_audio") ? "output_audio" : "output_text",
           });
-        } else {
-          output = raw;
+          item.externalId = externalId;
+          state.activeAssistantItemId = externalId;
+          if (item.responseId) {
+            state.responseItems.set(item.responseId, externalId);
+          }
+          return;
         }
-      } catch (error) {
-        output = JSON.stringify({ error: String(error) });
+
+        if (
+          event.type === "response.output_text.done" ||
+          event.type === "response.output_audio_transcript.done"
+        ) {
+          const externalId = requireRealtimeItemId(event, "output");
+          if (!externalId) return;
+          const finalText = event.transcript ?? event.text;
+          const item = upsertRealtimeBubble(
+            externalId,
+            "assistant",
+            finalText ?? state.realtimeItems.get(externalId)?.text ?? "",
+            {
+              status: "awaiting_response_status",
+              responseId: event.response_id || state.activeResponseId,
+              source: event.type.includes("output_audio") ? "output_audio" : "output_text",
+            },
+          );
+          item.externalId = externalId;
+          state.activeAssistantItemId = externalId;
+          finalizeAssistantBubble();
+          return;
+        }
+
+        if (event.type === "response.done") {
+          const response = event.response || {};
+          const status =
+            response.status === "completed"
+              ? "completed"
+              : response.status === "cancelled"
+                ? "interrupted"
+                : "failed";
+          const outputIds = (response.output || []).map((item) => item?.id).filter(Boolean);
+          if (!outputIds.length && state.activeAssistantItemId) {
+            outputIds.push(state.activeAssistantItemId);
+          }
+          for (const externalId of outputIds) {
+            const item = state.realtimeItems.get(externalId);
+            if (!item) continue;
+            const finalStatus = item.status === "interrupted" ? "interrupted" : status;
+            item.status = finalStatus;
+            item.bubble.dataset.status = finalStatus;
+            persistAssistantRealtimeItem(
+              { ...item, externalId },
+              finalStatus,
+              finalStatus === "interrupted" ? (item.playbackMs ?? 0) : null,
+            );
+          }
+          state.activeAssistantItemId = null;
+          state.activeResponseId = null;
+          state.activePlaybackStartSeconds = null;
+          finalizeAssistantBubble();
+          return;
+        }
+
+        if (event.type === "response.function_call_arguments.delta") {
+          const call =
+            state.pendingCalls[event.call_id] ||
+            (state.pendingCalls[event.call_id] = {
+              name: event.name,
+              args: "",
+              started: false,
+            });
+          call.args += event.delta || "";
+          if (!call.started) {
+            call.started = true;
+            renderFullPowerTool(
+              {
+                type: "tool.call",
+                call_id: event.call_id,
+                name: event.name || call.name,
+                tool_type: "function_call",
+              },
+              false,
+            );
+          }
+          return;
+        }
+
+        if (event.type === "response.function_call_arguments.done") {
+          const call = state.pendingCalls[event.call_id] || {
+            name: event.name,
+            args: event.arguments || "",
+          };
+          call.name = event.name || call.name;
+          call.args = event.arguments ?? call.args;
+          runFunctionCall(event.call_id, call.name, call.args, apiBase);
+          return;
+        }
+
+        if (
+          event.type === "response.output_item.done" &&
+          event.item &&
+          event.item.type === "function_call"
+        ) {
+          const item = event.item;
+          if (
+            !(item.call_id in state.pendingCalls) ||
+            !state.pendingCalls[item.call_id].dispatched
+          ) {
+            runFunctionCall(item.call_id, item.name, item.arguments, apiBase);
+          }
+        }
       }
 
-      let parsedOutput = output;
-      try {
-        parsedOutput = JSON.parse(output);
-      } catch (_) {
-        // Keep non-JSON tool output as text.
-      }
-      renderFullPowerTool({
-        type: "tool.result",
-        call_id: callId,
-        name,
-        result: parsedOutput,
-      }, true);
-      if (parsedOutput?.artifact) {
-        renderArtifactCard(parsedOutput.artifact);
-      }
+      async function runFunctionCall(callId, name, argsJson, apiBase) {
+        if (state.pendingCalls[callId]) state.pendingCalls[callId].dispatched = true;
+        else state.pendingCalls[callId] = { dispatched: true };
 
-      if (state.dataChannel && state.dataChannel.readyState === "open") {
-        sendRealtimeEvent({
-          type: "conversation.item.create",
-          item: { type: "function_call_output", call_id: callId, output },
-        });
-        sendRealtimeEvent({ type: "response.create" });
-      }
+        let args = {};
+        try {
+          args = argsJson ? JSON.parse(argsJson) : {};
+        } catch (error) {
+          appendBubble("system", `Tool argument parse failed (${name}): ${String(error)}`);
+        }
 
-      delete state.pendingCalls[callId];
-    }
+        let output;
+        const requestId = createRequestId();
+        try {
+          const resp = await fetchWithTimeout(
+            `${apiBase}/execute-tool`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "x-pj-client-request-id": requestId,
+                "x-pj-contract-version": CONTRACT_VERSION,
+                "x-pj-protocol-version": String(PROTOCOL_VERSION),
+              },
+              body: JSON.stringify(
+                protocolMessage({
+                  name,
+                  arguments: args,
+                  session_id: state.fullPowerSessionId || undefined,
+                }),
+              ),
+            },
+            name === "delegate_advanced_task" ? 290000 : 90000,
+          );
+          const raw = await resp.text();
+          let protocolPayload = null;
+          try {
+            protocolPayload = raw ? JSON.parse(raw) : null;
+          } catch (_) {}
+          assertProtocolResponse(resp, protocolPayload);
+          if (!resp.ok) {
+            output = JSON.stringify({
+              error: `Tool call failed (${resp.status})`,
+              detail: parseErrorBody(raw),
+            });
+          } else {
+            output = raw;
+          }
+        } catch (error) {
+          output = JSON.stringify({ error: String(error) });
+        }
 
-    async function copyTranscript() {
-      const lines = Array.from(el.messages.querySelectorAll(".bubble")).map((node) => node.textContent);
-      try {
-        await navigator.clipboard.writeText(lines.join("\n\n"));
-        appendBubble("system", "Transcript copied.");
-      } catch (_) {
-        appendBubble("system", "Clipboard copy failed.");
-      }
-    }
-
-    function clearTranscript() {
-      el.messages.innerHTML = "";
-      resetFullPowerRenderState();
-      clearUploadPolls();
-      finalizeAssistantBubble();
-    }
-
-    el.startBtn.addEventListener("click", startSelectedMode);
-    el.stopBtn.addEventListener("click", stopSelectedMode);
-    el.sendBtn.addEventListener("click", sendSelectedMessage);
-    el.copyBtn.addEventListener("click", copyTranscript);
-    el.clearBtn.addEventListener("click", clearTranscript);
-    el.chooseFilesBtn.addEventListener("click", () => {
-      el.filePicker.value = "";
-      el.filePicker.click();
-    });
-    el.chooseFolderBtn.addEventListener("click", () => {
-      el.folderPicker.value = "";
-      el.folderPicker.click();
-    });
-    el.filePicker.addEventListener("change", () => {
-      selectUploadItems(el.filePicker.files, "files");
-    });
-    el.folderPicker.addEventListener("change", () => {
-      selectUploadItems(el.folderPicker.files, "folder");
-    });
-    el.uploadBtn.addEventListener("click", uploadSelectedDocuments);
-    el.refreshCapabilitiesBtn.addEventListener("click", async () => {
-      const base = apiBase();
-      if (!base) {
-        setStatus("Set a valid server URL");
-        return;
-      }
-      el.capabilityStatus.textContent = "Capability mode: refreshing...";
-      const info = await refreshCurrentCapabilities({ forceRefresh: true });
-      if (info) {
-        const count = info.count ?? info.local_functions?.count ?? 0;
-        appendBubble("system", `Capability catalog refreshed: ${count} local tools loaded.`);
-      }
-    });
-    el.realtimeModeBtn.addEventListener("click", () => setMode(MODE.REALTIME));
-    el.fullPowerVoiceModeBtn.addEventListener(
-      "click",
-      () => setMode(MODE.FULL_POWER_VOICE),
-    );
-    el.fullPowerModeBtn.addEventListener("click", () => setMode(MODE.FULL_POWER));
-    el.refreshSessionsBtn.addEventListener("click", refreshFullPowerSessions);
-    el.sessionSelect.addEventListener("change", () => {
-      if (el.sessionSelect.value) resumeFullPowerSession(el.sessionSelect.value);
-    });
-    el.searchHistoryBtn.addEventListener("click", async () => {
-      const query = el.historySearch.value.trim();
-      if (!query) return;
-      try {
-        const parsed = await fetchJson(
-          `${apiBase()}/responses/sessions/search?q=${encodeURIComponent(query)}&limit=20`,
-          { headers: requestHeaders(createRequestId()) },
+        let parsedOutput = output;
+        try {
+          parsedOutput = JSON.parse(output);
+        } catch (_) {
+          // Keep non-JSON tool output as text.
+        }
+        renderFullPowerTool(
+          {
+            type: "tool.result",
+            call_id: callId,
+            name,
+            result: parsedOutput,
+          },
+          true,
         );
-        const matches = parsed.matches || [];
-        appendBubble("system", matches.length
-          ? `History matches:\n${matches.map((match) => `${match.title}: ${shorten(match.content, 180)}`).join("\n")}`
-          : "No matching conversation history.");
-      } catch (error) {
-        appendBubble("system", `History search failed: ${shorten(String(error), 240)}`);
-      }
-    });
-    el.textInput.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && !event.shiftKey) {
-        event.preventDefault();
-        sendSelectedMessage();
-      }
-    });
+        if (parsedOutput?.artifact) {
+          renderArtifactCard(parsedOutput.artifact);
+        }
 
-    setPhase(PHASE.IDLE, "Idle");
-    appendBubble("system", "Ready. Click Start Session to connect to PJ.");
-    refreshCurrentCapabilities({ forceRefresh: false });
-  </script>
-</body>
+        if (state.dataChannel && state.dataChannel.readyState === "open") {
+          sendRealtimeEvent({
+            type: "conversation.item.create",
+            item: { type: "function_call_output", call_id: callId, output },
+          });
+          sendRealtimeEvent({ type: "response.create" });
+        }
+
+        delete state.pendingCalls[callId];
+      }
+
+      async function copyTranscript() {
+        const lines = Array.from(el.messages.querySelectorAll(".bubble")).map(
+          (node) => node.textContent,
+        );
+        try {
+          await navigator.clipboard.writeText(lines.join("\n\n"));
+          appendBubble("system", "Transcript copied.");
+        } catch (_) {
+          appendBubble("system", "Clipboard copy failed.");
+        }
+      }
+
+      function clearTranscript() {
+        el.messages.innerHTML = "";
+        resetFullPowerRenderState();
+        clearUploadPolls();
+        finalizeAssistantBubble();
+      }
+
+      el.startBtn.addEventListener("click", startSelectedMode);
+      el.stopBtn.addEventListener("click", stopSelectedMode);
+      el.sendBtn.addEventListener("click", sendSelectedMessage);
+      el.copyBtn.addEventListener("click", copyTranscript);
+      el.clearBtn.addEventListener("click", clearTranscript);
+      el.chooseFilesBtn.addEventListener("click", () => {
+        el.filePicker.value = "";
+        el.filePicker.click();
+      });
+      el.chooseFolderBtn.addEventListener("click", () => {
+        el.folderPicker.value = "";
+        el.folderPicker.click();
+      });
+      el.filePicker.addEventListener("change", () => {
+        selectUploadItems(el.filePicker.files, "files");
+      });
+      el.folderPicker.addEventListener("change", () => {
+        selectUploadItems(el.folderPicker.files, "folder");
+      });
+      el.uploadBtn.addEventListener("click", uploadSelectedDocuments);
+      el.refreshCapabilitiesBtn.addEventListener("click", async () => {
+        const base = apiBase();
+        if (!base) {
+          setStatus("Set a valid server URL");
+          return;
+        }
+        el.capabilityStatus.textContent = "Capability mode: refreshing...";
+        const info = await refreshCurrentCapabilities({ forceRefresh: true });
+        if (info) {
+          const count = info.count ?? info.local_functions?.count ?? 0;
+          appendBubble("system", `Capability catalog refreshed: ${count} local tools loaded.`);
+        }
+      });
+      el.realtimeModeBtn.addEventListener("click", () => setMode(MODE.REALTIME));
+      el.fullPowerVoiceModeBtn.addEventListener("click", () => setMode(MODE.FULL_POWER_VOICE));
+      el.fullPowerModeBtn.addEventListener("click", () => setMode(MODE.FULL_POWER));
+      el.refreshSessionsBtn.addEventListener("click", refreshFullPowerSessions);
+      el.sessionSelect.addEventListener("change", () => {
+        if (el.sessionSelect.value) resumeFullPowerSession(el.sessionSelect.value);
+      });
+      el.searchHistoryBtn.addEventListener("click", async () => {
+        const query = el.historySearch.value.trim();
+        if (!query) return;
+        try {
+          const parsed = await fetchJson(
+            `${apiBase()}/responses/sessions/search?q=${encodeURIComponent(query)}&limit=20`,
+            { headers: requestHeaders(createRequestId()) },
+          );
+          const matches = parsed.matches || [];
+          appendBubble(
+            "system",
+            matches.length
+              ? `History matches:\n${matches.map((match) => `${match.title}: ${shorten(match.content, 180)}`).join("\n")}`
+              : "No matching conversation history.",
+          );
+        } catch (error) {
+          appendBubble("system", `History search failed: ${shorten(String(error), 240)}`);
+        }
+      });
+      el.textInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.shiftKey) {
+          event.preventDefault();
+          sendSelectedMessage();
+        }
+      });
+
+      setPhase(PHASE.IDLE, "Idle");
+      appendBubble("system", "Ready. Click Start Session to connect to PJ.");
+      refreshCurrentCapabilities({ forceRefresh: false });
+    </script>
+  </body>
 </html>

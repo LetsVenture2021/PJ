@@ -779,9 +779,16 @@ def _execute_durable_tool(
         "get_uploaded_document_processing_status",
         "retry_uploaded_document_processing",
         "get_uploaded_document",
+        "index_uploaded_documents",
     }
     if name in upload_scoped_tools and "session_id" not in arguments:
         arguments = {**arguments, "session_id": session["id"]}
+    if name == "index_uploaded_documents" and approval_granted:
+        arguments = {
+            **arguments,
+            "_approval_id": approval_id or "",
+            "_execution_key": execution_key,
+        }
     started_at = perf_counter()
     log_fields = {
         "approval_granted": approval_granted,
@@ -986,6 +993,7 @@ def web_client():
 @app.route("/health", methods=["GET"])
 def health():
     req_id = _request_id()
+    upload_health = document_uploads.get_upload_processor_health()
     return _json_response(
         {
             "ok": True,
@@ -996,6 +1004,7 @@ def health():
             "prompt_perfecting_version": promptops.PROMPT_PERFECTING_VERSION,
             "tool_policy_sha256": _tool_policy_sha256(),
             "bridge_auth_enabled": bool((os.getenv("PJ_TOOL_BRIDGE_TOKEN") or "").strip()),
+            "upload_processor": upload_health,
             "endpoints": [
                 "/session",
                 "/token",
@@ -1014,6 +1023,7 @@ def health():
                 "/responses/sessions/<id>/uploads/documents/<id>/status",
                 "/responses/sessions/<id>/uploads/documents/<id>/preview",
                 "/responses/sessions/<id>/uploads/documents/<id>/retry",
+                "/responses/sessions/<id>/uploads/documents/<id>/index",
                 "/responses/sessions/<id>/approvals/<id>",
                 "/responses/artifacts/<artifact-id>",
                 "/upload/files",
@@ -1417,6 +1427,7 @@ def _handle_document_upload(*, folder_mode):
         status_urls = {
             "session_uploads": f"/responses/sessions/{session_id}/uploads",
             "batch_status": f"/responses/sessions/{session_id}/uploads/status",
+            "request_indexing": f"/responses/sessions/{session_id}/uploads/documents/<id>/index",
         }
         for item in registered["documents"]:
             document_id = str(item.get("document_id") or "")
@@ -1428,6 +1439,9 @@ def _handle_document_upload(*, folder_mode):
             )
             item["retry_url"] = (
                 f"/responses/sessions/{session_id}/uploads/documents/{document_id}/retry"
+            )
+            item["index_url"] = (
+                f"/responses/sessions/{session_id}/uploads/documents/{document_id}/index"
             )
             item["queue_status_url"] = status_urls["batch_status"]
     except UploadValidationError as exc:
@@ -1670,6 +1684,52 @@ def retry_responses_session_upload_document(session_id, document_id):
     if result.get("error"):
         return _error_response("upload_not_found", result["error"], 404, req_id)
     return _json_response({"ok": True, **result}, req_id=req_id)
+
+
+@app.route(
+    "/responses/sessions/<session_id>/uploads/documents/<document_id>/index", methods=["POST"]
+)
+def request_responses_session_upload_document_indexing(session_id, document_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    session, error = _validated_session(session_id, req_id)
+    if error:
+        return error
+    payload, error = _validated_json(req_id, allowed=set(), required=set())
+    if error:
+        return error
+    if payload:
+        return _error_response("invalid_request_body", "Request body must be empty.", 400, req_id)
+    try:
+        prepared = document_uploads.prepare_uploaded_document_indexing(
+            session_id=session["id"],
+            document_id=document_id,
+            request_id=req_id,
+        )
+    except ValueError as exc:
+        return _error_response("invalid_document_id", str(exc), 400, req_id)
+    if prepared.get("error"):
+        code = "upload_not_found"
+        status = 404
+        if "extraction is not complete" in prepared["error"]:
+            code = "indexing_not_ready"
+            status = 409
+        return _error_response(code, prepared["error"], status, req_id)
+    approval_prompt = (
+        "Call the `index_uploaded_documents` tool exactly once with this JSON "
+        f"arguments object and no additional tool calls: "
+        f'{{"session_id":"{session["id"]}","document_id":"{document_id}","request_id":"{req_id}"}}'
+    )
+    return _json_response(
+        {
+            "ok": True,
+            **prepared,
+            "approval_prompt": approval_prompt,
+        },
+        req_id=req_id,
+    )
 
 
 @app.route(

@@ -8,18 +8,19 @@ import hashlib
 import json
 import os
 import re
+import time
 import shutil
 import sqlite3
 import subprocess
 import tempfile
 import textwrap
-import time
 import zipfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import requests
 from lxml import etree
 from openpyxl import load_workbook
 from pptx import Presentation
@@ -31,6 +32,7 @@ except ImportError:  # pragma: no cover - dependency can be absent in minimal ru
 
 from ops.docs import service
 from ops.shared.io import sha256_file, write_json_atomic
+from runtime_config import load_runtime_config
 
 UPLOADS_DIR = service.DOCS_DIR / "uploads"
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
@@ -42,7 +44,7 @@ SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 DOCUMENT_ID_PATTERN = re.compile(r"^DOC-[a-f0-9]{32}$")
 
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"
 CURRENT_EXTRACTOR_VERSION = "local-v1"
 MAX_TEXT_CHARS = 120_000
 MAX_MARKDOWN_CHARS = 120_000
@@ -53,6 +55,10 @@ DEFAULT_JOB_RETRY_SECONDS = 60
 DEFAULT_LEASE_SECONDS = 120
 MAX_LINKED_UPLOADS_PER_SESSION = 100
 MAX_LINKED_UPLOADS_IN_SESSION_DETAIL = 8
+MAX_INDEXING_METADATA_CHARS = 2_000
+DEFAULT_INDEXING_HTTP_TIMEOUT = 60
+DEFAULT_INDEXING_HTTP_ATTEMPTS = 4
+DEFAULT_INDEXING_HTTP_BACKOFF_SECONDS = 0.5
 
 TEXT_EXTENSIONS = {
     ".txt",
@@ -254,6 +260,44 @@ def _ensure_upload_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_chat_session_upload_instances_session "
         "ON docops_chat_session_upload_instances(session_id, linked_at)"
     )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS docops_upload_indexing_state (
+            document_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            source_sha256 TEXT NOT NULL,
+            extractor_version TEXT NOT NULL,
+            source_cache_key TEXT NOT NULL,
+            normalized_sha256 TEXT NOT NULL DEFAULT '',
+            normalized_path TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'awaiting_approval',
+            approval_id TEXT NOT NULL DEFAULT '',
+            execution_key TEXT NOT NULL DEFAULT '',
+            requested_request_id TEXT NOT NULL DEFAULT '',
+            requested_at TEXT,
+            approved_at TEXT,
+            queued_at TEXT,
+            started_at TEXT,
+            completed_at TEXT,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            openai_file_id TEXT NOT NULL DEFAULT '',
+            vector_store_id TEXT NOT NULL DEFAULT '',
+            vector_store_file_id TEXT NOT NULL DEFAULT '',
+            vector_status TEXT NOT NULL DEFAULT '',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            last_attempt_at TEXT,
+            last_error TEXT NOT NULL DEFAULT '',
+            metadata_json TEXT NOT NULL DEFAULT '{}',
+            FOREIGN KEY (document_id) REFERENCES docops_upload_documents(document_id)
+        )"""
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_upload_indexing_state_status "
+        "ON docops_upload_indexing_state(status, updated_at)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_upload_indexing_state_session "
+        "ON docops_upload_indexing_state(session_id, updated_at)"
+    )
 
     current = conn.execute(
         "SELECT value FROM docops_upload_meta WHERE key='schema_version'"
@@ -343,6 +387,160 @@ def _bounded(value: str, *, limit: int) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[:limit]
+
+
+def _safe_json_obj(payload: str) -> dict[str, Any]:
+    try:
+        decoded = json.loads(payload or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
+
+
+def _source_cache_key(document_sha256: str, extractor_version: str) -> str:
+    digest = hashlib.sha256(f"{document_sha256}:{extractor_version}".encode("utf-8")).hexdigest()
+    return f"SRC-{digest[:32]}"
+
+
+def _load_vector_store_id() -> str:
+    cfg = load_runtime_config()
+    assistant_cfg = cfg.assistant if hasattr(cfg, "assistant") else cfg.get("assistant", {})
+    configured = (
+        assistant_cfg.get("vector_store_ids", []) if isinstance(assistant_cfg, dict) else []
+    )
+    if configured:
+        return configured[0]
+    env_fallback = (os.getenv("OPENAI_VECTOR_STORE_ID") or "").strip()
+    return env_fallback
+
+
+def _openai_request(
+    method: str,
+    path: str,
+    *,
+    headers: dict[str, str],
+    timeout: int = DEFAULT_INDEXING_HTTP_TIMEOUT,
+    attempts: int = DEFAULT_INDEXING_HTTP_ATTEMPTS,
+    data: Any | None = None,
+    files: Any | None = None,
+    json_body: dict[str, Any] | None = None,
+) -> requests.Response:
+    base = "https://api.openai.com/v1"
+    url = f"{base}{path}"
+    last_error: Exception | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            response = requests.request(
+                method,
+                url,
+                headers=headers,
+                timeout=timeout,
+                data=data,
+                files=files,
+                json=json_body,
+            )
+        except requests.RequestException as exc:
+            last_error = exc
+            if attempt >= attempts:
+                raise RuntimeError(f"indexing request failed: {exc}") from exc
+            time.sleep(DEFAULT_INDEXING_HTTP_BACKOFF_SECONDS * attempt)
+            continue
+        if response.status_code in {429, 500, 502, 503, 504} and attempt < attempts:
+            time.sleep(DEFAULT_INDEXING_HTTP_BACKOFF_SECONDS * attempt)
+            continue
+        return response
+    if last_error is not None:
+        raise RuntimeError(f"indexing request failed: {last_error}") from last_error
+    raise RuntimeError("indexing request failed")
+
+
+def _build_openai_headers(api_key: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "OpenAI-Beta": "assistants=v2",
+    }
+
+
+def _indexing_state_from_row(row: sqlite3.Row | None) -> dict[str, Any]:
+    if row is None:
+        return {
+            "status": "",
+            "approval_id": "",
+            "openai_file_id": "",
+            "vector_store_id": "",
+            "vector_store_file_id": "",
+            "vector_status": "",
+            "attempts": 0,
+            "last_error": "",
+            "updated_at": "",
+        }
+    return {
+        "status": row["status"],
+        "approval_id": row["approval_id"],
+        "openai_file_id": row["openai_file_id"],
+        "vector_store_id": row["vector_store_id"],
+        "vector_store_file_id": row["vector_store_file_id"],
+        "vector_status": row["vector_status"],
+        "attempts": int(row["attempts"] or 0),
+        "last_error": _bounded(row["last_error"] or "", limit=MAX_ERROR_CHARS),
+        "updated_at": row["updated_at"] or "",
+    }
+
+
+def _set_indexing_state_conn(
+    conn: sqlite3.Connection,
+    *,
+    session_id: str,
+    document_id: str,
+    source_sha256: str,
+    extractor_version: str,
+    status: str,
+    source_cache_key: str,
+    approval_id: str = "",
+    request_id: str = "",
+    metadata: dict[str, Any] | None = None,
+    normalized_sha256: str = "",
+    normalized_path: str = "",
+) -> sqlite3.Row:
+    now = _utc_now_sql()
+    metadata_payload = _bounded(
+        json.dumps(metadata or {}, sort_keys=True), limit=MAX_INDEXING_METADATA_CHARS
+    )
+    conn.execute(
+        "INSERT INTO docops_upload_indexing_state "
+        "(document_id, session_id, source_sha256, extractor_version, source_cache_key, normalized_sha256, "
+        "normalized_path, status, approval_id, execution_key, requested_request_id, requested_at, updated_at, metadata_json) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(document_id) DO UPDATE SET "
+        "session_id=excluded.session_id, source_sha256=excluded.source_sha256, "
+        "extractor_version=excluded.extractor_version, source_cache_key=excluded.source_cache_key, "
+        "normalized_sha256=CASE WHEN excluded.normalized_sha256='' THEN docops_upload_indexing_state.normalized_sha256 ELSE excluded.normalized_sha256 END, "
+        "normalized_path=CASE WHEN excluded.normalized_path='' THEN docops_upload_indexing_state.normalized_path ELSE excluded.normalized_path END, "
+        "status=excluded.status, approval_id=CASE WHEN excluded.approval_id='' THEN docops_upload_indexing_state.approval_id ELSE excluded.approval_id END, "
+        "requested_request_id=CASE WHEN excluded.requested_request_id='' THEN docops_upload_indexing_state.requested_request_id ELSE excluded.requested_request_id END, "
+        "requested_at=CASE WHEN docops_upload_indexing_state.requested_at IS NULL THEN excluded.requested_at ELSE docops_upload_indexing_state.requested_at END, "
+        "updated_at=excluded.updated_at, metadata_json=excluded.metadata_json",
+        (
+            document_id,
+            session_id,
+            source_sha256,
+            extractor_version,
+            source_cache_key,
+            normalized_sha256,
+            normalized_path,
+            status,
+            approval_id,
+            "",
+            request_id,
+            now,
+            now,
+            metadata_payload,
+        ),
+    )
+    return conn.execute(
+        "SELECT * FROM docops_upload_indexing_state WHERE document_id=?",
+        (document_id,),
+    ).fetchone()
 
 
 def _public_upload_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -551,6 +749,10 @@ def register_uploaded_documents(upload_id: str, session_id: str, files: list[dic
             (CURRENT_EXTRACTOR_VERSION,),
         ).fetchall()
         jobs_by_document = {row["document_id"]: dict(row) for row in job_rows}
+        indexing_rows = conn.execute(
+            "SELECT document_id, status FROM docops_upload_indexing_state"
+        ).fetchall()
+        indexing_by_document = {row["document_id"]: row["status"] for row in indexing_rows}
 
     registered_rows.sort(key=lambda item: item["relative_path"])
     return {
@@ -572,6 +774,7 @@ def register_uploaded_documents(upload_id: str, session_id: str, files: list[dic
                 "queue_state": (
                     jobs_by_document.get(item["document_id"], {}).get("status") or "queued"
                 ),
+                "indexing_state": indexing_by_document.get(item["document_id"], ""),
                 "processing": {
                     "job_status": jobs_by_document.get(item["document_id"], {}).get("status")
                     or "queued",
@@ -752,6 +955,16 @@ def _document_processing_snapshot_conn(
     }
 
 
+def _document_indexing_snapshot_conn(conn: sqlite3.Connection, document_id: str) -> dict[str, Any]:
+    row = conn.execute(
+        "SELECT status, approval_id, openai_file_id, vector_store_id, vector_store_file_id, "
+        "vector_status, attempts, last_error, updated_at "
+        "FROM docops_upload_indexing_state WHERE document_id=?",
+        (document_id,),
+    ).fetchone()
+    return _indexing_state_from_row(row)
+
+
 def _session_upload_rows(
     conn: sqlite3.Connection, session_id: str, *, query: str = "", limit: int = 50
 ) -> list[sqlite3.Row]:
@@ -781,6 +994,7 @@ def list_session_uploaded_documents(
         documents = []
         for row in rows:
             status = _document_processing_snapshot_conn(conn, row["document_id"])
+            indexing = _document_indexing_snapshot_conn(conn, row["document_id"])
             documents.append(
                 {
                     "session_id": session_id,
@@ -797,6 +1011,8 @@ def list_session_uploaded_documents(
                     "source_session_id": row["source_session_id"],
                     "created_at": row["upload_created_at"],
                     "processing": status,
+                    "indexing": indexing,
+                    "indexing_state": indexing["status"],
                     "summary": (status["extraction"] or {}).get("summary")
                     if status["extraction"]
                     else "",
@@ -832,6 +1048,7 @@ def get_session_uploaded_document_status(session_id: str, document_id: str) -> d
         if row is None:
             return {"error": f"document '{document_id}' is not linked to session '{session_id}'"}
         status = _document_processing_snapshot_conn(conn, document_id)
+        indexing = _document_indexing_snapshot_conn(conn, document_id)
     return {
         "session_id": session_id,
         "document_id": row["document_id"],
@@ -846,6 +1063,8 @@ def get_session_uploaded_document_status(session_id: str, document_id: str) -> d
         "source_session_id": row["source_session_id"],
         "created_at": row["upload_created_at"],
         "processing": status,
+        "indexing": indexing,
+        "indexing_state": indexing["status"],
         "summary": (status["extraction"] or {}).get("summary") if status["extraction"] else "",
         "classification": (status["extraction"] or {}).get("tags") if status["extraction"] else [],
         "warnings": (status["extraction"] or {}).get("warnings") if status["extraction"] else [],
@@ -909,6 +1128,7 @@ def get_session_upload_batch_status(session_id: str, limit: int = 50) -> dict[st
                 "mime": item["mime"],
                 "reused": item["reused"],
                 "queue_state": item["processing"]["queue_state"],
+                "indexing_state": item["indexing"]["status"],
                 "summary": item["summary"],
                 "classification": item["classification"],
                 "warnings": item["warnings"],
@@ -918,6 +1138,433 @@ def get_session_upload_batch_status(session_id: str, limit: int = 50) -> dict[st
             }
             for item in listing["documents"]
         ],
+    }
+
+
+def _resolve_indexing_document_conn(
+    conn: sqlite3.Connection, *, session_id: str, document_id: str
+) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT d.document_id, d.sha256, d.byte_size, d.canonical_path, d.canonical_name, "
+        "e.extractor_version, e.status AS extraction_status, e.derived_root, e.updated_at AS extraction_updated_at "
+        "FROM docops_chat_session_upload_documents l "
+        "JOIN docops_upload_documents d ON d.document_id=l.document_id "
+        "LEFT JOIN docops_upload_extractions e ON e.document_id=d.document_id AND e.extractor_version=? "
+        "WHERE l.session_id=? AND l.document_id=? "
+        "ORDER BY l.linked_at DESC LIMIT 1",
+        (CURRENT_EXTRACTOR_VERSION, session_id, document_id),
+    ).fetchone()
+
+
+def prepare_uploaded_document_indexing(
+    *, session_id: str, document_id: str, request_id: str = ""
+) -> dict[str, Any]:
+    _validate_session_scope(session_id)
+    if not DOCUMENT_ID_PATTERN.fullmatch(document_id or ""):
+        raise ValueError("invalid document_id")
+    with _db() as conn:
+        row = _resolve_indexing_document_conn(conn, session_id=session_id, document_id=document_id)
+        if row is None:
+            return {"error": "uploaded document is not linked to this session"}
+        if (row["extraction_status"] or "") != "complete":
+            return {"error": "document extraction is not complete yet"}
+        source_key = _source_cache_key(row["sha256"], CURRENT_EXTRACTOR_VERSION)
+        state_row = conn.execute(
+            "SELECT * FROM docops_upload_indexing_state WHERE document_id=?",
+            (document_id,),
+        ).fetchone()
+        if state_row and state_row["status"] == "indexed":
+            return {
+                "document_id": document_id,
+                "session_id": session_id,
+                "indexing": _indexing_state_from_row(state_row),
+                "already_indexed": True,
+            }
+        updated = _set_indexing_state_conn(
+            conn,
+            session_id=session_id,
+            document_id=document_id,
+            source_sha256=row["sha256"],
+            extractor_version=CURRENT_EXTRACTOR_VERSION,
+            status="awaiting_approval",
+            source_cache_key=source_key,
+            request_id=_bounded(request_id, limit=128),
+            metadata={"flow": "approval_requested"},
+        )
+    return {
+        "document_id": document_id,
+        "session_id": session_id,
+        "indexing": _indexing_state_from_row(updated),
+        "already_indexed": False,
+    }
+
+
+def _update_indexing_progress_conn(
+    conn: sqlite3.Connection,
+    *,
+    document_id: str,
+    status: str | None = None,
+    approval_id: str | None = None,
+    execution_key: str | None = None,
+    openai_file_id: str | None = None,
+    vector_store_id: str | None = None,
+    vector_store_file_id: str | None = None,
+    vector_status: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    last_error: str | None = None,
+    increment_attempt: bool = False,
+    mark_approved: bool = False,
+    mark_started: bool = False,
+    mark_completed: bool = False,
+) -> sqlite3.Row:
+    now = _utc_now_sql()
+    updates = ["updated_at=?"]
+    params: list[Any] = [now]
+    if status is not None:
+        updates.append("status=?")
+        params.append(status)
+    if approval_id is not None:
+        updates.append("approval_id=?")
+        params.append(_bounded(approval_id, limit=128))
+    if execution_key is not None:
+        updates.append("execution_key=?")
+        params.append(_bounded(execution_key, limit=128))
+    if openai_file_id is not None:
+        updates.append("openai_file_id=?")
+        params.append(_bounded(openai_file_id, limit=128))
+    if vector_store_id is not None:
+        updates.append("vector_store_id=?")
+        params.append(_bounded(vector_store_id, limit=128))
+    if vector_store_file_id is not None:
+        updates.append("vector_store_file_id=?")
+        params.append(_bounded(vector_store_file_id, limit=128))
+    if vector_status is not None:
+        updates.append("vector_status=?")
+        params.append(_bounded(vector_status, limit=64))
+    if metadata is not None:
+        updates.append("metadata_json=?")
+        params.append(
+            _bounded(
+                json.dumps(metadata, sort_keys=True, ensure_ascii=False),
+                limit=MAX_INDEXING_METADATA_CHARS,
+            )
+        )
+    if last_error is not None:
+        updates.append("last_error=?")
+        params.append(_bounded(last_error, limit=MAX_ERROR_CHARS))
+    if increment_attempt:
+        updates.append("attempts=attempts+1")
+        updates.append("last_attempt_at=?")
+        params.append(now)
+    if mark_approved:
+        updates.append("approved_at=COALESCE(approved_at, ?)")
+        params.append(now)
+    if mark_started:
+        updates.append("started_at=COALESCE(started_at, ?)")
+        params.append(now)
+        updates.append("queued_at=COALESCE(queued_at, ?)")
+        params.append(now)
+    if mark_completed:
+        updates.append("completed_at=COALESCE(completed_at, ?)")
+        params.append(now)
+    params.append(document_id)
+    conn.execute(
+        f"UPDATE docops_upload_indexing_state SET {', '.join(updates)} WHERE document_id=?",
+        tuple(params),
+    )
+    return conn.execute(
+        "SELECT * FROM docops_upload_indexing_state WHERE document_id=?",
+        (document_id,),
+    ).fetchone()
+
+
+def _indexing_source_document_conn(
+    conn: sqlite3.Connection, *, session_id: str, document_id: str
+) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT d.document_id, d.sha256, d.byte_size, d.canonical_path, d.canonical_name, "
+        "d.canonical_mime_type, e.extractor_version, e.status AS extraction_status, e.derived_root "
+        "FROM docops_chat_session_upload_documents l "
+        "JOIN docops_upload_documents d ON d.document_id=l.document_id "
+        "LEFT JOIN docops_upload_extractions e ON e.document_id=d.document_id AND e.extractor_version=? "
+        "WHERE l.session_id=? AND l.document_id=? "
+        "ORDER BY l.linked_at DESC LIMIT 1",
+        (CURRENT_EXTRACTOR_VERSION, session_id, document_id),
+    ).fetchone()
+
+
+def _normalized_payload_for_indexing(derived_root: str) -> tuple[str, str, bytes]:
+    root = Path(derived_root)
+    txt = root / "normalized.txt"
+    md = root / "normalized.md"
+    candidate = txt if txt.is_file() else md
+    if not candidate.is_file():
+        raise ValueError("normalized extraction output is missing")
+    content = candidate.read_text(encoding="utf-8", errors="replace")
+    payload = content.encode("utf-8")
+    return (str(candidate), hashlib.sha256(payload).hexdigest(), payload)
+
+
+def _indexing_failure_result(
+    conn: sqlite3.Connection, *, document_id: str, error: str
+) -> dict[str, Any]:
+    row = _update_indexing_progress_conn(
+        conn,
+        document_id=document_id,
+        status="failed",
+        last_error=error,
+        metadata={"failure": _bounded(error, limit=200)},
+    )
+    return {
+        "document_id": document_id,
+        "indexing": _indexing_state_from_row(row),
+        "error": _bounded(error, limit=MAX_ERROR_CHARS),
+    }
+
+
+def index_uploaded_documents(
+    *,
+    session_id: str,
+    document_id: str,
+    request_id: str = "",
+    _approval_id: str = "",
+    _execution_key: str = "",
+) -> dict[str, Any]:
+    _validate_session_scope(session_id)
+    if not DOCUMENT_ID_PATTERN.fullmatch(document_id or ""):
+        raise ValueError("invalid document_id")
+
+    with _db() as conn:
+        source = _indexing_source_document_conn(
+            conn, session_id=session_id, document_id=document_id
+        )
+        if source is None:
+            return {"error": "uploaded document is not linked to this session"}
+        if (source["extraction_status"] or "") != "complete":
+            return {"error": "document extraction is not complete yet"}
+        source_key = _source_cache_key(source["sha256"], CURRENT_EXTRACTOR_VERSION)
+        state = conn.execute(
+            "SELECT * FROM docops_upload_indexing_state WHERE document_id=?",
+            (document_id,),
+        ).fetchone()
+        if state and state["status"] == "indexed":
+            return {
+                "document_id": document_id,
+                "session_id": session_id,
+                "indexing": _indexing_state_from_row(state),
+                "reused": True,
+            }
+        if state is None:
+            state = _set_indexing_state_conn(
+                conn,
+                session_id=session_id,
+                document_id=document_id,
+                source_sha256=source["sha256"],
+                extractor_version=CURRENT_EXTRACTOR_VERSION,
+                status="queued",
+                source_cache_key=source_key,
+                approval_id=_approval_id,
+                request_id=request_id,
+                metadata={"flow": "approval_executing"},
+            )
+        try:
+            path = Path(source["canonical_path"]).resolve(strict=True)
+            path.relative_to(UPLOADS_DIR.resolve())
+            if path.is_symlink() or not path.is_file():
+                return _indexing_failure_result(
+                    conn,
+                    document_id=document_id,
+                    error="source document path is not a regular upload file",
+                )
+            if path.stat().st_size != int(source["byte_size"]):
+                return _indexing_failure_result(
+                    conn,
+                    document_id=document_id,
+                    error="document size mismatch during indexing integrity recheck",
+                )
+            if sha256_file(path) != source["sha256"]:
+                return _indexing_failure_result(
+                    conn,
+                    document_id=document_id,
+                    error="document hash mismatch during indexing integrity recheck",
+                )
+            normalized_path, normalized_sha256, normalized_payload = (
+                _normalized_payload_for_indexing(source["derived_root"])
+            )
+        except (OSError, ValueError) as exc:
+            return _indexing_failure_result(
+                conn,
+                document_id=document_id,
+                error=f"indexing integrity validation failed: {exc}",
+            )
+        state = _update_indexing_progress_conn(
+            conn,
+            document_id=document_id,
+            status="queued",
+            approval_id=_approval_id or state["approval_id"],
+            execution_key=_execution_key or state["execution_key"],
+            metadata={"flow": "approval_executing", "normalized_path": normalized_path},
+            mark_approved=True,
+        )
+        conn.execute(
+            "UPDATE docops_upload_indexing_state SET normalized_sha256=?, normalized_path=?, updated_at=? "
+            "WHERE document_id=?",
+            (normalized_sha256, normalized_path, _utc_now_sql(), document_id),
+        )
+        cached = conn.execute(
+            "SELECT * FROM docops_upload_indexing_state WHERE source_cache_key=? AND normalized_sha256=? "
+            "AND openai_file_id<>'' AND vector_store_file_id<>'' AND status='indexed' "
+            "ORDER BY updated_at DESC LIMIT 1",
+            (source_key, normalized_sha256),
+        ).fetchone()
+        if cached is not None:
+            state = _update_indexing_progress_conn(
+                conn,
+                document_id=document_id,
+                status="indexed",
+                openai_file_id=cached["openai_file_id"],
+                vector_store_id=cached["vector_store_id"],
+                vector_store_file_id=cached["vector_store_file_id"],
+                vector_status=cached["vector_status"] or "completed",
+                metadata={"flow": "cache_reused"},
+                mark_completed=True,
+            )
+            return {
+                "document_id": document_id,
+                "session_id": session_id,
+                "indexing": _indexing_state_from_row(state),
+                "reused": True,
+            }
+
+        api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+        if not api_key:
+            return {"error": "OPENAI_API_KEY is required for indexing"}
+        vector_store_id = _load_vector_store_id()
+        if not vector_store_id:
+            return {"error": "assistant vector_store_id is not configured"}
+        state = _update_indexing_progress_conn(
+            conn,
+            document_id=document_id,
+            status="indexing",
+            approval_id=_approval_id or state["approval_id"],
+            execution_key=_execution_key or state["execution_key"],
+            vector_store_id=vector_store_id,
+            metadata={"flow": "indexing_started"},
+            increment_attempt=True,
+            mark_approved=True,
+            mark_started=True,
+        )
+        openai_file_id = str(state["openai_file_id"] or "")
+        vector_store_file_id = str(state["vector_store_file_id"] or "")
+        vector_status = str(state["vector_status"] or "")
+
+    headers = _build_openai_headers(api_key)
+    if not openai_file_id:
+        response = _openai_request(
+            "POST",
+            "/files",
+            headers={
+                **headers,
+                "Idempotency-Key": f"idx-file-{document_id}-{normalized_sha256[:24]}",
+            },
+            data={"purpose": "assistants"},
+            files={"file": (f"{document_id}.txt", normalized_payload, "text/plain")},
+        )
+        if response.status_code >= 400:
+            with _db() as conn:
+                return _indexing_failure_result(
+                    conn,
+                    document_id=document_id,
+                    error=f"openai files upload failed: {response.status_code} {response.text[:300]}",
+                )
+        payload = _safe_json_obj(response.text)
+        openai_file_id = str(payload.get("id") or "")
+        if not openai_file_id:
+            with _db() as conn:
+                return _indexing_failure_result(
+                    conn,
+                    document_id=document_id,
+                    error="openai files upload response did not contain an id",
+                )
+        with _db() as conn:
+            _update_indexing_progress_conn(
+                conn,
+                document_id=document_id,
+                openai_file_id=openai_file_id,
+                metadata={"flow": "file_uploaded"},
+            )
+
+    if vector_store_file_id:
+        response = _openai_request(
+            "GET",
+            f"/vector_stores/{vector_store_id}/files/{vector_store_file_id}",
+            headers=headers,
+        )
+        if response.status_code < 400:
+            payload = _safe_json_obj(response.text)
+            vector_status = str(payload.get("status") or vector_status or "")
+        elif response.status_code == 404:
+            vector_store_file_id = ""
+            vector_status = ""
+        else:
+            with _db() as conn:
+                return _indexing_failure_result(
+                    conn,
+                    document_id=document_id,
+                    error=f"vector store status check failed: {response.status_code} {response.text[:300]}",
+                )
+
+    if not vector_store_file_id:
+        response = _openai_request(
+            "POST",
+            f"/vector_stores/{vector_store_id}/files",
+            headers={
+                **headers,
+                "Content-Type": "application/json",
+                "Idempotency-Key": f"idx-vs-{document_id}-{normalized_sha256[:24]}",
+            },
+            json_body={"file_id": openai_file_id},
+        )
+        if response.status_code >= 400:
+            with _db() as conn:
+                return _indexing_failure_result(
+                    conn,
+                    document_id=document_id,
+                    error=f"vector store membership failed: {response.status_code} {response.text[:300]}",
+                )
+        payload = _safe_json_obj(response.text)
+        vector_store_file_id = str(payload.get("id") or "")
+        vector_status = str(payload.get("status") or vector_status or "in_progress")
+        if not vector_store_file_id:
+            with _db() as conn:
+                return _indexing_failure_result(
+                    conn,
+                    document_id=document_id,
+                    error="vector store response did not contain a membership id",
+                )
+
+    final_state = "indexed" if vector_status in {"completed", "succeeded", "ready"} else "indexing"
+    with _db() as conn:
+        row = _update_indexing_progress_conn(
+            conn,
+            document_id=document_id,
+            status=final_state,
+            openai_file_id=openai_file_id,
+            vector_store_id=vector_store_id,
+            vector_store_file_id=vector_store_file_id,
+            vector_status=vector_status
+            or ("completed" if final_state == "indexed" else "in_progress"),
+            metadata={
+                "flow": "indexing_complete" if final_state == "indexed" else "indexing_pending"
+            },
+            mark_completed=final_state == "indexed",
+            last_error="" if final_state == "indexed" else None,
+        )
+    return {
+        "document_id": document_id,
+        "session_id": session_id,
+        "indexing": _indexing_state_from_row(row),
+        "reused": False,
     }
 
 
@@ -1063,6 +1710,7 @@ def attach_session_upload_metadata(
             linked = []
             for row in rows:
                 status = _document_processing_snapshot_conn(conn, row["document_id"])
+                indexing = _document_indexing_snapshot_conn(conn, row["document_id"])
                 linked.append(
                     {
                         "document_id": row["document_id"],
@@ -1072,6 +1720,7 @@ def attach_session_upload_metadata(
                         "mime": row["mime_type"],
                         "reused": bool(row["reused"]),
                         "queue_state": status["queue_state"],
+                        "indexing_state": indexing["status"],
                         "summary": (
                             status["extraction"]["summary"] if status["extraction"] else ""
                         ),
@@ -1882,6 +2531,64 @@ def list_processing_jobs(limit: int = 100) -> dict[str, Any]:
     return {"count": len(rows), "jobs": [dict(row) for row in rows]}
 
 
+def get_upload_processor_health(stale_seconds: int = DEFAULT_LEASE_SECONDS * 3) -> dict[str, Any]:
+    now = _utc_now_sql()
+    with _db() as conn:
+        processing_counts = {
+            row["status"]: int(row["count"])
+            for row in conn.execute(
+                "SELECT status, COUNT(*) AS count FROM docops_upload_jobs GROUP BY status"
+            ).fetchall()
+        }
+        extraction_failures = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM docops_upload_extractions WHERE status IN ('error', 'unavailable')"
+            ).fetchone()[0]
+        )
+        indexing_counts = {
+            row["status"]: int(row["count"])
+            for row in conn.execute(
+                "SELECT status, COUNT(*) AS count FROM docops_upload_indexing_state GROUP BY status"
+            ).fetchall()
+        }
+        indexing_failures = int(indexing_counts.get("failed", 0))
+        awaiting_approvals = int(indexing_counts.get("awaiting_approval", 0))
+        stale_running = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM docops_upload_jobs "
+                "WHERE status='running' AND heartbeat_at IS NOT NULL AND heartbeat_at < ?",
+                (_plus_seconds_sql(now, -stale_seconds),),
+            ).fetchone()[0]
+        )
+    return {
+        "processing": {
+            "queue_depths": {
+                "queued": int(processing_counts.get("queued", 0)),
+                "running": int(processing_counts.get("running", 0)),
+                "retry": int(processing_counts.get("retry", 0)),
+                "failed": int(processing_counts.get("failed", 0)),
+                "complete": int(processing_counts.get("complete", 0)),
+            },
+            "stale_running_jobs": stale_running,
+            "extractor_version": CURRENT_EXTRACTOR_VERSION,
+            "extraction_failures": extraction_failures,
+        },
+        "indexing": {
+            "queue_depths": {
+                "awaiting_approval": awaiting_approvals,
+                "queued": int(indexing_counts.get("queued", 0)),
+                "indexing": int(indexing_counts.get("indexing", 0)),
+                "indexed": int(indexing_counts.get("indexed", 0)),
+                "failed": indexing_failures,
+            },
+            "awaiting_approvals": awaiting_approvals,
+            "indexing_failures": indexing_failures,
+            "vector_store_ready": bool(_load_vector_store_id()),
+            "openai_api_ready": bool((os.getenv("OPENAI_API_KEY") or "").strip()),
+        },
+    }
+
+
 UPLOAD_SCHEMAS = [
     {
         "type": "function",
@@ -1973,6 +2680,23 @@ UPLOAD_SCHEMAS = [
             "required": ["session_id"],
         },
     },
+    {
+        "type": "function",
+        "name": "index_uploaded_documents",
+        "description": (
+            "Request or execute approval-gated remote vector indexing for uploaded "
+            "documents that are already locally processed."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string"},
+                "document_id": {"type": "string"},
+                "request_id": {"type": "string"},
+            },
+            "required": ["session_id", "document_id"],
+        },
+    },
 ]
 
 UPLOAD_DISPATCH = {
@@ -1981,4 +2705,5 @@ UPLOAD_DISPATCH = {
     "get_uploaded_document": get_uploaded_document,
     "get_uploaded_document_processing_status": get_uploaded_document_processing_status,
     "retry_uploaded_document_processing": retry_uploaded_document_processing,
+    "index_uploaded_documents": index_uploaded_documents,
 }

@@ -10,6 +10,7 @@
     "generate_image_asset": "approval",
     "edit_image_asset": "approval",
     "create_image_variation": "approval",
-    "delete_image_asset": "approval"
+    "delete_image_asset": "approval",
+    "index_uploaded_documents": "approval"
   }
 }

@@ -181,6 +181,13 @@ test("Full Power routes and bridge URL derivation are narrowly scoped", () => {
     ),
     true,
   );
+  assert.equal(
+    isResponsesRoute(
+      "POST",
+      "/responses/sessions/example_123/uploads/documents/DOC-0123456789abcdef0123456789abcdef/index",
+    ),
+    true,
+  );
   assert.equal(isResponsesRoute("POST", "/responses/sessions/example_123/uploads/link"), true);
   assert.equal(isResponsesRoute("GET", `/responses/artifacts/ART-${"a".repeat(32)}`), true);
   assert.equal(isResponsesRoute("GET", "/responses/sessions/example_123/artifacts"), true);
