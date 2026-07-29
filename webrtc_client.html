@@ -3367,7 +3367,7 @@
           accept.textContent = "Accept";
           accept.onclick = async () => { await memoryRequest(`/memories/${memory.id}/accept`, {method: "POST", body: JSON.stringify({content: input.value})}); await reviewMemories(); };
           const reject = document.createElement("button");
-          reject.textContent = "Reject / forget";
+          reject.textContent = "Reject";
           reject.onclick = async () => { await memoryRequest(`/memories/${memory.id}/reject`, {method: "POST", body: "{}"}); await reviewMemories(); };
           row.append(input, accept, reject);
           memoryItems.append(row);
