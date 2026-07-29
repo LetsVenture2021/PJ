@@ -1268,13 +1268,34 @@ def delegate_advanced_task(prompt, *, client=None, cfg=None):
         truncated = len(detailed_text) > MAX_DELEGATION_DETAIL_LENGTH
         if truncated:
             detailed_text = detailed_text[:MAX_DELEGATION_DETAIL_LENGTH]
+        generated_images = completion.get("generated_images") or []
+        artifacts = completion.get("artifacts") or []
+        summary = _voice_safe_summary(completion["text"])
+        if not summary and generated_images:
+            count = len(generated_images)
+            summary = (
+                f"Generated {count} image{'s' if count != 1 else ''} and saved "
+                f"{'them' if count != 1 else 'it'} as downloadable files."
+            )
+        if not summary and artifacts:
+            summary = f"Produced {len(artifacts)} downloadable artifact(s)."
         return {
-            "summary": _voice_safe_summary(completion["text"]),
+            "summary": summary,
             "details": {
                 "text": detailed_text,
                 "text_truncated": truncated,
                 "citations": completion["citations"][:MAX_DELEGATION_CITATIONS],
                 "sources": completion["sources"][:MAX_DELEGATION_CITATIONS],
+                "generated_images": generated_images[:MAX_DELEGATION_CITATIONS],
+                "artifacts": [
+                    {
+                        "artifact_id": a.get("artifact_id"),
+                        "filename": a.get("filename"),
+                        "format": a.get("format"),
+                        "download_url": a.get("download_url"),
+                    }
+                    for a in artifacts[:MAX_DELEGATION_CITATIONS]
+                ],
             },
         }
     finally:
