@@ -1,0 +1,44 @@
+{
+  "approved_at": "2026-07-29",
+  "approved_by": "repository-owner",
+  "change_note": "Bound exact corpus, census, evidence, and evaluator bytes for traceable release v2.",
+  "evaluated_at": "2026-07-29T09:07:35.722085+00:00",
+  "evaluation_id": "n8n-eval-378691098c94a0b2",
+  "evaluator": "scripts/evaluate_n8n_corpus.py",
+  "evidence_set_version": 2,
+  "gates_passed": true,
+  "inputs": {
+    "corpus": {
+      "path": "documents/n8n-capability-corpus-v2.md",
+      "sha256": "3a871df9695e8a7a75a72477e3a32b32d41ee414df5447e96263ddf71dbf8c23"
+    },
+    "evaluation_evidence": {
+      "path": "documents/n8n-evaluation-evidence-v2.json",
+      "sha256": "b0efaabd2e4ee2786eaebf092e5d0030afff979f3cf4d7166471954f64cb95ab"
+    },
+    "evaluator": {
+      "path": "scripts/evaluate_n8n_corpus.py",
+      "sha256": "74d5dfaf60ac441fed3ab8c4b1849ac4f0d847c80f9659425a1a40dedd4c69bd"
+    },
+    "source_census": {
+      "path": "documents/n8n-source-census-v2.json",
+      "sha256": "082e281e4d0052c55773166a400e71932340eeb657120e2a944b88b71fdbb807"
+    }
+  },
+  "metrics": {
+    "canonical_pages_covered": 40,
+    "canonical_pages_total": 40,
+    "credential_exposures": 0,
+    "inaccessible_sources_dispositioned": 0,
+    "inaccessible_sources_total": 0,
+    "invented_node_parameters": 0,
+    "retrieval_cases_total": 10,
+    "retrieval_top5_passed": 10,
+    "security_warning_cases_passed": 5,
+    "security_warning_cases_total": 5
+  },
+  "prior_sha256": "e659c8bd164734ccb5ad043e2a8a56cef0bb9989a12381c27b2d0f74163002bc",
+  "registry_sha256": "4386258128890b20be7e846562b5fbd2c5966364ecef418b0d91e175128b67d8",
+  "schema_version": "2",
+  "supersedes": "documents/n8n-evaluation-receipt-v1.json"
+}
