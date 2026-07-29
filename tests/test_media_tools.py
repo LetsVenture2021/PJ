@@ -287,3 +287,68 @@ class TestDeepResearch(unittest.TestCase):
             finally:
                 docops._DB_PATH = old_db
                 document_uploads.UPLOADS_DIR = old_dir
+
+
+class TestSemanticMemory(unittest.TestCase):
+    def _fake_client(self):
+        from types import SimpleNamespace
+
+        def create(model, input, dimensions):
+            data = []
+            for text in input:
+                seed = sum(ord(c) for c in text[:50])
+                vec = [((seed * (i + 3)) % 97) / 97.0 for i in range(8)]
+                data.append(SimpleNamespace(embedding=vec))
+            return SimpleNamespace(data=data)
+
+        return SimpleNamespace(embeddings=SimpleNamespace(create=create))
+
+    def test_search_validates_and_ranks_with_cache(self):
+        import sqlite3
+        import tempfile
+
+        from ops.shared.semantic_memory import semantic_search_memory
+
+        self.assertIn("error", semantic_search_memory(""))
+        self.assertIn("error", semantic_search_memory("x", kinds="bogus"))
+
+        with tempfile.TemporaryDirectory() as temp:
+            db = Path(temp) / "mem.sqlite3"
+            conn = sqlite3.connect(db)
+            conn.execute(
+                "CREATE TABLE notes (id TEXT, topic TEXT, content TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)"
+            )
+            conn.execute(
+                "INSERT INTO notes VALUES ('n1', 'lending', 'decided lender terms: 2 points', CURRENT_TIMESTAMP)"
+            )
+            conn.execute(
+                "INSERT INTO notes VALUES ('n2', 'travel', 'flight to austin booked', CURRENT_TIMESTAMP)"
+            )
+            conn.commit()
+            result = semantic_search_memory(
+                "lender decision", kinds="notes", client=self._fake_client(), db_path=db
+            )
+            self.assertEqual(result["count"], 2)
+            self.assertEqual({m["ref"] for m in result["matches"]}, {"n1", "n2"})
+            cached = (
+                sqlite3.connect(db).execute("SELECT COUNT(*) FROM semantic_vectors").fetchone()[0]
+            )
+            self.assertEqual(cached, 2)
+
+
+class TestPJMcpServer(unittest.TestCase):
+    def test_protocol_and_unknown_ids(self):
+        import pj_mcp_server
+
+        init = pj_mcp_server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+        self.assertEqual(init["result"]["serverInfo"]["name"], "pj-knowledge")
+        tools = pj_mcp_server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        self.assertEqual(
+            [t["name"] for t in tools["result"]["tools"]], ["search", "fetch", "list_open_tasks"]
+        )
+        self.assertIsNone(
+            pj_mcp_server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        )
+        self.assertIn("error", pj_mcp_server._fetch("bogus:zzz"))
+        missing = pj_mcp_server.handle({"jsonrpc": "2.0", "id": 3, "method": "nope"})
+        self.assertEqual(missing["error"]["code"], -32601)

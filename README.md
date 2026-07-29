@@ -302,6 +302,17 @@ Keep this service private or place it behind TLS and access controls. Set
 `--bind` controls its listener. The built-in HTML client is deliberately
 loopback-only when `realtime_server.py` starts.
 
+### PJ knowledge MCP server
+
+```bash
+python pj_mcp_server.py
+```
+
+Speaks MCP over stdio and exposes read-only `search`, `fetch`, and
+`list_open_tasks` over PJ's notes, tasks, and uploaded documents - the
+search/fetch interface deep-research-style consumers expect. Search is
+semantic (embeddings cached in SQLite) with keyword fallback.
+
 ### Hugging Face MCP server
 
 ```bash

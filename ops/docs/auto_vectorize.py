@@ -59,6 +59,9 @@ def vectorize_document_export(doc_id: str, version: int = 0) -> bool:
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
         if _ledger_seen(service._DB_PATH, digest, store_id):
             return True  # already embedded; identical re-exports are a no-op
+        if _near_duplicate(service._DB_PATH, doc_id, content, store_id):
+            _ledger_seen(service._DB_PATH, digest, store_id, record=True)
+            return True  # semantically near-identical to an embedded version
         from openai import OpenAI
 
         client = OpenAI()
@@ -70,3 +73,42 @@ def vectorize_document_export(doc_id: str, version: int = 0) -> bool:
         return True
     except Exception:
         return False
+
+
+def _near_duplicate(db_path, doc_id: str, content: str, store_id: str) -> bool:
+    """A re-export with trivial edits should not re-embed the document."""
+    try:
+        from ops.shared import embeddings
+
+        kind = f"vecdedupe:{store_id}"
+        vector = embeddings.embed_texts([content])[0]
+        conn = embeddings._conn(db_path)
+        try:
+            rows = conn.execute(
+                "SELECT ref_id, vector FROM semantic_vectors WHERE kind=?", (kind,)
+            ).fetchall()
+            for ref_id, blob in rows:
+                if (
+                    ref_id != doc_id
+                    and embeddings.cosine(vector, embeddings._unpack(blob))
+                    >= embeddings.NEAR_DUPLICATE_SIMILARITY
+                ):
+                    return True
+            import hashlib as _hashlib
+
+            conn.execute(
+                "INSERT OR REPLACE INTO semantic_vectors (kind, ref_id, content_sha, vector)"
+                " VALUES (?,?,?,?)",
+                (
+                    kind,
+                    doc_id,
+                    _hashlib.sha256(content.encode()).hexdigest(),
+                    embeddings._pack(vector),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:
+        return False
+    return False

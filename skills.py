@@ -331,6 +331,12 @@ from ops.shared import research as _research  # noqa: E402
 TOOL_SCHEMAS.extend(_research.RESEARCH_SCHEMAS)
 DISPATCH_TABLE.update(_research.RESEARCH_DISPATCH)
 
+# --- Semantic memory: embedding search and clustering ------------------------
+from ops.shared import semantic_memory as _semantic  # noqa: E402
+
+TOOL_SCHEMAS.extend(_semantic.SEMANTIC_SCHEMAS)
+DISPATCH_TABLE.update(_semantic.SEMANTIC_DISPATCH)
+
 # --- ChiefOps: executive operations toolkit ----------------------------------
 # Calendar, reminders, mail drafts, relationship memory, portfolio,
 # commitments, revenue pipeline, decision journal, risk register, web
