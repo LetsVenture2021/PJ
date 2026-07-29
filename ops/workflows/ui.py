@@ -26,7 +26,9 @@ def create_workflow_blueprint(available_tools: set[str] | None = None) -> Bluepr
                 WorkflowDefinition.from_dict(payload.get("workflow"))
             )
             return jsonify(WorkflowCompiler(tools).dry_run(compiled, payload.get("inputs", {})))
-        except (WorkflowError, AttributeError, json.JSONDecodeError) as exc:
+        except WorkflowError as exc:
             return jsonify({"error": str(exc)}), 400
+        except (AttributeError, json.JSONDecodeError):
+            return jsonify({"error": "Invalid workflow payload."}), 400
 
     return blueprint
