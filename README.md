@@ -20,6 +20,7 @@ voice, a local browser client, and an optional Cloudflare Worker edge proxy.
 - [GitHub security controls](docs/security-controls.md)
 - [Dependency audit report (July 28, 2026)](docs/dependency-audit-2026-07-28.md)
 - [Hugging Face MCP server setup and usage](docs/huggingface-mcp-server.md)
+- [Google Cloud MCP server setup and usage](docs/google-cloud-mcp-server.md)
 
 ## What works
 
@@ -351,6 +352,18 @@ python huggingface_mcp_server.py
 
 It speaks MCP over stdio. Public metadata search needs no token; inference and
 authorized repositories require `HF_TOKEN`.
+
+### Google Cloud MCP server
+
+```bash
+python google_cloud_mcp_server.py
+```
+
+It speaks MCP over stdio and exposes bounded, read-only project and Cloud Run
+discovery. On Google Cloud it uses an attached service account through the
+metadata server; local development can supply a short-lived
+`GOOGLE_CLOUD_ACCESS_TOKEN`. Configuration and least-privilege setup are
+documented in [the Google Cloud MCP server guide](docs/google-cloud-mcp-server.md).
 
 ### Knowledge ingestion
 

@@ -48,6 +48,7 @@ class RuntimeConfig:
     providers: dict[str, Any]
     execution_modes: dict[str, Any]
     collaboration: dict[str, Any]
+    google_cloud: GoogleCloudSettings
     sources: dict[str, Path]
 
 
@@ -57,6 +58,18 @@ class ConversationRoutingSettings:
     timeout_budgets_ms: dict[str, int]
     maximum_estimated_spend_usd: float
     safe_fallback_order: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class GoogleCloudSettings:
+    """Bounded settings for the read-only Google Cloud MCP server."""
+
+    project: str
+    location: str
+    timeout_seconds: int
+    resource_manager_api: str
+    cloud_run_api: str
+    metadata_token_url: str
 
 
 EXECUTION_MODE_FIELDS = {"capability", "latency", "tools", "spend", "privacy"}
@@ -439,6 +452,17 @@ def load_runtime_config(
             "identity_provider": "",
             "tenant_store": "",
         },
+        "google_cloud": {
+            "project": "",
+            "location": "us-central1",
+            "timeout_seconds": 30,
+            "resource_manager_api": "https://cloudresourcemanager.googleapis.com/v3",
+            "cloud_run_api": "https://run.googleapis.com/v2",
+            "metadata_token_url": (
+                "http://metadata.google.internal/computeMetadata/v1/instance/"
+                "service-accounts/default/token"
+            ),
+        },
     }
 
     if environ.get("PJ_MODEL"):
@@ -522,6 +546,35 @@ def load_runtime_config(
                 + ", ".join(missing)
             )
 
+    google_cloud = sections["google_cloud"]
+    if not isinstance(google_cloud, dict):
+        raise ConfigError("google_cloud configuration must be an object")
+    for field in (
+        "project",
+        "location",
+        "resource_manager_api",
+        "cloud_run_api",
+        "metadata_token_url",
+    ):
+        if not isinstance(google_cloud.get(field), str):
+            raise ConfigError(f"google_cloud.{field} must be a string")
+    timeout = google_cloud.get("timeout_seconds")
+    if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 120:
+        raise ConfigError("google_cloud.timeout_seconds must be an integer from 1 to 120")
+    for field in ("resource_manager_api", "cloud_run_api"):
+        if not google_cloud[field].startswith("https://"):
+            raise ConfigError(f"google_cloud.{field} must use HTTPS")
+    if not google_cloud["metadata_token_url"].startswith("http://metadata.google.internal/"):
+        raise ConfigError("google_cloud.metadata_token_url must use the Google metadata host")
+    google_cloud_settings = GoogleCloudSettings(
+        project=google_cloud["project"].strip(),
+        location=google_cloud["location"].strip(),
+        timeout_seconds=timeout,
+        resource_manager_api=google_cloud["resource_manager_api"].rstrip("/"),
+        cloud_run_api=google_cloud["cloud_run_api"].rstrip("/"),
+        metadata_token_url=google_cloud["metadata_token_url"],
+    )
+
     return RuntimeConfig(
         profile=selected,
         assistant=assistant,
@@ -533,6 +586,7 @@ def load_runtime_config(
         providers=copy.deepcopy(sections["providers"]),
         execution_modes=copy.deepcopy(sections["execution_modes"]),
         collaboration=copy.deepcopy(collaboration),
+        google_cloud=google_cloud_settings,
         sources={
             "assistant": assistant_path,
             "mcp_servers": mcp_path,
