@@ -61,6 +61,24 @@ CODEXOPS_SCHEMAS = [
     }
 ]
 
+CODEXOPS_SCHEMAS.append(
+    {
+        "type": "function",
+        "name": "codex_analyze",
+        "description": (
+            "Automatically delegate code-related prompts (review, explain, "
+            "debug, plan changes) to a local Codex thread in a read-only "
+            "sandbox. Use run_codex_task with approval when edits are needed."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"prompt": {"type": "string"}},
+            "required": ["prompt"],
+        },
+    }
+)
+
 CODEXOPS_DISPATCH = {
-    "run_codex_task": lambda prompt="", sandbox="read-only": run_codex_task(prompt, sandbox)
+    "run_codex_task": lambda prompt="", sandbox="read-only": run_codex_task(prompt, sandbox),
+    "codex_analyze": lambda prompt="": run_codex_task(prompt, "read-only"),
 }
