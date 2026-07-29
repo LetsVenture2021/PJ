@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pj.local/contracts/extensions/local-readonly-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "name",
+    "input_schema",
+    "output_schema"
+  ],
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "input_schema": {
+      "type": "object"
+    },
+    "output_schema": {
+      "type": "object"
+    }
+  }
+}

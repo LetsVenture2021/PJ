@@ -1,5 +1,10 @@
 # End-to-end architecture
 
+Normative cross-cutting decisions are indexed in the
+[architecture decision records](adr/README.md). Release evidence is governed by
+the [accessibility and security checklists](release-checklists.md) and the
+[measurable success criteria](success-measures.md).
+
 PJ has one Python runtime with several entry surfaces, an optional Cloudflare
 Worker in front of browser API traffic, and a static browser client that uses
 both HTTP and WebRTC. The Worker is an authenticated proxy and signaling
