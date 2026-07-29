@@ -33,5 +33,5 @@
     "max_input_chars": 20000,
     "max_output_chars": 30000
   },
-  "shell_enabled": false
+  "shell_enabled": true
 }
