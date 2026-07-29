@@ -569,11 +569,11 @@ the manifest and service worker to the site root, and preserves `web/` for
 service-worker dependencies:
 
 ```bash
-mkdir -p /tmp/pj-site/assets /tmp/pj-site/web
+mkdir -p /tmp/pj-site
 cp webrtc_client.html /tmp/pj-site/index.html
-cp assets/pj_web_utils.js /tmp/pj-site/assets/
+cp webrtc_client.html /tmp/pj-site/webrtc_client.html
+cp -R assets web /tmp/pj-site/
 cp web/manifest.webmanifest web/service-worker.js /tmp/pj-site/
-cp web/session_controller.js /tmp/pj-site/web/
 wrangler pages deploy /tmp/pj-site --project-name=YOUR_PAGES_PROJECT --branch=master
 ```
 
