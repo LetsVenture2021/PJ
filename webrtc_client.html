@@ -419,8 +419,64 @@
 
       .upload-picker-row {
         display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 6px;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 8px;
+      }
+
+      .upload-picker-action {
+        display: grid;
+        min-width: 0;
+        gap: 5px;
+        justify-items: center;
+        padding: 12px 7px;
+        text-align: center;
+      }
+
+      .upload-picker-action:focus-visible {
+        outline: 3px solid #93c5fd;
+        outline-offset: 2px;
+      }
+
+      .upload-picker-action-files {
+        background: #102a4d;
+        border-color: #2d64a8;
+        color: #e6f1ff;
+      }
+
+      .upload-picker-action-folder {
+        background: #342814;
+        border-color: #73591d;
+        color: #fff3cd;
+      }
+
+      .upload-picker-icon {
+        display: grid;
+        width: 34px;
+        height: 34px;
+        place-items: center;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.08);
+      }
+
+      .upload-picker-icon svg {
+        width: 22px;
+        height: 22px;
+        fill: none;
+        stroke: currentColor;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        stroke-width: 1.8;
+      }
+
+      .upload-picker-title {
+        font-size: 13px;
+        font-weight: 700;
+      }
+
+      .upload-picker-hint {
+        color: var(--muted);
+        font-size: 10px;
+        line-height: 1.25;
       }
 
       .upload-input {
@@ -565,9 +621,38 @@
 
         <section class="upload-panel" aria-labelledby="uploadHeading">
           <h2 id="uploadHeading">Upload documents</h2>
-          <div class="upload-picker-row">
-            <button id="chooseFilesBtn" class="muted-btn" type="button">Choose Files</button>
-            <button id="chooseFolderBtn" class="muted-btn" type="button">Choose Folder</button>
+          <div class="upload-picker-row" role="group" aria-label="Choose documents to upload">
+            <button
+              id="chooseFilesBtn"
+              class="upload-picker-action upload-picker-action-files"
+              type="button"
+              aria-label="Select one or more files"
+              title="Select files"
+            >
+              <span class="upload-picker-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+              </span>
+              <span class="upload-picker-title">Add files</span>
+              <span class="upload-picker-hint">One or more documents</span>
+            </button>
+            <button
+              id="chooseFolderBtn"
+              class="upload-picker-action upload-picker-action-folder"
+              type="button"
+              aria-label="Select a folder, including nested files"
+              title="Select folder"
+            >
+              <span class="upload-picker-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false">
+                  <path d="M3 7.5h7l2 2h9v9.5H3z" />
+                  <path d="M3 7.5V5h7l2 2h9v2.5" />
+                </svg>
+              </span>
+              <span class="upload-picker-title">Add folder</span>
+              <span class="upload-picker-hint">Folder and nested files</span>
+            </button>
           </div>
           <input id="filePicker" class="upload-input" type="file" multiple />
           <input

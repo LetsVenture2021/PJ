@@ -153,6 +153,44 @@ test("only health and preflight are public", () => {
   }
 });
 
+test("upload center exposes accessible file and folder picker actions", () => {
+  const pickerRow = webClientSource.match(
+    /<div class="upload-picker-row"[\s\S]*?<\/div>\s*<input id="filePicker"/,
+  )?.[0];
+  assert.ok(pickerRow, "upload picker action row must exist");
+  assert.equal((pickerRow.match(/<button\b/g) || []).length, 2);
+  assert.match(
+    pickerRow,
+    /<button[\s\S]*?id="chooseFilesBtn"[\s\S]*?type="button"[\s\S]*?aria-label="Select one or more files"[\s\S]*?title="Select files"[\s\S]*?<svg[\s\S]*?<path d="M12 5v14M5 12h14"/,
+  );
+  assert.match(pickerRow, /<span class="upload-picker-title">Add files<\/span>/);
+  assert.match(
+    pickerRow,
+    /<button[\s\S]*?id="chooseFolderBtn"[\s\S]*?type="button"[\s\S]*?aria-label="Select a folder, including nested files"[\s\S]*?title="Select folder"[\s\S]*?<svg/,
+  );
+  assert.match(pickerRow, /<span class="upload-picker-title">Add folder<\/span>/);
+  assert.match(
+    webClientSource,
+    /id="filePicker"[\s\S]*?type="file"[\s\S]*?multiple[\s\S]*?id="folderPicker"[\s\S]*?type="file"[\s\S]*?webkitdirectory[\s\S]*?directory[\s\S]*?multiple/,
+  );
+  assert.match(
+    webClientSource,
+    /chooseFilesBtn\.addEventListener\("click", \(\) => \{\s*el\.filePicker\.value = "";\s*el\.filePicker\.click\(\);/,
+  );
+  assert.match(
+    webClientSource,
+    /chooseFolderBtn\.addEventListener\("click", \(\) => \{\s*el\.folderPicker\.value = "";\s*el\.folderPicker\.click\(\);/,
+  );
+  assert.match(
+    webClientSource,
+    /filePicker\.addEventListener\("change", \(\) => \{\s*selectUploadItems\(el\.filePicker\.files, "files"\);/,
+  );
+  assert.match(
+    webClientSource,
+    /folderPicker\.addEventListener\("change", \(\) => \{\s*selectUploadItems\(el\.folderPicker\.files, "folder"\);/,
+  );
+});
+
 test("Full Power routes and bridge URL derivation are narrowly scoped", () => {
   assert.equal(isResponsesRoute("GET", "/responses/capabilities"), true);
   assert.equal(isResponsesRoute("GET", "/responses/sessions/search"), true);
