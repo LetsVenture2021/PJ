@@ -1,9 +1,25 @@
 """OpenAI adapters used by prompting and realtime orchestration."""
+
 import json
 from dataclasses import dataclass
 from typing import Any
 
 from ..interfaces import HttpProvider
+
+
+@dataclass(frozen=True)
+class ProviderResponse:
+    id: str
+    status: str
+    output_text: str = ""
+
+
+def _normalize_response(response: Any, *, response_id: str = "") -> ProviderResponse:
+    return ProviderResponse(
+        id=str(getattr(response, "id", response_id)),
+        status=str(getattr(response, "status", "unknown")),
+        output_text=str(getattr(response, "output_text", "") or ""),
+    )
 
 
 def _authorization_header(api_key: str) -> str:
@@ -16,6 +32,16 @@ class OpenAIResponsesProvider:
 
     def create_response(self, **kwargs: Any):
         return self.client.responses.create(**kwargs)
+
+    def retrieve_response(self, response_id: str) -> ProviderResponse:
+        return _normalize_response(
+            self.client.responses.retrieve(response_id), response_id=response_id
+        )
+
+    def cancel_response(self, response_id: str) -> ProviderResponse:
+        return _normalize_response(
+            self.client.responses.cancel(response_id), response_id=response_id
+        )
 
 
 @dataclass(frozen=True)
@@ -44,13 +70,7 @@ class OpenAIRealtimeProvider:
             timeout=timeout,
         )
 
-    def accept_call(
-            self,
-            api_key: str,
-            call_id: str,
-            session: dict,
-            *,
-            timeout: int):
+    def accept_call(self, api_key: str, call_id: str, session: dict, *, timeout: int):
         return self.http.post(
             f"https://api.openai.com/v1/realtime/calls/{call_id}/accept",
             headers={

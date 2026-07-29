@@ -34,7 +34,7 @@
       height: 100vh;
       padding: 0;
       display: grid;
-      grid-template-columns: 280px 1fr;
+      grid-template-columns: 280px minmax(420px, 1fr) 320px;
       gap: 0;
       min-height: 720px;
     }
@@ -382,7 +382,6 @@
       font-size: 13px;
     }
 
-    .artifact-actions { display: flex; flex-wrap: wrap; gap: 8px; }
     .canvas-open { border-color: #52e5ee; background: #12323a; color: #b9fbff; }
     .canvas-dialog {
       width: min(1180px, calc(100vw - 32px));
@@ -414,6 +413,21 @@
     .canvas-frame { width: 100%; height: 100%; border: 0; background: white; }
     .canvas-source { box-sizing: border-box; width: 100%; height: 100%; margin: 0; padding: 22px; overflow: auto; color: #d4d9d0; background: #0c0e0d; font: 13px/1.6 ui-monospace, monospace; white-space: pre-wrap; }
     .canvas-loading { display: grid; place-items: center; height: 100%; color: #a7aaa3; }
+
+    .artifact-panel {
+      padding: 16px;
+      height: calc(100vh - 48px);
+      position: sticky;
+      top: 16px;
+      overflow: auto;
+    }
+
+    .artifact-panel h2 { margin: 0 0 4px; font-size: 17px; }
+    .artifact-panel-list { display: grid; gap: 12px; margin-top: 14px; }
+    .artifact-panel .artifact-card { width: 100%; }
+    .artifact-actions button { padding: 6px 8px; font-size: 11px; }
+    .outcome-card { border-left: 3px solid var(--ok); padding: 12px; background: var(--panel-2); border-radius: 8px; }
+    .validation-badge { color: var(--ok); font-size: 12px; font-weight: 700; }
 
     .upload-input {
       display: none;
@@ -524,6 +538,7 @@
       .sidebar {
         height: auto;
       }
+      .artifact-panel { position: static; height: auto; }
       .chat {
         height: 70vh;
       }
@@ -681,6 +696,12 @@
         <button id="sendBtn" class="primary" disabled>Send</button>
       </div>
     </main>
+    <aside class="card artifact-panel" aria-label="Artifacts and outcomes">
+      <h2>Artifacts</h2>
+      <div class="sub">Verified deliverables and outcome evidence</div>
+      <div id="artifactPanelList" class="artifact-panel-list" aria-live="polite"></div>
+      <div id="outcomePanelList" class="artifact-panel-list" aria-live="polite"></div>
+    </aside>
   </div>
 
   <audio id="pjAudio" autoplay></audio>
@@ -741,6 +762,8 @@
       statusDot: document.getElementById("statusDot"),
       statusText: document.getElementById("statusText"),
       messages: document.getElementById("messages"),
+      artifactPanelList: document.getElementById("artifactPanelList"),
+      outcomePanelList: document.getElementById("outcomePanelList"),
       textInput: document.getElementById("textInput"),
       sendBtn: document.getElementById("sendBtn"),
       copyBtn: document.getElementById("copyBtn"),
@@ -2384,7 +2407,20 @@
           link.className = "artifact-download";
           link.textContent = "Download";
           link.rel = "noopener";
-          card.append(title, meta);
+          const validation = document.createElement("div");
+          validation.className = "validation-badge";
+          validation.textContent = "✓ Integrity verified";
+          const actions = document.createElement("div");
+          actions.className = "artifact-actions";
+          for (const label of ["Preview", "Compare", "Restore as new", "Follow up"]) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "muted-btn";
+            button.textContent = label;
+            button.dataset.artifactAction = label.toLowerCase().replaceAll(" ", "-");
+            actions.appendChild(button);
+          }
+          card.append(title, meta, validation);
           if (String(artifact.mime_type || "").startsWith("text/html")) {
             const open = document.createElement("button");
             open.type = "button";
@@ -2394,7 +2430,8 @@
             card.appendChild(open);
           }
           card.appendChild(link);
-          el.messages.appendChild(card);
+          card.appendChild(actions);
+          el.artifactPanelList.appendChild(card);
           state.artifactCards.set(artifact.artifact_id, card);
         }
         card.querySelector(".artifact-card-title").textContent = artifact.filename;
@@ -2416,7 +2453,22 @@
         } else {
           preview?.remove();
         }
-        scrollMessagesToBottom();
+      }
+
+      function renderOutcomeCard(outcome) {
+        if (!outcome?.outcome_id || !outcome.result_summary) return;
+        const card = document.createElement("section");
+        card.className = "outcome-card";
+        const title = document.createElement("strong");
+        title.textContent = outcome.result_summary;
+        const status = document.createElement("div");
+        status.className = "validation-badge";
+        status.textContent = `Verification: ${outcome.verification_status || "pending"}`;
+        const detail = document.createElement("div");
+        detail.className = "artifact-card-meta";
+        detail.textContent = `${(outcome.deliverable_artifact_ids || []).length} deliverables · ${Number(outcome.elapsed_seconds || 0).toFixed(1)}s`;
+        card.append(title, status, detail);
+        el.outcomePanelList.appendChild(card);
       }
 
       function renderFullPowerEvent(event) {
