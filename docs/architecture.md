@@ -79,13 +79,18 @@ routes are:
 - `/responses/*`: create, list, search, and resume durable sessions; stream
   turns and approval continuations as server-sent events; persist Realtime
   transcripts; and download integrity-checked artifacts.
-- `POST /webhook`: accept an inbound OpenAI SIP call. This route exists in
-  Python but is not deployed by the checked-in Worker manifest.
 
 Every PJ JSON message and SSE event carries protocol version `1`. SDP uses the
 `x-pj-protocol-version` header because its body is not JSON. See
 [Realtime protocol compatibility](realtime-protocol.md) for the wire contract
 and `426` behavior.
+
+Inbound SIP is not part of the supported architecture. The Python runtime
+retains a legacy local-only `POST /webhook` handler, but it does not verify
+OpenAI webhook signatures and must not be exposed publicly. The Worker and its
+manifest intentionally omit this route. Adding SIP support requires a dedicated
+public ingress with signature verification and a documented OpenAI SIP
+provisioning workflow.
 
 ## Worker and browser runtime
 

@@ -87,8 +87,8 @@ interface and use the OpenAI adapter in `ops/shared/providers`.
 - Node.js 20.19+ with the built-in `node:test` runner for Worker tests.
 - A microphone, speakers, and PortAudio-compatible audio devices for terminal
   voice.
-- A Cloudflare account, an existing DNS zone, Wrangler, and Cloudflare Access
-  only when deploying the Worker.
+- A Cloudflare account, an existing DNS zone, Wrangler v4.115.0, and Cloudflare
+  Access only when deploying the Worker.
 
 The `./pj` launcher is a zsh script that specifically expects `venv/bin/python`
 and `~/.env`, so use that virtual-environment name:
@@ -352,7 +352,7 @@ It deploys API routes only; it does **not** deploy `webrtc_client.html` or
 1. Install and authenticate Wrangler:
 
    ```bash
-   npm install --global wrangler
+   npm install --global wrangler@4.115.0
    wrangler login
    cp wrangler.toml.example wrangler.toml
    ```
@@ -385,16 +385,30 @@ It deploys API routes only; it does **not** deploy `webrtc_client.html` or
 5. Validate and deploy:
 
    ```bash
+   python scripts/validate_wrangler_config.py wrangler.toml.example
    node --test tests/test_worker_auth.mjs
+   ./scripts/verify_cloudflare_sync.sh wrangler.toml
    wrangler deploy
    curl https://YOUR_DOMAIN/health
    ```
+
+   The sync validator checks the expected API routes and required `[vars]`
+   bindings in the manifest, confirms required remote secret names through
+   Wrangler without reading their values, and prints the Cloudflare Access
+   application/policy checks that must be confirmed in Zero Trust.
 
 Only `GET /health` and CORS preflight are public. `/session`, `/token`,
 `/tool-schemas`, `/execute-tool`, and `/responses/*` require a valid Cloudflare
 Access identity. Full local tools and Full Power routes also require a reachable
 private runtime and matching bridge token; without it the Worker remains useful
 only for its direct Realtime path and reports degraded capability in `/health`.
+
+`POST /webhook` is **not a supported or deployed API**. A legacy local-only
+Flask handler remains for reference, but it does not verify OpenAI webhook
+signatures. The route is intentionally absent from the Wrangler manifest and
+must not be exposed publicly. Supporting inbound SIP would require a dedicated
+public ingress with signature verification and an OpenAI SIP provisioning
+workflow.
 
 ### Browser frontend
 
@@ -425,9 +439,10 @@ there is no repository-backed production frontend deployment command to run.
   Full Power Voice delegates advanced work to the text Responses runtime.
 - The Worker cannot execute local tools by itself. Its bridge URLs and token
   must target a separately operated private runtime.
-- SIP webhook handling exists at `POST /webhook`, but the Wrangler manifest
-  does not route or deploy that endpoint and the repository contains no SIP
-  provisioning artifact.
+- Inbound SIP is unsupported. The legacy local-only `POST /webhook` handler is
+  intentionally excluded from the Worker deployment because it lacks webhook
+  signature verification; the repository also contains no SIP provisioning
+  artifact.
 - Several entries in the checked-in MCP configuration are enabled while their
   authorization values remain placeholders; those integrations are not ready
   until valid environment-backed headers are configured.
