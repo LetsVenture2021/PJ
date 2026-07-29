@@ -760,10 +760,7 @@ function isResponsesRoute(method, pathname) {
   if (method === "POST" && pathname === "/projects/import") {
     return true;
   }
-  if (
-    ["GET", "PATCH", "DELETE"].includes(method) &&
-    /^\/projects\/[a-f0-9-]{36}$/.test(pathname)
-  ) {
+  if (["GET", "PATCH", "DELETE"].includes(method) && /^\/projects\/[a-f0-9-]{36}$/.test(pathname)) {
     return true;
   }
   if (
@@ -772,10 +769,7 @@ function isResponsesRoute(method, pathname) {
   ) {
     return true;
   }
-  if (
-    method === "POST" &&
-    /^\/projects\/[a-f0-9-]{36}\/(archive|restore|export)$/.test(pathname)
-  ) {
+  if (method === "POST" && /^\/projects\/[a-f0-9-]{36}\/(archive|restore|export)$/.test(pathname)) {
     return true;
   }
   if (method === "DELETE" && /^\/projects\/conversations\/[A-Za-z0-9_-]{8,128}$/.test(pathname)) {
@@ -786,7 +780,8 @@ function isResponsesRoute(method, pathname) {
   }
   if (
     (/^\/conversations\/[A-Za-z0-9_-]{8,128}\/events$/.test(pathname) && method === "GET") ||
-    (/^\/conversations\/[A-Za-z0-9_-]{8,128}\/(turns|realtime-token)$/.test(pathname) && method === "POST")
+    (/^\/conversations\/[A-Za-z0-9_-]{8,128}\/(turns|realtime-token)$/.test(pathname) &&
+      method === "POST")
   ) {
     return true;
   }
@@ -895,7 +890,8 @@ async function handleResponsesProxy(request, env, corsOrigin, requestId, fetchIm
   let body;
   if (["POST", "PATCH"].includes(request.method)) {
     body = isProjectImport ? await request.arrayBuffer() : await request.text();
-    const byteLength = typeof body === "string" ? new TextEncoder().encode(body).byteLength : body.byteLength;
+    const byteLength =
+      typeof body === "string" ? new TextEncoder().encode(body).byteLength : body.byteLength;
     const requestLimit = isProjectImport
       ? asPositiveInt(env.PJ_MAX_UPLOAD_BYTES, DEFAULT_MAX_UPLOAD_PROXY_BYTES)
       : MAX_RESPONSES_REQUEST_BYTES;

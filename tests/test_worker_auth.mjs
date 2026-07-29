@@ -29,10 +29,7 @@ test("browser visual capture is permissioned, bounded, revocable, and ephemeral 
   assert.match(webClientSource, /width: 1280, height: 720/);
   assert.match(webClientSource, /bytes: 8_000_000, durationMs: 120_000/);
   assert.match(webClientSource, /visualTaskActive\.checked/);
-  assert.match(
-    webClientSource,
-    /retention: el\.retainCapture\.checked \? "retain" : "ephemeral"/,
-  );
+  assert.match(webClientSource, /retention: el\.retainCapture\.checked \? "retain" : "ephemeral"/);
   assert.match(webClientSource, /captureOverlay\.replaceChildren\(\)/);
   assert.doesNotMatch(webClientSource, /captureOverlay\.innerHTML/);
 });
@@ -1198,6 +1195,10 @@ test("browser module initializes with Full Power helpers in shared scope", async
   assert.equal(typeof listeners.get("fullPowerVoiceModeBtn:click"), "function");
   assert.equal(typeof listeners.get("runCodexBtn:click"), "function");
   assert.equal(typeof listeners.get("refreshSessionsBtn:click"), "function");
+  assert.match(html, /id="experienceGrid"/);
+  assert.match(moduleSource, /function renderExperienceManifest/);
+  assert.match(moduleSource, /function queueWorkflowPrompt/);
+  assert.match(moduleSource, /dataset\.workflowPrompt/);
   assert.match(moduleSource, /event\.type === "artifact\.ready"/);
   assert.match(moduleSource, /className = "artifact-download"/);
   assert.match(html, /className = "artifact-card"/);
@@ -1215,7 +1216,10 @@ test("browser module initializes with Full Power helpers in shared scope", async
   assert.match(html, /artifact-image-preview/);
   assert.match(html, /startsWith\("image\/"\)/);
   assert.match(html, /className = "canvas-open"/);
-  assert.match(html, /frame\.sandbox = "allow-scripts allow-forms allow-modals allow-pointer-lock allow-downloads"/);
+  assert.match(
+    html,
+    /frame\.sandbox = "allow-scripts allow-forms allow-modals allow-pointer-lock allow-downloads"/,
+  );
   assert.match(html, /URL\.createObjectURL\(new Blob\(\[source\], \{ type: "text\/html" \}\)\)/);
   assert.match(html, /state\.canvasObjectUrl\) URL\.revokeObjectURL/);
   assert.doesNotMatch(html, /innerHTML\s*=\s*event\./);

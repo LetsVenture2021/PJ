@@ -41,6 +41,8 @@
       min-height: 720px;
     }
 
+    .app > * { min-width: 0; }
+
     .card {
       background: var(--panel);
       border: 1px solid var(--line);
@@ -276,6 +278,71 @@
       border-radius: 8px;
       background: #0b0e12;
       color: var(--text);
+    }
+
+    .experience-module {
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #0b0e12;
+    }
+
+    .experience-head,
+    .experience-card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .experience-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 8px;
+    }
+
+    .experience-card {
+      min-width: 0;
+      min-height: 74px;
+      display: grid;
+      align-content: space-between;
+      gap: 8px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #11151a;
+      text-align: left;
+      color: #d8dde5;
+    }
+
+    .experience-tools {
+      overflow-wrap: anywhere;
+    }
+
+    .experience-card[data-status="active"] { border-color: rgba(34, 197, 94, .45); }
+    .experience-card[data-status="degraded"] { border-color: rgba(245, 158, 11, .55); }
+    .experience-card[data-status="unavailable"] { opacity: .7; }
+    .experience-card strong { font-size: 13px; }
+
+    .status-pill {
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      color: #a7b0bd;
+    }
+
+    .status-pill.active { color: #86efac; }
+    .status-pill.degraded { color: #fcd34d; }
+    .status-pill.disabled, .status-pill.unavailable { color: #94a3b8; }
+
+    .experience-tools {
+      min-height: 16px;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.3;
     }
 
     .chat {
@@ -569,21 +636,33 @@
     .keyboard-hint { color: #69717d; font-size: 11px; border: 1px solid var(--line); padding: 3px 7px; border-radius: 6px; }
     .welcome { margin: auto; max-width: 610px; text-align: center; padding: 36px 20px; }
     .welcome-mark { width: 56px; height: 56px; margin: 0 auto 18px; display: grid; place-items: center; border-radius: 17px; color: #c9c3ff; background: linear-gradient(145deg, rgba(108,92,231,.28), rgba(108,92,231,.08)); border: 1px solid rgba(130,116,238,.3); font-size: 24px; }
-    .welcome h3 { font-size: 27px; letter-spacing: -.03em; margin: 0 0 9px; }
+    .welcome h3 { font-size: 27px; letter-spacing: 0; margin: 0 0 9px; }
     .welcome p { color: var(--muted); margin: 0 auto 24px; line-height: 1.6; }
     .suggestions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; text-align: left; }
     .suggestion { padding: 13px; border: 1px solid var(--line); border-radius: 11px; background: #11151a; color: #cdd2da; font-size: 13px; }
     .suggestion strong { display: block; color: #f1f3f6; margin-bottom: 4px; }
     @media (max-width: 940px) {
       .app {
+        display: block;
+        height: auto;
+        min-height: 100vh;
         grid-template-columns: 1fr;
       }
       .sidebar {
         height: auto;
+        overflow: visible;
+        border-width: 0 0 1px;
       }
-      .artifact-panel { position: static; height: auto; }
+      .experience-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .artifact-panel {
+        position: static;
+        height: auto;
+        min-height: 180px;
+        border-width: 1px 0 0;
+      }
       .chat {
-        height: 70vh;
+        height: min(780px, 82vh);
+        min-height: 620px;
       }
       .bubble { max-width: 94%; }
     }
@@ -602,6 +681,39 @@
       .composer textarea { order: -1; flex-basis: 100%; max-height: 30dvh; }
       .composer #sendBtn { flex: 1; min-width: 80px; }
       .artifact-card, .bubble { max-width: 100%; width: 100%; }
+    }
+
+    @media (max-width: 600px) {
+      .sidebar { padding: 18px 16px; }
+      .chat-head {
+        align-items: flex-start;
+        flex-wrap: wrap;
+        padding: 12px 14px;
+      }
+      .workspace-heading { width: 100%; }
+      .head-actions { width: 100%; }
+      .head-actions button { flex: 1; }
+      .keyboard-hint { display: none; }
+      .messages { padding: 24px 14px; }
+      .welcome { padding: 24px 0; }
+      .welcome h3 { font-size: 24px; }
+      .suggestions { grid-template-columns: 1fr; }
+      .composer {
+        gap: 8px;
+        padding: 10px;
+      }
+      .composer textarea {
+        min-width: 0;
+        padding-inline: 10px;
+      }
+      .composer button {
+        min-width: 58px;
+        padding-inline: 9px;
+      }
+      .composer .composer-icon-btn {
+        min-width: 42px;
+        width: 42px;
+      }
     }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
@@ -646,6 +758,14 @@
         Full Force Voice refines every completed thought, then uses PJ's full
         Responses runtime for tools, research, artifacts, and governed actions.
       </div>
+
+      <section class="experience-module" aria-labelledby="experienceTitle">
+        <div class="experience-head">
+          <strong id="experienceTitle">Workbench</strong>
+          <span id="experienceScore" class="status-pill">Checking</span>
+        </div>
+        <div id="experienceGrid" class="experience-grid" aria-live="polite"></div>
+      </section>
 
       <details open>
         <summary>Projects</summary>
@@ -738,7 +858,7 @@
           <span class="workspace-icon" aria-hidden="true">✦</span>
           <div>
             <p class="eyebrow">Private workspace</p>
-            <h2>New conversation</h2>
+            <h2 id="workspaceTitle">New conversation</h2>
           </div>
         </div>
         <div class="head-actions">
@@ -755,8 +875,8 @@
           <div class="suggestions">
             <button class="suggestion" type="button" data-prompt="Help me plan a project with clear milestones and next steps."><strong>Plan a project</strong>Turn an idea into clear milestones and next steps</button>
             <button class="suggestion" type="button" data-prompt="Help me summarize and compare my documents."><strong>Work with documents</strong>Summarize, compare, or transform your files</button>
-            <button class="suggestion" type="button" data-prompt="Help me create a polished brief from an idea."><strong>Create something</strong>Draft a presentation, image, or polished brief</button>
-            <button class="suggestion" type="button" data-prompt="I'd like to talk through an idea."><strong>Talk it through</strong>Use Full Force Voice for a natural, tool-enabled conversation</button>
+            <button class="suggestion" type="button" data-prompt="Use the Codex workspace path: inspect this repository, state a short plan, make scoped changes only if approved, and run relevant validation."><strong>Work on code</strong>Inspect, patch, validate, and report clearly</button>
+            <button class="suggestion" type="button" data-prompt="Research this with cited sources, separate facts from assumptions, and preserve links."><strong>Research</strong>Find, cite, and synthesize current evidence</button>
           </div>
         </section>
       </div>
@@ -872,6 +992,8 @@
       refreshCapabilitiesBtn: document.getElementById("refreshCapabilitiesBtn"),
       capabilityStatus: document.getElementById("capabilityStatus"),
       toolSummary: document.getElementById("toolSummary"),
+      experienceGrid: document.getElementById("experienceGrid"),
+      experienceScore: document.getElementById("experienceScore"),
       fullPowerVoiceModeBtn: document.getElementById("fullPowerVoiceModeBtn"),
       fullPowerModeBtn: document.getElementById("fullPowerModeBtn"),
       codexAction: document.getElementById("codexAction"),
@@ -920,6 +1042,7 @@
       canvasDownload: document.getElementById("canvasDownload"),
       canvasFullscreenBtn: document.getElementById("canvasFullscreenBtn"),
       canvasCloseBtn: document.getElementById("canvasCloseBtn"),
+      workspaceTitle: document.getElementById("workspaceTitle"),
     };
 
     const state = {
@@ -938,6 +1061,7 @@
       fullPowerBusy: false,
       responsesAbortController: null,
       capabilityManifest: null,
+      experienceManifest: null,
       pendingApprovals: {},
       fullPowerToolRows: new Map(),
       artifactCards: new Map(),
@@ -1527,6 +1651,11 @@
       el.stopBtn.textContent = mode !== MODE.FULL_POWER
         ? "End Session"
         : "Close Conversation";
+      el.workspaceTitle.textContent = mode === MODE.FULL_POWER
+        ? "Full Power workspace"
+        : mode === MODE.FULL_POWER_VOICE
+          ? "Full Force Voice"
+          : "Realtime Voice";
       el.modeNote.textContent = mode === MODE.REALTIME
         ? "Realtime voice is available as an internal compatibility mode."
         : mode === MODE.FULL_POWER_VOICE
@@ -1843,6 +1972,78 @@
       state.seededSessionIds.add(state.activeSessionId);
     }
 
+    function statusCopy(status) {
+      if (status === "active") return "Ready";
+      if (status === "degraded") return "Setup";
+      if (status === "disabled") return "Off";
+      return "Unavailable";
+    }
+
+    function workflowToolPreview(workflow) {
+      const tools = Array.isArray(workflow?.tools) ? workflow.tools : [];
+      if (workflow?.ready_count !== undefined || workflow?.needs_setup_count !== undefined) {
+        const ready = Number(workflow.ready_count || 0);
+        const setup = Number(workflow.needs_setup_count || 0);
+        return `${ready} ready${setup ? ` · ${setup} setup` : ""}`;
+      }
+      return tools.slice(0, 3).join(" · ");
+    }
+
+    function queueWorkflowPrompt(prompt) {
+      const text = String(prompt || "").trim();
+      if (!text) return;
+      if (state.mode !== MODE.FULL_POWER) setMode(MODE.FULL_POWER);
+      el.textInput.value = text;
+      el.textInput.focus();
+      if (state.phase === PHASE.IDLE) {
+        startFullPowerSession().catch((error) => {
+          appendBubble("system", `Unable to start workflow: ${shorten(String(error), 240)}`);
+        });
+      }
+    }
+
+    function renderExperienceManifest(experience) {
+      state.experienceManifest = experience && typeof experience === "object" ? experience : null;
+      const workflows = Array.isArray(state.experienceManifest?.workflows)
+        ? state.experienceManifest.workflows
+        : [
+            {
+              id: "assistant_chat",
+              label: "Chat",
+              status: state.toolCatalog?.count ? "active" : "degraded",
+              launch_prompt: "Help me solve this with the best available PJ tools.",
+              tools: ["responses", "local_functions"],
+            },
+          ];
+      const visible = workflows.slice(0, 6);
+      const ready = workflows.filter((workflow) => workflow.status === "active").length;
+      el.experienceScore.textContent = `${ready}/${workflows.length} ready`;
+      el.experienceScore.className = `status-pill ${ready ? "active" : "degraded"}`;
+      el.experienceGrid.replaceChildren();
+      for (const workflow of visible) {
+        const card = document.createElement("button");
+        card.type = "button";
+        card.className = "experience-card";
+        card.dataset.workflowId = workflow.id || "";
+        card.dataset.status = workflow.status || "unavailable";
+        card.dataset.workflowPrompt = workflow.launch_prompt || "";
+        const head = document.createElement("div");
+        head.className = "experience-card-head";
+        const label = document.createElement("strong");
+        label.textContent = workflow.label || workflow.id || "Workflow";
+        const status = document.createElement("span");
+        status.className = `status-pill ${workflow.status || "unavailable"}`;
+        status.textContent = statusCopy(workflow.status);
+        const tools = document.createElement("div");
+        tools.className = "experience-tools";
+        tools.textContent = workflowToolPreview(workflow);
+        head.append(label, status);
+        card.append(head, tools);
+        card.addEventListener("click", () => queueWorkflowPrompt(card.dataset.workflowPrompt));
+        el.experienceGrid.appendChild(card);
+      }
+    }
+
     function capabilityNames(manifest) {
       const native = Object.entries(manifest?.native || {})
         .filter(([, value]) => value?.status === "active")
@@ -1862,6 +2063,7 @@
         );
         const manifest = parsed.capabilities || {};
         state.capabilityManifest = manifest;
+        renderExperienceManifest(manifest.experience);
         const functionCount = manifest.local_functions?.count || 0;
         const names = capabilityNames(manifest);
         el.capabilityStatus.textContent =
@@ -1872,6 +2074,7 @@
         return manifest;
       } catch (error) {
         state.capabilityManifest = null;
+        renderExperienceManifest(null);
         el.capabilityStatus.textContent = "Capability mode: Full Power unavailable";
         el.toolSummary.textContent = `Capability error: ${shorten(String(error), 240)}`;
         return null;
@@ -1909,11 +2112,30 @@
         el.toolSummary.textContent = preview
           ? `Available tools: ${preview}`
           : "Available tools: none exposed by backend yet.";
+        await refreshExperienceSummary(apiBase, createRequestId());
         return schemaInfo;
       } catch (error) {
         state.toolCatalog = null;
+        renderExperienceManifest(null);
         el.capabilityStatus.textContent = "Capability mode: tool catalog unavailable";
         el.toolSummary.textContent = `Tool catalog error: ${shorten(String(error), 240)}`;
+        return null;
+      }
+    }
+
+    async function refreshExperienceSummary(base, requestId) {
+      try {
+        const parsed = await fetchJson(
+          `${base}/responses/capabilities`,
+          { headers: requestHeaders(requestId) },
+          12000,
+        );
+        const manifest = parsed.capabilities || {};
+        state.capabilityManifest = manifest;
+        renderExperienceManifest(manifest.experience);
+        return manifest.experience || null;
+      } catch (_) {
+        renderExperienceManifest(null);
         return null;
       }
     }
@@ -3434,16 +3656,11 @@
     });
     document.querySelectorAll?.("[data-prompt]").forEach((button) => {
       button.addEventListener("click", () => {
-        el.textInput.value = button.dataset.prompt;
-        if (state.phase === PHASE.IDLE) {
-          el.startBtn.focus();
-          setStatus("Start a session to send your prompt");
-        } else {
-          el.textInput.focus();
-        }
+        queueWorkflowPrompt(button.dataset.prompt);
       });
     });
 
+    renderExperienceManifest(null);
     setPhase(PHASE.IDLE, "Idle");
     refreshCurrentCapabilities({ forceRefresh: false });
     if ("serviceWorker" in navigator && window.isSecureContext) {

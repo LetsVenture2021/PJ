@@ -116,7 +116,11 @@ class DocumentGovernanceInventoryTests(unittest.TestCase):
             path.relative_to(ROOT).as_posix()
             for folder in (ROOT / "documents", ROOT / "docs")
             for path in folder.rglob("*")
-            if path.is_file() and path.name != "library-manifest.json" and "exports" not in path.parts
+            if (
+                path.is_file()
+                and path.name not in {"library-manifest.json", ".DS_Store"}
+                and "exports" not in path.parts
+            )
         }
         self.assertEqual(set(records), expected)
         for relative, record in records.items():
