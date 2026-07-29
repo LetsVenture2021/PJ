@@ -2590,6 +2590,16 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
         }
 
     is_final = status == "final"
+    if is_final:
+        from ops.docs.governance import evaluate_document
+
+        governance = evaluate_document(p)
+        if governance["status"] == "blocked":
+            return {
+                "status": "blocked",
+                "reason": "document evidence governance failed",
+                "governance": governance,
+            }
     stem = f"{doc_id}-{_slug(title)}-v{ver}" + ("" if is_final else "-DRAFT")
     if format == "md":
         try:
