@@ -1,0 +1,23 @@
+{
+  "corpus_sha256": "65b2d20b7c7ac8d92c6c36eeffdb08e6eeb815d33a2567ec30aff13d2c808229",
+  "corpus_version": "1.0.0",
+  "evaluated_at": "2026-07-28T14:13:46.793710+00:00",
+  "evaluation_id": "n8n-eval-fa5f896158ce6bd8",
+  "evaluator": "scripts/evaluate_n8n_corpus.py",
+  "evidence_sha256": "2c07674723e15d4f4727e68938fc3947c8bffcc7711d1a542ac1775245d55ba2",
+  "metrics": {
+    "canonical_pages_covered": 40,
+    "canonical_pages_total": 40,
+    "credential_exposures": 0,
+    "inaccessible_sources_dispositioned": 0,
+    "inaccessible_sources_total": 0,
+    "invented_node_parameters": 0,
+    "retrieval_cases_total": 10,
+    "retrieval_top5_passed": 10,
+    "security_warning_cases_passed": 5,
+    "security_warning_cases_total": 5
+  },
+  "registry_sha256": "4386258128890b20be7e846562b5fbd2c5966364ecef418b0d91e175128b67d8",
+  "schema_version": "2.0.0",
+  "supersedes": "documents/n8n-evaluation-receipt-v1.json"
+}

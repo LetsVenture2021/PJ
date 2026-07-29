@@ -59,6 +59,9 @@ jobs:
       - name: Lint Python
         run: python -m ruff check .
 
+      - name: Audit governed documents (advisory)
+        run: python scripts/audit_document_library.py
+
       - name: Check changed Python formatting
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
@@ -118,13 +121,10 @@ jobs:
         run: npm ci
 
       - name: Audit Worker dependencies
-        run: npm audit --audit-level=high
+        run: bash scripts/npm_audit_retry.sh --audit-level=high
 
       - name: Lint Worker
         run: npm run lint
 
       - name: Test Worker
         run: npm test
-
-      - name: Audit Worker dependencies
-        run: npm audit --audit-level=high
