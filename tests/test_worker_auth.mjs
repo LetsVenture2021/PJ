@@ -1211,6 +1211,10 @@ test("browser module initializes with Full Power helpers in shared scope", async
   assert.doesNotMatch(html, /persistAssistantRealtimeItem\(item, "completed"\)/);
   assert.match(html, /artifact-image-preview/);
   assert.match(html, /startsWith\("image\/"\)/);
+  assert.match(html, /className = "canvas-open"/);
+  assert.match(html, /frame\.sandbox = "allow-scripts allow-forms allow-modals allow-pointer-lock allow-downloads"/);
+  assert.match(html, /URL\.createObjectURL\(new Blob\(\[source\], \{ type: "text\/html" \}\)\)/);
+  assert.match(html, /state\.canvasObjectUrl\) URL\.revokeObjectURL/);
   assert.doesNotMatch(html, /innerHTML\s*=\s*event\./);
   assert.match(
     hooks.validateInboundRealtimeEvent({
