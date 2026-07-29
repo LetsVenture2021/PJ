@@ -1,0 +1,9 @@
+{
+  "config_sha256": "6a71c6695e5cf8ec55cdc1c482323712f94de936f25326599a980b176724afc8",
+  "digest": "054c1fb73de90129556a2ca99a45e8fc8c9238ac21a25568c4997bed3ab9420e",
+  "findings": [],
+  "schema_version": "1.0",
+  "source": "IGNORED",
+  "source_sha256": "d3c3ee45e00a8fa3c808a306e800a60bcfc78e908faa7a5cc78aa90d87ce3372",
+  "status": "pass"
+}

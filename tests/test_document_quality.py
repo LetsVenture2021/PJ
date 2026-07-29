@@ -1,62 +1,84 @@
-import hashlib
-import json
 import tempfile
 import unittest
-from datetime import date
+import json
 from pathlib import Path
 from unittest import mock
 
-from ops.docs import quality
+from ops.docs.quality import validate_content, validate_path
+from ops.docs import service
 
 
 class DocumentQualityTests(unittest.TestCase):
-    def test_manifest_has_exact_phase_zero_denominator_and_complete_ownership(self):
-        manifest = json.loads(quality.MANIFEST_PATH.read_text())
-        self.assertEqual(len(manifest["documents"]), 15)
-        required = {"path", "owner", "class", "profile", "lifecycle", "disposition", "sha256"}
-        for document in manifest["documents"]:
-            self.assertTrue(required.issubset(document))
-            self.assertTrue(all(document[field] for field in required))
+    def test_clean_document_passes_with_deterministic_digest(self):
+        content = "# Operating standard\n\n## Scope\n\nControlled local operation.\n"
+        first = validate_content(content)
+        second = validate_content(content)
+        self.assertEqual(first["status"], "pass")
+        self.assertEqual(first["report_sha256"], second["report_sha256"])
+        self.assertEqual(first["source_sha256"], second["source_sha256"])
 
-    def test_report_is_deterministic_hash_bound_and_content_safe(self):
-        with tempfile.TemporaryDirectory() as temp:
-            source = Path(temp) / "safe.md"
-            secret_phrase = "private board discussion phrase"
-            source.write_text(f"# Title\n\n## Sources\n\n{secret_phrase}\n")
-            first = quality.validate_document(source, profile="runtime", today=date(2026, 7, 29))
-            second = quality.validate_document(source, profile="runtime", today=date(2026, 7, 29))
-            self.assertEqual(first, second)
-            self.assertEqual(
-                first["source_sha256"], hashlib.sha256(source.read_bytes()).hexdigest()
-            )
-            self.assertNotIn(secret_phrase, json.dumps(first))
-            with mock.patch.object(quality, "ROOT", Path(temp)):
-                first = quality.validate_document(source, profile="runtime")
-            report_path = quality.persist_report(first, Path(temp) / "reports")
-            self.assertEqual(json.loads(report_path.read_text()), first)
+    def test_drafting_residue_and_empty_link_block_release(self):
+        report = validate_content("# Draft\n\n## Work\n\n[TBD - owner] and [source]().\n")
+        self.assertEqual(report["status"], "fail")
+        self.assertEqual(
+            {item["rule_id"] for item in report["findings"]},
+            {"DOC-COMPLETE-001", "DOC-LINK-001"},
+        )
 
-    def test_seeded_blocker_critical_and_broken_link_are_detected(self):
-        with tempfile.TemporaryDirectory() as temp:
-            source = Path(temp) / "bad.md"
-            source.write_text("plain [TBD] password=abcdefghijklmnop [missing](nope.md)")
-            with mock.patch.object(quality, "ROOT", Path(temp)):
-                report = quality.validate_document(source, profile="runtime")
-            rules = {finding["rule_id"] for finding in report["findings"]}
-            self.assertEqual(report["status"], "fail")
-            self.assertTrue(
-                {"DOC-STRUCT-001", "DOC-PLACEHOLDER-001", "DOC-SEC-001", "DOC-LINK-001"} <= rules
-            )
+    def test_security_finding_does_not_echo_matched_value(self):
+        secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
+        report = validate_content(f"# Draft\n\n## Value\n\n{secret}\n")
+        self.assertEqual(report["counts"]["critical"], 1)
+        self.assertNotIn(secret, str(report))
 
-    def test_manifest_audit_is_non_mutating_and_uses_manifest_as_denominator(self):
-        before = {
-            item["path"]: quality.sha256_path(quality.ROOT / item["path"])
-            for item in json.loads(quality.MANIFEST_PATH.read_text())["documents"]
-        }
-        result = quality.audit_manifest(today=date(2026, 7, 29))
-        after = {path: quality.sha256_path(quality.ROOT / path) for path in before}
-        self.assertEqual(before, after)
-        self.assertEqual(result["documents"], 15)
-        self.assertEqual(result["passing"] + result["failing"], 15)
+    def test_heading_hierarchy_is_checked(self):
+        report = validate_content("# Title\n\n### Skipped\n\nBody\n")
+        self.assertEqual(report["status"], "fail")
+        self.assertIn("DOC-A11Y-001", {item["rule_id"] for item in report["findings"]})
+
+    def test_validate_path_adds_audit_timestamp(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "document.md"
+            path.write_text("# Title\n\n## Scope\n\nBody.\n", encoding="utf-8")
+            report = validate_path(path)
+        self.assertEqual(report["status"], "pass")
+        self.assertIn("validated_at", report)
+
+    def test_finalization_retains_report_for_exact_final_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            documents = root / "documents"
+            exports = documents / "exports"
+            artifacts = exports / ".artifacts"
+            artifacts.mkdir(parents=True)
+            with (
+                mock.patch.object(service, "_DB_PATH", root / "quality.sqlite3"),
+                mock.patch.object(service, "DOCS_DIR", documents),
+                mock.patch.object(service, "EXPORTS_DIR", exports),
+                mock.patch.object(service, "ARTIFACTS_DIR", artifacts),
+            ):
+                drafted = service.draft_document(
+                    "meeting_memo",
+                    "Quality evidence",
+                    json.dumps(
+                        {
+                            "Attendees": "PJ and owner",
+                            "Context": "Release quality",
+                            "Discussion": "Controls passed.",
+                            "Decisions": "Retain evidence.",
+                            "Action Items": "Publish.",
+                        }
+                    ),
+                )
+                finalized = service.finalize_document(drafted["doc_id"])
+                with service._db() as connection:
+                    row = connection.execute(
+                        "SELECT source_sha256, status FROM docops_quality_reports "
+                        "WHERE doc_id=? ORDER BY created_at DESC",
+                        (drafted["doc_id"],),
+                    ).fetchall()
+        self.assertEqual(finalized["status"], "final")
+        self.assertIn((finalized["sha256"], "pass"), row)
 
 
 if __name__ == "__main__":

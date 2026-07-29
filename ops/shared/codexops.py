@@ -8,6 +8,7 @@ workspace-write; full filesystem access is never offered. Requires a local
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -81,8 +82,30 @@ def _register_workspace_outputs(workspace, session_id: str) -> list:
     return registered["documents"]
 
 
+def _register_canvas_artifacts(workspace: Path, session_id: str) -> list[dict]:
+    """Promote generated files into immutable, downloadable artifact storage."""
+    from ops.docs import service as docops
+
+    target_dir = docops.EXPORTS_DIR / session_id
+    artifacts = []
+    for source in sorted(path for path in workspace.rglob("*") if path.is_file())[:20]:
+        if source.stat().st_size > 50 * 1024 * 1024:
+            continue
+        target_dir.mkdir(parents=True, exist_ok=True)
+        destination = target_dir / source.name
+        shutil.copyfile(source, destination)
+        destination.chmod(0o600)
+        suffix = source.suffix.lower().lstrip(".") or "bin"
+        artifacts.append(
+            docops.register_external_artifact(
+                f"CANVAS-{session_id}", 1, suffix, destination, audience_ready=True
+            )
+        )
+    return artifacts
+
+
 def codex_generate_artifact(prompt: str = "") -> dict:
-    """Have Codex produce deliverable files (diagrams, charts, data files).
+    """Have Codex produce deliverable files (canvases, diagrams, charts, data files).
 
     Writes are confined to a fresh scratch workspace; everything produced is
     copied into durable upload storage and returned as downloadable records.
@@ -108,7 +131,9 @@ def codex_generate_artifact(prompt: str = "") -> dict:
         instruction = (
             f"Working directory: {workspace}. Create the requested deliverable "
             f"as one or more files saved in that directory (SVG preferred for "
-            f"diagrams, PNG for charts, CSV/MD for data). Task: {task}"
+            f"diagrams, PNG for charts, CSV/MD for data). For an interactive "
+            f"experience or canvas, create a self-contained index.html with "
+            f"inline CSS and JavaScript and no network dependencies. Task: {task}"
         )
         try:
             with Codex() as codex:
@@ -117,6 +142,7 @@ def codex_generate_artifact(prompt: str = "") -> dict:
         except Exception as exc:
             return {"error": f"codex_run_failed: {str(exc)[:300]}"}
         documents = _register_workspace_outputs(workspace, session_id)
+        artifacts = _register_canvas_artifacts(workspace, session_id)
     if not documents:
         return {
             "status": "completed_no_files",
@@ -126,6 +152,8 @@ def codex_generate_artifact(prompt: str = "") -> dict:
         "status": "generated",
         "count": len(documents),
         "documents": documents,
+        "artifact": artifacts[0],
+        "artifacts": artifacts,
         "final_response": str(result.final_response or "")[:4000],
     }
 
@@ -175,9 +203,11 @@ CODEXOPS_SCHEMAS.append(
         "type": "function",
         "name": "codex_generate_artifact",
         "description": (
-            "Generate deliverable files with Codex: diagrams (SVG), charts "
-            "(PNG), data files, and other visual artifacts produced by code. "
-            "Use for any diagram, graph, chart, or visualization request. "
+            "Generate deliverable files with Codex: interactive HTML canvases "
+            "and mini-apps, diagrams (SVG), charts (PNG), data files, and other "
+            "visual artifacts produced by code. Use a self-contained index.html "
+            "for interactive experiences. Use this tool for any canvas, mini-app, "
+            "game, diagram, graph, chart, or visualization request. "
             "Outputs are saved as downloadable documents automatically."
         ),
         "parameters": {

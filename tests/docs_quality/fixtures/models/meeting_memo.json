@@ -1,0 +1,10 @@
+{
+  "document_class": "meeting_memo",
+  "title": "Golden Meeting Memo",
+  "sections": [
+    {
+      "heading": "Summary",
+      "text": "Audience-ready fixture."
+    }
+  ]
+}
