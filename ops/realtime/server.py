@@ -153,7 +153,15 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Strict",
 )
 app.config.setdefault("UPLOAD_SCANNER", None)
-app.config.setdefault("MEMORY_SERVICE", MemoryService(BASE_DIR / "pj_data.sqlite3"))
+memory_config = load_runtime_config().memory
+app.config.setdefault(
+    "MEMORY_SERVICE",
+    MemoryService(
+        memory_config.get("database_path", BASE_DIR / "pj_data.sqlite3"),
+        enabled=bool(memory_config.get("enabled", True)),
+        automatic_ui_preferences=bool(memory_config.get("automatic_ui_preferences", False)),
+    ),
+)
 app.config.setdefault("CONVERSATION_SERVICE", ConversationService())
 app.config.setdefault("JOB_SERVICE", None)
 app.register_blueprint(create_jobs_blueprint(lambda: app.config["JOB_SERVICE"]))
