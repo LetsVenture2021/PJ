@@ -5,6 +5,9 @@ PJ is a standalone Chief of Staff. This module lets PJ automate and
 streamline the creation of mission-critical documents with governance
 adapted from production document-pipeline practice:
 
+  STANDARD   — every DocOps source and export is governed by the normative
+               docs/document-quality-standard.md specification.
+
   TEMPLATES  — versioned, structured templates define required sections
                so every document of a type is complete and consistent.
   DRAFT      — PJ drafts content section-by-section; it is validated
@@ -2976,6 +2979,13 @@ DOCOPS_SCHEMAS = [
         },
     },
 ]
+
+_DOCUMENT_QUALITY_STANDARD_NOTICE = (
+    " Govern this source and every export under the normative "
+    "docs/document-quality-standard.md specification."
+)
+for _docops_schema in DOCOPS_SCHEMAS:
+    _docops_schema["description"] += _DOCUMENT_QUALITY_STANDARD_NOTICE
 
 DOCOPS_DISPATCH = {
     "list_doc_templates": list_doc_templates,

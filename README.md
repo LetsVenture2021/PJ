@@ -6,6 +6,7 @@ voice, a local browser client, and an optional Cloudflare Worker edge proxy.
 
 ## Documentation
 
+- [Normative document quality standard](docs/document-quality-standard.md)
 - [Product and technology report (July 28, 2026)](docs/product-technology-report-2026-07-28.md)
 - [Product vision: the governed personal intelligence layer](docs/product-vision.md)
 - [End-to-end architecture](docs/architecture.md)
