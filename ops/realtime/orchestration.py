@@ -1191,6 +1191,15 @@ def terminal_approval_handler(event):
     return answer.strip().lower() == "approve"
 
 
+def _terminal_tool_result(event):
+    """Return a printable payload for either local or provider-native tools."""
+    if "result" in event:
+        return event["result"]
+    if "output" in event:
+        return event["output"]
+    return {key: event[key] for key in ("status", "source_event") if event.get(key) is not None}
+
+
 def send_message(
     client,
     cfg,
@@ -1218,7 +1227,7 @@ def send_message(
         elif event["type"] == "tool.call" and event.get("name") and echo:
             print(f"\n🔧 PJ is calling {event['name']}...", flush=True)
         elif event["type"] == "tool.result" and echo:
-            print(f"   ✅ {json.dumps(event['result'], default=str)}", flush=True)
+            print(f"   ✅ {json.dumps(_terminal_tool_result(event), default=str)}", flush=True)
         elif event["type"] == "approval.required" and echo:
             target = event.get("server_label") or event.get("name") or "tool"
             print(f"\n🔐 Owner approval required for {target}.", flush=True)
