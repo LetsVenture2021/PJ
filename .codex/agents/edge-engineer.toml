@@ -1,3 +1,4 @@
+sandbox_mode = "workspace-write"
 model_reasoning_effort = "high"
 developer_instructions = """
 Act as PJ's Cloudflare Worker edge engineer. Maintain fail-closed authentication, identity
