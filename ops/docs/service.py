@@ -2418,6 +2418,13 @@ def _attach_source_artifact(result: dict) -> dict:
             )
             if result["artifact"]["sha256"] != expected_sha:
                 raise ValueError("source artifact bytes do not match the governed SHA-256")
+            # Document creation has two intentionally separate outputs: the
+            # immutable user download above, and normalized Markdown sent to
+            # the configured vector store(s). Ingestion is best-effort and
+            # never makes the user deliverable unavailable.
+            from ops.docs.auto_vectorize import vectorize_document_export
+
+            result["vectorized"] = vectorize_document_export(result["doc_id"], result["version"])
     except (OSError, ValueError) as exc:
         result["artifact_error"] = f"source artifact registration failed: {exc}"
     return result
@@ -3110,3 +3117,9 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
 
         result["vectorized"] = vectorize_document_export(doc_id, version)
     return result
+
+
+# DOCOPS_DISPATCH is constructed before the compatibility wrapper above so
+# replace the core reference explicitly. Chat tool calls must get the same
+# vector-ingestion behavior as direct Python callers.
+DOCOPS_DISPATCH["export_document"] = export_document
