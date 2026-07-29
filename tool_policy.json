@@ -13,6 +13,7 @@
     "delete_image_asset": "approval",
     "create_env_placeholder": "approval",
     "open_env_file": "approval",
-    "run_codex_task": "approval"
+    "run_codex_task": "approval",
+    "deploy_generated_site": "approval"
   }
 }

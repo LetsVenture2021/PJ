@@ -352,3 +352,15 @@ class TestPJMcpServer(unittest.TestCase):
         self.assertIn("error", pj_mcp_server._fetch("bogus:zzz"))
         missing = pj_mcp_server.handle({"jsonrpc": "2.0", "id": 3, "method": "nope"})
         self.assertEqual(missing["error"]["code"], -32601)
+
+
+class TestSiteDeploy(unittest.TestCase):
+    def test_validation_and_protected_projects(self):
+        from ops.shared.siteops import deploy_generated_site
+
+        self.assertIn("error", deploy_generated_site("UPL-x", "Bad Name!"))
+        self.assertIn("protected", deploy_generated_site("UPL-x", "pj-assistant-web")["error"])
+        self.assertIn(
+            "no registered upload",
+            deploy_generated_site("UPL-" + "0" * 32, "pj-test-site")["error"],
+        )

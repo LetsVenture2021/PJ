@@ -337,6 +337,12 @@ from ops.shared import semantic_memory as _semantic  # noqa: E402
 TOOL_SCHEMAS.extend(_semantic.SEMANTIC_SCHEMAS)
 DISPATCH_TABLE.update(_semantic.SEMANTIC_DISPATCH)
 
+# --- Sites: approval-gated publishing of generated sites to Pages ------------
+from ops.shared import siteops as _siteops  # noqa: E402
+
+TOOL_SCHEMAS.extend(_siteops.SITEOPS_SCHEMAS)
+DISPATCH_TABLE.update(_siteops.SITEOPS_DISPATCH)
+
 # --- ChiefOps: executive operations toolkit ----------------------------------
 # Calendar, reminders, mail drafts, relationship memory, portfolio,
 # commitments, revenue pipeline, decision journal, risk register, web
