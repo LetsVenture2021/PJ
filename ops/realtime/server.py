@@ -64,6 +64,7 @@ from ops.realtime.payload_validation import (
     validate_outbound_event,
     validate_outbound_payload,
 )
+from ops.workflows.ui import create_workflow_blueprint
 from realtime_config import realtime_session_config, realtime_tool_schemas
 from responses_runtime import (
     capability_manifest,
@@ -143,6 +144,7 @@ app.config.update(
 )
 app.config.setdefault("UPLOAD_SCANNER", None)
 CORS(app)  # allow local browser origins when running on localhost
+app.register_blueprint(create_workflow_blueprint())
 
 
 @app.before_request
