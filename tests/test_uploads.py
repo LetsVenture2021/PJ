@@ -22,12 +22,15 @@ class TestDocumentUploads(unittest.TestCase):
             "ARTIFACTS_DIR": docops.ARTIFACTS_DIR,
         }
         self.old_uploads_dir = document_uploads.UPLOADS_DIR
+        self.old_derived_dir = document_uploads.DERIVED_DIR
         docops._DB_PATH = root / "test.sqlite3"
         docops.DOCS_DIR = root / "documents"
         document_uploads.UPLOADS_DIR = docops.DOCS_DIR / "uploads"
+        document_uploads.DERIVED_DIR = document_uploads.UPLOADS_DIR / ".derived"
         docops.EXPORTS_DIR = docops.DOCS_DIR / "exports"
         docops.ARTIFACTS_DIR = docops.EXPORTS_DIR / ".artifacts"
         document_uploads.UPLOADS_DIR.mkdir(parents=True)
+        document_uploads.DERIVED_DIR.mkdir(parents=True)
         docops.EXPORTS_DIR.mkdir()
         docops.ARTIFACTS_DIR.mkdir()
 
@@ -60,6 +63,7 @@ class TestDocumentUploads(unittest.TestCase):
         for name, value in self.old_docops.items():
             setattr(docops, name, value)
         document_uploads.UPLOADS_DIR = self.old_uploads_dir
+        document_uploads.DERIVED_DIR = self.old_derived_dir
         self.temp_dir.cleanup()
 
     def _upload(self, endpoint, files, paths=None):
@@ -99,6 +103,27 @@ class TestDocumentUploads(unittest.TestCase):
         self.assertEqual(registered["count"], 1)
         preview = document_uploads.get_uploaded_document(payload["upload_id"])
         self.assertIn("Uploaded source.", preview["content"])
+        self.assertRegex(metadata["document_id"], r"^DOC-[a-f0-9]{32}$")
+        self.assertFalse(metadata["reused"])
+
+    def test_same_content_reuses_canonical_document(self):
+        first = self._upload(
+            "/upload/files",
+            [("one.txt", b"same body", "text/plain")],
+            ["one.txt"],
+        )
+        second = self._upload(
+            "/upload/folder",
+            [("nested.txt", b"same body", "text/plain")],
+            ["project/nested.txt"],
+        )
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 201)
+        first_doc = first.get_json()["files"][0]
+        second_doc = second.get_json()["files"][0]
+        self.assertEqual(first_doc["document_id"], second_doc["document_id"])
+        self.assertFalse(first_doc["reused"])
+        self.assertTrue(second_doc["reused"])
 
     def test_multiple_file_upload(self):
         response = self._upload(

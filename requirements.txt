@@ -41,6 +41,7 @@ pyee==13.0.1
 pylibsrtp==1.0.0
 pyOpenSSL==26.3.0
 python-pptx==1.0.2
+pypdf==6.1.3
 referencing==0.37.0
 reportlab==5.0.0
 requests==2.34.2

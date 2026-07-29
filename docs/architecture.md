@@ -288,6 +288,11 @@ Local state is intentionally single-host:
   reservations, local tool records, and artifact links.
 - `state.json` stores terminal Responses continuation state.
 - `documents/exports/` contains exported and immutable artifact files.
+- `documents/uploads/` stores immutable user upload originals and
+  `documents/uploads/.derived/` stores versioned local extraction outputs.
+- `scripts/upload_processor.py` is the durable local worker entry point for
+  queued upload processing (`--once` for batch runs, `--watch` for service
+  mode).
 - OpenAI retains provider-side response continuity identified by
   `last_response_id`; the repository provides no shared multi-instance state.
 
