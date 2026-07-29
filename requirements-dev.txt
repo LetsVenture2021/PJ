@@ -3,4 +3,5 @@ mypy_extensions==1.1.0
 pathspec==1.1.1
 pip-audit==2.10.1
 pre-commit==4.6.1
+PyYAML==6.0.2
 ruff==0.16.0
