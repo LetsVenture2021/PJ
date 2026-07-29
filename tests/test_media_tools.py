@@ -210,3 +210,13 @@ class TestOfficeExtraction(unittest.TestCase):
             preview = extract_preview(path, classification)
             self.assertIn("Formulas", preview)
             self.assertIn("=A1*2", preview)
+
+
+class TestCitationMarkerStripping(unittest.TestCase):
+    def test_raw_citation_glyphs_are_removed(self):
+        from ops.realtime.orchestration import strip_citation_markers
+
+        text = "Remote work is allowed.citeturn0file1L8-L13 More text."
+        self.assertEqual(strip_citation_markers(text), "Remote work is allowed. More text.")
+        self.assertEqual(strip_citation_markers("plain text"), "plain text")
+        self.assertIsNone(strip_citation_markers(None))
