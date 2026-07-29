@@ -1026,9 +1026,19 @@ class ResponsesOrchestrator:
                     return
                 if required_format and output_text:
                     yield {"type": "text.delta", "delta": output_text}
+                from ops.docs.container_artifacts import persist_response_containers
                 from ops.images.persist_generated import persist_generated_images
 
                 generated_images = persist_generated_images(final_response)
+                for document in persist_response_containers(final_response):
+                    generated_images.append(
+                        {
+                            "upload_id": document.get("upload_id"),
+                            "saved_path": document.get("saved_path"),
+                            "size": document.get("size"),
+                            "revised_prompt": "",
+                        }
+                    )
                 output_text = strip_citation_markers(output_text)
                 completion = {
                     "type": "completion",

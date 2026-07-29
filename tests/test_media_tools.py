@@ -220,3 +220,34 @@ class TestCitationMarkerStripping(unittest.TestCase):
         self.assertEqual(strip_citation_markers(text), "Remote work is allowed. More text.")
         self.assertEqual(strip_citation_markers("plain text"), "plain text")
         self.assertIsNone(strip_citation_markers(None))
+
+
+class TestContainerAutoPersist(unittest.TestCase):
+    def test_container_ids_are_collected_and_deduped(self):
+        from unittest.mock import patch as _patch
+
+        from ops.docs import container_artifacts
+
+        calls = []
+
+        def fake_fetch(container_id):
+            calls.append(container_id)
+            return {
+                "status": "retrieved",
+                "documents": [
+                    {"saved_path": f"uploads/x/{container_id}.png", "upload_id": "UPL-x", "size": 1}
+                ],
+            }
+
+        response = {
+            "output": [
+                {"type": "code_interpreter_call", "container_id": "cntr_aaa11111"},
+                {"type": "code_interpreter_call", "container_id": "cntr_aaa11111"},
+                {"type": "shell_call", "environment": {"container_id": "cntr_bbb22222"}},
+                {"type": "message"},
+            ]
+        }
+        with _patch.object(container_artifacts, "fetch_container_artifacts", fake_fetch):
+            records = container_artifacts.persist_response_containers(response)
+        self.assertEqual(calls, ["cntr_aaa11111", "cntr_bbb22222"])
+        self.assertEqual(len(records), 2)

@@ -101,3 +101,35 @@ CONTAINER_ARTIFACT_DISPATCH = {
         container_id, session_id
     )
 }
+
+
+def persist_response_containers(response) -> list:
+    """Auto-persist files from any containers used in a response.
+
+    Code-interpreter and hosted-shell calls reference expiring containers;
+    their /mnt/data outputs are copied into durable upload storage so the
+    model's sandbox: links never become dead ends. Best-effort by design.
+    """
+
+    def _get(value, key, default=None):
+        if isinstance(value, dict):
+            return value.get(key, default)
+        return getattr(value, key, default)
+
+    records = []
+    try:
+        container_ids = []
+        for item in _get(response, "output") or []:
+            if _get(item, "type") in {"code_interpreter_call", "shell_call"}:
+                container_id = _get(item, "container_id") or _get(
+                    _get(item, "environment") or {}, "container_id"
+                )
+                if container_id and container_id not in container_ids:
+                    container_ids.append(container_id)
+        for container_id in container_ids[:3]:
+            result = fetch_container_artifacts(container_id)
+            if result.get("status") == "retrieved":
+                records.extend(result["documents"])
+    except Exception:
+        return records
+    return records
