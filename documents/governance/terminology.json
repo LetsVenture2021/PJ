@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "terms": [
+    {"preferred": "PJ", "prohibited_aliases": ["P.J."], "capitalization": "PJ", "product_name": true},
+    {"preferred": "OpenAI Responses API", "prohibited_aliases": ["Assistants API"], "acronym_expansion": "API: application programming interface"},
+    {"preferred": "Cloudflare Worker", "prohibited_aliases": ["CloudFlare worker"], "capitalization": "Cloudflare Worker"}
+  ]
+}
