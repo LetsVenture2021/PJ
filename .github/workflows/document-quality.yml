@@ -32,7 +32,11 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
-          git diff --name-only --diff-filter=ACMR "$BASE" HEAD -- documents/ > /tmp/docs
+          git diff --name-only --diff-filter=ACMR "$BASE" HEAD -- docs/ documents/ > /tmp/docs
+          if [[ ! -s /tmp/docs ]]; then
+            echo "No document files changed."
+            exit 0
+          fi
           args=()
           while IFS= read -r path; do args+=(--changed-file "$path"); done < /tmp/docs
           python -m ops.docs.quality.cli check --manifest documents/library-manifest.json "${args[@]}"

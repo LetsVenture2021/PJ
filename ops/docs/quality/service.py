@@ -18,6 +18,14 @@ class QualityGateError(ValueError):
     """Raised when a stale, mismatched, or failing report is used."""
 
 
+def _entry_source(entry: dict[str, Any]) -> str:
+    for key in ("source", "path"):
+        value = entry.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
 def _sha(value: bytes | str) -> str:
     if isinstance(value, str):
         value = value.encode("utf-8")
@@ -108,7 +116,7 @@ def validate_manifest(
         while progressed:
             progressed = False
             for entry in data["documents"]:
-                source = str(entry.get("source", ""))
+                source = _entry_source(entry)
                 dependencies = {str(item) for item in entry.get("depends_on", [])}
                 if source in selected or dependencies & selected:
                     if source not in selected:
@@ -116,8 +124,8 @@ def validate_manifest(
                         progressed = True
     current = today or date.today()
     reports: list[QualityReport] = []
-    for entry in sorted(data["documents"], key=lambda item: str(item.get("source", ""))):
-        source = str(entry.get("source", ""))
+    for entry in sorted(data["documents"], key=_entry_source):
+        source = _entry_source(entry)
         if selected and source not in selected:
             continue
         report = validate_document(root / source, waivers=entry.get("waivers", []), today=current)

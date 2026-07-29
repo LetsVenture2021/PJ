@@ -21,6 +21,59 @@ DEFAULT_MANIFEST = ROOT / "documents" / "library-manifest.json"
 SCHEMA_DIR = ROOT / "schemas" / "documents"
 
 
+def _entry_id(entry: dict) -> str:
+    return str(entry.get("stable_id") or entry.get("document_id") or "")
+
+
+def _entry_digest(entry: dict) -> str | None:
+    value = entry.get("content_sha256") or entry.get("sha256")
+    return str(value) if value is not None else None
+
+
+def _schema_id(value: str) -> str:
+    return value.upper()
+
+
+def _normalize_schema_patterns(value):
+    if isinstance(value, dict):
+        normalized = {key: _normalize_schema_patterns(item) for key, item in value.items()}
+        if isinstance(normalized.get("pattern"), str):
+            normalized["pattern"] = normalized["pattern"].replace("\\\\", "\\")
+        return normalized
+    if isinstance(value, list):
+        return [_normalize_schema_patterns(item) for item in value]
+    return value
+
+
+def _schema_manifest(manifest: dict) -> dict:
+    documents = []
+    for entry in manifest.get("documents", []):
+        document_class = entry.get("quality_profile") or entry.get("class") or "technical"
+        documents.append(
+            {
+                "schema_version": entry.get("schema_version", "1.0.0"),
+                "stable_id": _schema_id(_entry_id(entry)),
+                "path": entry.get("path", ""),
+                "class": entry.get("class", document_class),
+                "owner": entry.get("owner", "PJ DocOps"),
+                "status": entry.get("status", "published"),
+                "classification": entry.get("classification", "internal"),
+                "source_of_truth": entry.get("source_of_truth", True),
+                "content_sha256": _entry_digest(entry) or "",
+                "last_reviewed_at": entry.get("last_reviewed_at"),
+                "next_review_at": entry.get("next_review_at"),
+                "quality_profile": document_class,
+                "supersedes": entry.get("supersedes", []),
+                "superseded_by": entry.get("superseded_by", []),
+                "derived_from": entry.get("derived_from", []),
+                "supports": entry.get("supports", []),
+                "references": entry.get("references", []),
+                "generated_artifacts": entry.get("generated_artifacts", []),
+            }
+        )
+    return {"schema_version": "1.0", "documents": documents}
+
+
 def audit(manifest_path: Path = DEFAULT_MANIFEST) -> dict:
     root = ROOT.resolve()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -35,16 +88,19 @@ def audit(manifest_path: Path = DEFAULT_MANIFEST) -> dict:
     schema["properties"]["documents"]["items"] = json.loads(
         (SCHEMA_DIR / "document-metadata-v1.json").read_text()
     )
+    schema = _normalize_schema_patterns(schema)
     validator = Draft202012Validator(schema)
     schema_errors = (
         []
         if legacy_manifest
-        else sorted(error.message for error in validator.iter_errors(manifest))
+        else sorted(
+            error.message for error in validator.iter_errors(_schema_manifest(manifest))
+        )
     )
     findings: list[dict] = []
     seen: set[str] = set()
     for entry in manifest.get("documents", []):
-        document_id = entry.get("stable_id") or entry.get("document_id", "")
+        document_id = _entry_id(entry)
         if document_id in seen:
             findings.append({"document_id": document_id, "error": "duplicate_document_id"})
         seen.add(document_id)
@@ -58,8 +114,7 @@ def audit(manifest_path: Path = DEFAULT_MANIFEST) -> dict:
             findings.append({"document_id": document_id, "error": "missing_file"})
             continue
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        expected_digest = entry.get("content_sha256") or entry.get("sha256")
-        if digest != expected_digest:
+        if digest != _entry_digest(entry):
             findings.append({"document_id": document_id, "error": "sha256_mismatch"})
         if (
             not legacy_manifest

@@ -750,6 +750,15 @@ function deriveResponsesBridgeBaseUrl(env) {
 }
 
 function isResponsesRoute(method, pathname) {
+  if (method === "POST" && pathname === "/conversations") {
+    return true;
+  }
+  if (
+    (/^\/conversations\/[A-Za-z0-9_-]{8,128}\/events$/.test(pathname) && method === "GET") ||
+    (/^\/conversations\/[A-Za-z0-9_-]{8,128}\/(turns|realtime-token)$/.test(pathname) && method === "POST")
+  ) {
+    return true;
+  }
   if (method === "GET" && pathname === "/responses/capabilities") {
     return true;
   }
@@ -2024,7 +2033,7 @@ export default {
       return handleExecuteTool(request, env, corsOrigin, requestId);
     }
 
-    if (url.pathname.startsWith("/responses/")) {
+    if (url.pathname.startsWith("/responses/") || url.pathname.startsWith("/conversations")) {
       return handleResponsesProxy(request, env, corsOrigin, requestId);
     }
 

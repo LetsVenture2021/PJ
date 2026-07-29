@@ -1,5 +1,6 @@
 """Deterministic document quality and security gates."""
 
+from .artifacts import Block, CanonicalDocument, quality_check, write_quality_report
 from .model import QualityConfig, QualityReport, report_schema
 from .scorecard import (
     calculate_scorecard,
@@ -20,6 +21,8 @@ from .service import (
 from .validation import validate_content, validate_path
 
 __all__ = [
+    "Block",
+    "CanonicalDocument",
     "QualityConfig",
     "QualityGateError",
     "QualityReport",
@@ -38,4 +41,6 @@ __all__ = [
     "validate_document",
     "validate_manifest",
     "validate_path",
+    "quality_check",
+    "write_quality_report",
 ]

@@ -66,8 +66,12 @@ from ops.realtime.payload_validation import (
     validate_outbound_event,
     validate_outbound_payload,
 )
+from ops.conversations.models import ConversationContext, ConversationRequest
+from ops.conversations.routing import CapabilityRouter, RoutingError
+from ops.conversations.service import ConversationService
 from ops.jobs.service import create_jobs_blueprint
 from ops.workflows.ui import create_workflow_blueprint
+from runtime_config import load_runtime_config
 from realtime_config import realtime_session_config, realtime_tool_schemas
 from responses_runtime import (
     capability_manifest,
@@ -148,6 +152,7 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Strict",
 )
 app.config.setdefault("UPLOAD_SCANNER", None)
+app.config.setdefault("CONVERSATION_SERVICE", ConversationService())
 app.config.setdefault("JOB_SERVICE", None)
 app.register_blueprint(create_jobs_blueprint(lambda: app.config["JOB_SERVICE"]))
 CORS(app)  # allow local browser origins when running on localhost
@@ -312,7 +317,7 @@ def _uses_pj_protocol():
         "/tool-schemas",
         "/upload/files",
         "/upload/folder",
-    } or request.path.startswith("/responses/")
+    } or request.path.startswith(("/responses/", "/conversations"))
 
 
 def _validate_protocol_request(req_id):
@@ -1132,6 +1137,132 @@ def prompt_perfect():
         {"ok": True, "prompt": promptops.public_result(result)},
         req_id=req_id,
     )
+
+
+def _conversation_service():
+    return app.config["CONVERSATION_SERVICE"]
+
+
+@app.route("/conversations", methods=["POST"])
+def create_conversation():
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id)
+    if auth_error:
+        return auth_error
+    payload = request.get_json(silent=True) or {}
+    if not isinstance(payload, dict):
+        return _error_response("invalid_json", "Expected a JSON object.", 400, req_id)
+    requested_id = payload.get("conversation_id")
+    service = _conversation_service()
+    if requested_id and service.exists(requested_id):
+        conversation_id, created = requested_id, False
+    else:
+        stored = chatlog.new_session(
+            str(payload.get("title", ""))[:MAX_SESSION_TITLE_LENGTH], channel="web"
+        )
+        conversation_id, created = service.create(stored["id"]), True
+        service.publish(conversation_id, "conversation.created")
+    return _json_response(
+        {"ok": True, "conversation": {"id": conversation_id}, "created": created},
+        201 if created else 200,
+        req_id,
+    )
+
+
+@app.route("/conversations/<conversation_id>/turns", methods=["POST"])
+def create_conversation_turn(conversation_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id)
+    if auth_error:
+        return auth_error
+    service = _conversation_service()
+    if not service.exists(conversation_id):
+        return _error_response("conversation_not_found", "Conversation not found.", 404, req_id)
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return _error_response("invalid_json", "Expected a JSON object.", 400, req_id)
+    try:
+        modalities = tuple(
+            payload.get("modalities")
+            or (["attachment"] if payload.get("attachments") else ["text"])
+        )
+        conversation_request = ConversationRequest(
+            text=str(payload.get("text", "")),
+            modalities=modalities,
+            attachments=tuple(payload.get("attachments", ())),
+            requested_output_format=payload.get("requested_output_format"),
+            latency_preference=payload.get("latency_preference", "balanced"),
+            risk_class=payload.get("risk_class", "low"),
+            session_id=conversation_id,
+            project_id=payload.get("project_id"),
+            tool_names=tuple(payload.get("tool_names", ())),
+            connector_names=tuple(payload.get("connector_names", ())),
+            preferred_route=payload.get("preferred_route"),
+        )
+        config = load_runtime_config()
+        context = ConversationContext(
+            conversation_id,
+            payload.get("project_id"),
+            provider_availability=payload.get("provider_availability", {}),
+            connector_health=payload.get("connector_health", {}),
+            estimated_latency_ms=payload.get("estimated_latency_ms", {}),
+            estimated_cost_usd=payload.get("estimated_cost_usd", {}),
+        )
+        decision = CapabilityRouter(config.conversation_routing, config.tool_policy).choose(
+            conversation_request, context
+        )
+    except (TypeError, ValueError, RoutingError) as exc:
+        code = getattr(exc, "reason_code", "invalid_conversation_turn")
+        return _error_response(code, "This turn cannot be routed safely.", 422, req_id)
+    accepted = service.publish(
+        conversation_id,
+        "turn.accepted",
+        {"route": decision.route, "reason_code": decision.reason_code},
+    )
+    if decision.route in {"responses", "delegated"}:
+        service.publish(
+            conversation_id,
+            "routing.transition",
+            {"route": decision.route, "reason_code": decision.reason_code},
+        )
+    return _json_response(
+        {"ok": True, "event": {"id": accepted.id}, "routing": decision.as_dict()}, 202, req_id
+    )
+
+
+@app.route("/conversations/<conversation_id>/events", methods=["GET"])
+def conversation_events(conversation_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id)
+    if auth_error:
+        return auth_error
+    service = _conversation_service()
+    if not service.exists(conversation_id):
+        return _error_response("conversation_not_found", "Conversation not found.", 404, req_id)
+    raw_cursor = request.headers.get("Last-Event-ID", request.args.get("cursor", "0"))
+    try:
+        cursor = max(0, int(raw_cursor))
+    except ValueError:
+        return _error_response("invalid_event_cursor", "Event cursor is invalid.", 400, req_id)
+
+    def generate():
+        for event in service.events(conversation_id, cursor):
+            yield f"id: {event.id}\nevent: {event.type}\ndata: {json.dumps(event.data, separators=(',', ':'))}\n\n"
+
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.route("/conversations/<conversation_id>/realtime-token", methods=["POST"])
+def conversation_realtime_token(conversation_id):
+    if not _conversation_service().exists(conversation_id):
+        return _error_response(
+            "conversation_not_found", "Conversation not found.", 404, _request_id()
+        )
+    return mint_realtime_token()
 
 
 @app.route("/responses/sessions", methods=["POST"])

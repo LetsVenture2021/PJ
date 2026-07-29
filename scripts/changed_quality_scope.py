@@ -24,7 +24,9 @@ def main() -> int:
         selected = [
             path
             for path in paths
-            if path.startswith(("documents/", "ops/docs/quality/", "schemas/document-quality"))
+            if path.startswith(
+                ("docs/", "documents/", "ops/docs/quality/", "schemas/document-quality")
+            )
         ]
     print("\0".join(selected), end="\0" if selected else "")
     return 0
