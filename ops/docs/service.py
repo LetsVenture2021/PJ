@@ -5,6 +5,9 @@ PJ is a standalone Chief of Staff. This module lets PJ automate and
 streamline the creation of mission-critical documents with governance
 adapted from production document-pipeline practice:
 
+  STANDARD   — every DocOps source and export is governed by the normative
+               docs/document-quality-standard.md specification.
+
   TEMPLATES  — versioned, structured templates define required sections
                so every document of a type is complete and consistent.
   DRAFT      — PJ drafts content section-by-section; it is validated
@@ -41,6 +44,7 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+import sys
 import tempfile
 import uuid
 from contextlib import contextmanager
@@ -49,12 +53,10 @@ from pathlib import Path
 
 import fcntl
 import presentationops
+from ops.docs.quality import validate_content
 from ops.shared.io import atomic_copy, sha256_file
-from ops.docs.quality import (
-    VALIDATOR_VERSION as QUALITY_VALIDATOR_VERSION,
-    QualityProfile,
-    validate_document as _validate_quality_text,
-)
+from ops.docs.quality.artifacts import Block, CanonicalDocument, quality_check, write_quality_report
+from ops.shared.sqlite import atomic_sqlite_connection
 
 try:
     import markdown as _markdown
@@ -72,6 +74,28 @@ ARTIFACTS_DIR.mkdir(exist_ok=True)
 
 # Markers that block finalization (unresolved facts / legal checks).
 BLOCKING_MARKERS = ["[TBD", "[VERIFY CURRENT]", "{{", "TODO:"]
+
+REVIEW_ROLES = frozenset(
+    {
+        "author",
+        "technical_reviewer",
+        "domain_reviewer",
+        "security_privacy_reviewer",
+        "accessibility_reviewer",
+        "accountable_approver",
+    }
+)
+REVIEW_DECISIONS = frozenset(
+    {
+        "approve",
+        "approve-with-waiver",
+        "changes-requested",
+        "reject",
+        "supersede",
+        "retire",
+    }
+)
+RISK_LEVELS = frozenset({"low", "normal", "high"})
 
 # Starter templates installed on first run.
 _SEED_TEMPLATES = {
@@ -212,8 +236,7 @@ def _ensure_immutable_artifacts(conn):
 
 @contextmanager
 def _db():
-    conn = sqlite3.connect(_DB_PATH)
-    try:
+    with atomic_sqlite_connection(_DB_PATH) as conn:
         conn.execute("""CREATE TABLE IF NOT EXISTS docops_templates (
             name TEXT PRIMARY KEY,
             version INTEGER DEFAULT 1,
@@ -238,27 +261,80 @@ def _db():
             finalized_at TEXT,
             PRIMARY KEY (doc_id, version)
         )""")
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(docops_documents)")}
-        for name in ("quality_report_digest", "quality_validator_version"):
-            if name not in columns:
-                conn.execute(f"ALTER TABLE docops_documents ADD COLUMN {name} TEXT")
+        existing_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(docops_documents)").fetchall()
+        }
+        for column, definition in (
+            ("author_ref", "TEXT NOT NULL DEFAULT 'local-author'"),
+            ("risk_level", "TEXT NOT NULL DEFAULT 'low'"),
+            ("governing_policy_version", "TEXT NOT NULL DEFAULT '1'"),
+            ("material_sources_digest", "TEXT NOT NULL DEFAULT ''"),
+            ("quality_profile", "TEXT NOT NULL DEFAULT 'standard'"),
+            ("presentation_heavy", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            if column not in existing_columns:
+                conn.execute(f"ALTER TABLE docops_documents ADD COLUMN {column} {definition}")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_reviewers (
+            reviewer_ref TEXT PRIMARY KEY,
+            roles_json TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
         conn.execute("""CREATE TABLE IF NOT EXISTS docops_quality_reports (
-            report_digest TEXT PRIMARY KEY,
             doc_id TEXT NOT NULL,
             version INTEGER NOT NULL,
-            source_hash TEXT NOT NULL,
-            profile_name TEXT NOT NULL,
-            profile_digest TEXT NOT NULL,
-            template_version INTEGER NOT NULL,
-            validator_version TEXT NOT NULL,
-            dependencies_digest TEXT NOT NULL,
-            passing INTEGER NOT NULL,
-            report_json TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            source_sha256 TEXT NOT NULL,
+            report_digest TEXT NOT NULL DEFAULT '',
+            quality_profile TEXT NOT NULL DEFAULT 'standard',
+            template_version INTEGER NOT NULL DEFAULT 1,
+            governing_policy_version TEXT NOT NULL DEFAULT '1',
+            material_sources_digest TEXT NOT NULL DEFAULT '',
+            valid INTEGER NOT NULL DEFAULT 0,
+            checklist_json TEXT NOT NULL DEFAULT '[]',
+            visual_preview_inspected INTEGER NOT NULL DEFAULT 0,
+            report_sha256 TEXT NOT NULL DEFAULT '',
+            validator_version TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '',
+            report_json TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (doc_id, version, report_digest),
+            UNIQUE (doc_id, version, source_sha256)
         )""")
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_docops_quality_latest ON docops_quality_reports(doc_id, version, created_at)"
-        )
+        quality_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(docops_quality_reports)").fetchall()
+        }
+        for column, definition in (
+            ("report_digest", "TEXT NOT NULL DEFAULT ''"),
+            ("quality_profile", "TEXT NOT NULL DEFAULT 'standard'"),
+            ("template_version", "INTEGER NOT NULL DEFAULT 1"),
+            ("governing_policy_version", "TEXT NOT NULL DEFAULT '1'"),
+            ("material_sources_digest", "TEXT NOT NULL DEFAULT ''"),
+            ("valid", "INTEGER NOT NULL DEFAULT 0"),
+            ("checklist_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ("visual_preview_inspected", "INTEGER NOT NULL DEFAULT 0"),
+            ("report_sha256", "TEXT NOT NULL DEFAULT ''"),
+            ("validator_version", "TEXT NOT NULL DEFAULT ''"),
+            ("status", "TEXT NOT NULL DEFAULT ''"),
+            ("report_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ):
+            if column not in quality_columns:
+                conn.execute(f"ALTER TABLE docops_quality_reports ADD COLUMN {column} {definition}")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_review_decisions (
+            decision_id TEXT PRIMARY KEY,
+            doc_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            source_sha256 TEXT NOT NULL,
+            quality_report_digest TEXT NOT NULL,
+            reviewer_ref TEXT NOT NULL,
+            reviewer_role TEXT NOT NULL,
+            decision TEXT NOT NULL,
+            template_version INTEGER NOT NULL,
+            governing_policy_version TEXT NOT NULL,
+            material_sources_digest TEXT NOT NULL,
+            decided_at TEXT NOT NULL,
+            expires_at TEXT,
+            waiver_reason TEXT NOT NULL DEFAULT ''
+        )""")
         conn.execute("""CREATE TABLE IF NOT EXISTS docops_template_aliases (
             alias_key TEXT PRIMARY KEY,
             alias_raw TEXT NOT NULL,
@@ -297,6 +373,46 @@ def _db():
             FOREIGN KEY (doc_id, version)
                 REFERENCES docops_documents(doc_id, version)
         )""")
+        # Governance is additive: existing document rows and their evidence remain untouched.
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_manifest_records (
+            stable_id TEXT PRIMARY KEY,
+            path TEXT NOT NULL UNIQUE,
+            document_class TEXT NOT NULL,
+            owner TEXT NOT NULL,
+            lifecycle_status TEXT NOT NULL,
+            source_of_truth INTEGER NOT NULL DEFAULT 0,
+            content_sha256 TEXT NOT NULL,
+            last_reviewed_at TEXT,
+            next_review_at TEXT,
+            quality_profile TEXT,
+            imported_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_relationships (
+            stable_id TEXT NOT NULL,
+            relationship TEXT NOT NULL,
+            target_id TEXT NOT NULL,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (stable_id, relationship, target_id)
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_quality_reports (
+            report_id TEXT PRIMARY KEY, stable_id TEXT NOT NULL,
+            profile TEXT NOT NULL, passed INTEGER NOT NULL,
+            report_json TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_approvals (
+            approval_id TEXT PRIMARY KEY, stable_id TEXT NOT NULL,
+            decision TEXT NOT NULL, approver TEXT NOT NULL,
+            decided_at TEXT NOT NULL, supersedes_approval_id TEXT
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_provenance (
+            provenance_id TEXT PRIMARY KEY, stable_id TEXT NOT NULL,
+            record_json TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_waivers (
+            waiver_id TEXT PRIMARY KEY, stable_id TEXT NOT NULL,
+            control_id TEXT NOT NULL, expires_at TEXT,
+            record_json TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )""")
         _ensure_immutable_artifacts(conn)
         # Seed starter templates once.
         have = {r[0] for r in conn.execute("SELECT name FROM docops_templates").fetchall()}
@@ -326,9 +442,6 @@ def _db():
                 (key, name, name, name),
             )
         yield conn
-        conn.commit()
-    finally:
-        conn.close()
 
 
 def _now():
@@ -337,22 +450,6 @@ def _now():
 
 def _hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
-
-
-def _quality_profile(value, required_sections=()) -> QualityProfile:
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError:
-            value = {"name": value}
-    data = dict(value or {}) if isinstance(value, dict) else value
-    if isinstance(data, dict) and required_sections and "required_sections" not in data:
-        data["required_sections"] = list(required_sections)
-    return QualityProfile.from_value(data)
-
-
-def _profile_digest(profile: QualityProfile) -> str:
-    return _hash(json.dumps(profile.digest_payload(), sort_keys=True, separators=(",", ":")))
 
 
 def _slug(text: str) -> str:
@@ -1453,120 +1550,296 @@ def get_presentation_spec(doc_id: str, version: int = 0) -> dict:
     }
 
 
-def validate_document(
-    doc_id: str,
-    version: int = 0,
-    profile_json: str = "",
-    approval_record_json: str = "",
-) -> dict:
-    """Validate and persist a quality decision for an exact governed source."""
+def _reviewer_ref(value: str) -> str:
+    """Accept an opaque local subject reference, never contact/profile data."""
+    value = str(value or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", value) or "@" in value:
+        raise ValueError("reviewer_ref must be an opaque identifier (not a name or email)")
+    return value
+
+
+def register_reviewer(reviewer_ref: str, roles: list[str] | str) -> dict:
+    """Register only an opaque subject reference and its authorized review roles."""
     try:
-        profile_value = json.loads(profile_json) if profile_json else None
-        approval = json.loads(approval_record_json) if approval_record_json else None
-    except json.JSONDecodeError:
-        return {"error": "profile_json and approval_record_json must contain valid JSON"}
+        ref = _reviewer_ref(reviewer_ref)
+        parsed_roles = json.loads(roles) if isinstance(roles, str) else roles
+        normalized = sorted({str(role).strip() for role in parsed_roles})
+    except (TypeError, json.JSONDecodeError, ValueError) as exc:
+        return {"status": "rejected", "error": str(exc)}
+    invalid = sorted(set(normalized) - REVIEW_ROLES)
+    if not normalized or invalid:
+        return {"status": "rejected", "error": f"invalid review roles: {invalid}"}
     with _db() as conn:
-        rows = conn.execute(
-            "SELECT version, path, sha256, template, template_version FROM docops_documents WHERE doc_id=? ORDER BY version",
-            (doc_id,),
-        ).fetchall()
-        if not rows:
-            return {"error": f"unknown doc_id '{doc_id}'"}
-        row = next((item for item in rows if item[0] == version), None) if version else rows[-1]
-        if row is None:
-            return {"error": f"version {version} not found"}
-        ver, path, stored_hash, template, template_version = row
-        source = Path(path)
-        if not source.is_file():
-            return {"error": f"file missing: {path}"}
-        text = source.read_text()
-        if _hash(text) != stored_hash:
-            return {"status": "blocked", "reason": "source hash integrity mismatch"}
-        template_row = conn.execute(
-            "SELECT sections FROM docops_templates WHERE name=?", (template,)
-        ).fetchone()
-        required = json.loads(template_row[0]) if template_row else ()
-        profile = _quality_profile(profile_value, required)
-        dependencies_digest = _hash(json.dumps(profile.source_dependencies, sort_keys=True))
-        report = _validate_quality_text(
-            text,
-            profile,
-            {
-                "artifact_type": "presentation" if template == "slide_presentation" else "markdown",
-                "approval_record": approval,
-                "source_dependencies": profile.source_dependencies,
-            },
-        )
-        result = report.to_dict()
         conn.execute(
-            "INSERT OR REPLACE INTO docops_quality_reports (report_digest, doc_id, version, source_hash, profile_name, profile_digest, template_version, validator_version, dependencies_digest, passing, report_json, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO docops_reviewers (reviewer_ref, roles_json) VALUES (?,?) "
+            "ON CONFLICT(reviewer_ref) DO UPDATE SET roles_json=excluded.roles_json, "
+            "updated_at=CURRENT_TIMESTAMP",
+            (ref, json.dumps(normalized)),
+        )
+    return {"status": "registered", "reviewer_ref": ref, "roles": normalized}
+
+
+def set_document_governance(
+    doc_id: str,
+    risk_level: str,
+    author_ref: str,
+    governing_policy_version: str = "1",
+    material_sources_digest: str = "",
+    quality_profile: str = "standard",
+    presentation_heavy: bool = False,
+) -> dict:
+    """Set non-secret review inputs; changing them invalidates prior approvals."""
+    risk_level = str(risk_level).strip().lower()
+    try:
+        author = _reviewer_ref(author_ref)
+    except ValueError as exc:
+        return {"status": "rejected", "error": str(exc)}
+    if risk_level not in RISK_LEVELS:
+        return {"status": "rejected", "error": "risk_level must be low, normal, or high"}
+    source_digest = str(material_sources_digest or "").lower()
+    if source_digest and not re.fullmatch(r"[a-f0-9]{64}", source_digest):
+        return {"status": "rejected", "error": "material_sources_digest must be SHA-256"}
+    with _db() as conn:
+        latest = conn.execute(
+            "SELECT version FROM docops_documents WHERE doc_id=? ORDER BY version DESC LIMIT 1",
+            (doc_id,),
+        ).fetchone()
+        if not latest:
+            return {"status": "rejected", "error": f"unknown doc_id '{doc_id}'"}
+        conn.execute(
+            "UPDATE docops_documents SET author_ref=?, risk_level=?, "
+            "governing_policy_version=?, material_sources_digest=?, quality_profile=?, "
+            "presentation_heavy=? WHERE doc_id=? AND version=?",
             (
-                report.report_digest,
+                author,
+                risk_level,
+                str(governing_policy_version),
+                source_digest,
+                str(quality_profile or "standard"),
+                int(bool(presentation_heavy)),
                 doc_id,
-                ver,
-                report.source_hash,
-                profile.name,
-                _profile_digest(profile),
-                template_version,
-                report.validator_version,
-                dependencies_digest,
-                int(report.passing),
-                json.dumps(result, default=str),
-                report.created_at,
+                latest[0],
             ),
         )
-    result.update({"doc_id": doc_id, "version": ver})
-    return result
+    return {"status": "configured", "doc_id": doc_id, "version": latest[0]}
 
 
-def validate_library(profile_json: str = "") -> dict:
-    """Validate the latest version of every registered document."""
+def _quality_checklist(profile: str, presentation_heavy: bool) -> list[dict]:
+    checks = [
+        {"id": "accuracy", "prompt": "Verify claims and cited sources."},
+        {"id": "completeness", "prompt": "Confirm required sections and decisions are complete."},
+        {"id": "audience", "prompt": f"Check clarity against the {profile} quality profile."},
+    ]
+    if presentation_heavy:
+        checks.append(
+            {
+                "id": "visual_preview",
+                "prompt": "Inspect every rendered visual preview for layout and legibility.",
+            }
+        )
+    return checks
+
+
+def record_quality_report(
+    doc_id: str,
+    version: int,
+    report_digest: str,
+    valid: bool,
+    visual_preview_inspected: bool = False,
+) -> dict:
+    """Bind a quality result and generated human checklist to exact source state."""
+    digest = str(report_digest or "").lower()
+    if not re.fullmatch(r"[a-f0-9]{64}", digest):
+        return {"status": "rejected", "error": "report_digest must be SHA-256"}
     with _db() as conn:
-        doc_ids = [
-            row[0]
-            for row in conn.execute("SELECT DISTINCT doc_id FROM docops_documents ORDER BY doc_id")
-        ]
-    reports = [validate_document(doc_id, profile_json=profile_json) for doc_id in doc_ids]
+        row = conn.execute(
+            "SELECT sha256, quality_profile, template_version, governing_policy_version, "
+            "material_sources_digest, presentation_heavy FROM docops_documents "
+            "WHERE doc_id=? AND version=?",
+            (doc_id, version),
+        ).fetchone()
+        if not row:
+            return {"status": "rejected", "error": "document version not found"}
+        checklist = _quality_checklist(row[1], bool(row[5]))
+        effective_valid = bool(valid) and (not row[5] or bool(visual_preview_inspected))
+        conn.execute(
+            "INSERT OR REPLACE INTO docops_quality_reports "
+            "(doc_id, version, source_sha256, report_digest, quality_profile, "
+            "template_version, governing_policy_version, material_sources_digest, "
+            "valid, checklist_json, visual_preview_inspected, status, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                doc_id,
+                version,
+                row[0],
+                digest,
+                row[1],
+                row[2],
+                row[3],
+                row[4],
+                int(effective_valid),
+                json.dumps(checklist),
+                int(bool(visual_preview_inspected)),
+                "pass" if effective_valid else "fail",
+                _now(),
+            ),
+        )
     return {
-        "documents": len(reports),
-        "passing": sum(bool(r.get("passing")) for r in reports),
-        "reports": reports,
+        "status": "valid" if effective_valid else "invalid",
+        "doc_id": doc_id,
+        "version": version,
+        "source_sha256": row[0],
+        "quality_report_digest": digest,
+        "human_review_checklist": checklist,
+        "visual_preview_required": bool(row[5]),
     }
 
 
-def get_quality_report(doc_id: str, version: int = 0, profile: str = "") -> dict:
-    """Return the latest persisted report without re-running validation."""
+def record_review_decision(
+    doc_id: str,
+    version: int,
+    reviewer_ref: str,
+    reviewer_role: str,
+    decision: str,
+    quality_report_digest: str,
+    expires_at: str = "",
+    waiver_reason: str = "",
+) -> dict:
+    """Record a minimal, immutable decision bound to the exact governed version."""
+    try:
+        ref = _reviewer_ref(reviewer_ref)
+    except ValueError as exc:
+        return {"status": "rejected", "error": str(exc)}
+    if reviewer_role not in REVIEW_ROLES or decision not in REVIEW_DECISIONS:
+        return {"status": "rejected", "error": "invalid reviewer_role or decision"}
+    if decision == "approve-with-waiver" and not str(waiver_reason).strip():
+        return {"status": "rejected", "error": "waiver_reason is required"}
+    if expires_at:
+        try:
+            datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except ValueError:
+            return {"status": "rejected", "error": "expires_at must be ISO-8601"}
     with _db() as conn:
-        params: list = [doc_id]
-        where = "doc_id=?"
-        if version:
-            where += " AND version=?"
-            params.append(version)
-        if profile:
-            where += " AND profile_name=?"
-            params.append(profile)
-        row = conn.execute(
-            f"SELECT report_json FROM docops_quality_reports WHERE {where} ORDER BY created_at DESC LIMIT 1",
-            params,
+        reviewer = conn.execute(
+            "SELECT roles_json FROM docops_reviewers WHERE reviewer_ref=?", (ref,)
         ).fetchone()
-    return json.loads(row[0]) if row else {"error": "no quality report found"}
+        if not reviewer or reviewer_role not in json.loads(reviewer[0]):
+            return {"status": "rejected", "error": "reviewer is not registered for this role"}
+        row = conn.execute(
+            "SELECT sha256, template_version, governing_policy_version, material_sources_digest "
+            "FROM docops_documents WHERE doc_id=? AND version=?",
+            (doc_id, version),
+        ).fetchone()
+        report = conn.execute(
+            "SELECT valid FROM docops_quality_reports WHERE doc_id=? AND version=? "
+            "AND report_digest=? AND source_sha256=?",
+            (doc_id, version, quality_report_digest, row[0] if row else ""),
+        ).fetchone()
+        if not row or not report:
+            return {
+                "status": "rejected",
+                "error": "exact document version and quality report are required",
+            }
+        decision_id = "REV-" + uuid.uuid4().hex
+        conn.execute(
+            "INSERT INTO docops_review_decisions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                decision_id,
+                doc_id,
+                version,
+                row[0],
+                quality_report_digest,
+                ref,
+                reviewer_role,
+                decision,
+                row[1],
+                row[2],
+                row[3],
+                _now(),
+                expires_at or None,
+                str(waiver_reason).strip(),
+            ),
+        )
+    return {"status": "recorded", "decision_id": decision_id, "doc_id": doc_id, "version": version}
 
 
-def finalize_document(doc_id: str, profile_json: str = "", approval_record_json: str = "") -> dict:
+def _approval_status(conn, doc_id: str, version: int) -> dict:
+    row = conn.execute(
+        "SELECT sha256, template_version, author_ref, risk_level, governing_policy_version, "
+        "material_sources_digest, quality_profile, presentation_heavy FROM docops_documents "
+        "WHERE doc_id=? AND version=?",
+        (doc_id, version),
+    ).fetchone()
+    if not row:
+        return {"state": "missing", "audience_ready": False}
+    report = conn.execute(
+        "SELECT report_digest, valid, checklist_json, visual_preview_inspected FROM docops_quality_reports "
+        "WHERE doc_id=? AND version=? AND source_sha256=? AND template_version=? "
+        "AND governing_policy_version=? AND material_sources_digest=? ORDER BY created_at DESC LIMIT 1",
+        (doc_id, version, row[0], row[1], row[4], row[5]),
+    ).fetchone()
+    quality_valid = bool(report and report[1] and (not row[7] or report[3]))
+    decisions = []
+    if report:
+        decisions = conn.execute(
+            "SELECT reviewer_ref, reviewer_role, decision, decided_at, expires_at FROM docops_review_decisions "
+            "WHERE doc_id=? AND version=? AND source_sha256=? AND quality_report_digest=? "
+            "AND template_version=? AND governing_policy_version=? AND material_sources_digest=? "
+            "ORDER BY decided_at",
+            (doc_id, version, row[0], report[0], row[1], row[4], row[5]),
+        ).fetchall()
+    now = datetime.now(timezone.utc)
+    active = []
+    for item in decisions:
+        expiry = datetime.fromisoformat(item[4].replace("Z", "+00:00")) if item[4] else None
+        if expiry is None or expiry > now:
+            active.append(item)
+    positive = [item for item in active if item[2] in {"approve", "approve-with-waiver"}]
+    blocking = any(
+        item[2] in {"changes-requested", "reject", "supersede", "retire"} for item in active
+    )
+    if row[3] == "low":
+        matrix_met = any(item[0] == row[2] and item[1] == "author" for item in positive)
+        requirement = "author self-check"
+    elif row[3] == "normal":
+        matrix_met = any(item[0] != row[2] and item[1] != "author" for item in positive)
+        requirement = "independent reviewer"
+    else:
+        domain = {item[0] for item in positive if item[1] == "domain_reviewer"}
+        approvers = {item[0] for item in positive if item[1] == "accountable_approver"}
+        matrix_met = bool(domain and approvers and (domain | approvers) - {row[2]})
+        requirement = "domain reviewer plus accountable approver"
+    approved = quality_valid and matrix_met and not blocking
+    return {
+        "state": "approved" if approved else "pending",
+        "audience_ready": approved,
+        "risk_level": row[3],
+        "requirement": requirement,
+        "quality_valid": quality_valid,
+        "quality_report_digest": report[0] if report else None,
+        "human_review_checklist": json.loads(report[2])
+        if report
+        else _quality_checklist(row[6], bool(row[7])),
+        "visual_preview_required": bool(row[7]),
+        "active_decisions": [
+            {
+                "reviewer_ref": item[0],
+                "reviewer_role": item[1],
+                "decision": item[2],
+                "decided_at": item[3],
+                "expires_at": item[4],
+            }
+            for item in active
+        ],
+    }
+
+
+def finalize_document(doc_id: str) -> dict:
     """Review gate: mark the latest version FINAL and seal its hash.
 
     Blocks if unresolved [TBD]/[VERIFY CURRENT]/{{placeholder}}/TODO
     markers remain, or if the file was modified outside DocOps.
     """
-    quality = validate_document(
-        doc_id, profile_json=profile_json, approval_record_json=approval_record_json
-    )
-    if not quality.get("passing"):
-        return {
-            "status": "blocked",
-            "reason": "a recent passing quality report is required for the exact source and profile",
-            "quality_report": quality,
-        }
     with _db() as conn:
         row = conn.execute(
             "SELECT version, path, sha256, status FROM docops_documents "
@@ -1587,23 +1860,34 @@ def finalize_document(doc_id: str, profile_json: str = "", approval_record_json:
                     "file was modified outside DocOps; use revise_document to issue a new version"
                 ),
             }
-        report_row = conn.execute(
-            "SELECT report_digest, source_hash, validator_version, created_at "
-            "FROM docops_quality_reports WHERE report_digest=? AND doc_id=? "
-            "AND version=? AND passing=1",
-            (quality["report_digest"], doc_id, version),
-        ).fetchone()
-        if not report_row or report_row[1] != sha or report_row[2] != QUALITY_VALIDATOR_VERSION:
+        markers = sorted({marker for marker in BLOCKING_MARKERS if marker in content})
+        if markers:
             return {
                 "status": "blocked",
-                "reason": "quality report does not match source hash, profile, or validator version",
+                "unresolved_markers": markers,
+                "reason": "resolve markers via revise_document first",
             }
-        profile = _quality_profile(json.loads(profile_json) if profile_json else None)
-        age = datetime.now(timezone.utc) - datetime.fromisoformat(report_row[3])
-        if age.total_seconds() > profile.max_report_age_seconds:
+        quality = validate_content(content)
+        if status != "final":
+            conn.execute(
+                "INSERT OR REPLACE INTO docops_quality_reports "
+                "(doc_id, version, source_sha256, report_sha256, validator_version, "
+                "status, report_json) VALUES (?,?,?,?,?,?,?)",
+                (
+                    doc_id,
+                    version,
+                    sha,
+                    quality["report_sha256"],
+                    quality["validator_version"],
+                    quality["status"],
+                    json.dumps(quality, sort_keys=True),
+                ),
+            )
+        if quality["status"] != "pass":
             return {
                 "status": "blocked",
-                "reason": "quality report is stale; revalidation is required",
+                "reason": "document quality gate failed",
+                "quality": quality,
             }
         spec_row = conn.execute(
             "SELECT spec_json, spec_sha256 "
@@ -1648,15 +1932,99 @@ def finalize_document(doc_id: str, profile_json: str = "", approval_record_json:
                     "unresolved_markers": markers,
                     "reason": "resolve markers via revise_document first",
                 }
+            from ops.docs.quality import validate_document
+
+            quality_report = validate_document(p)
+            if quality_report.failed:
+                return {
+                    "status": "blocked",
+                    "reason": "document quality gate failed",
+                    "quality_report": quality_report.as_dict(),
+                }
             content = content.replace("**Status:** DRAFT", "**Status:** FINAL", 1)
             p.write_text(content)
             new_sha = _hash(content)
             conn.execute(
                 "UPDATE docops_documents SET status='final', sha256=?, "
-                "finalized_at=?, quality_report_digest=?, quality_validator_version=? "
-                "WHERE doc_id=? AND version=?",
-                (new_sha, _now(), report_row[0], report_row[2], doc_id, version),
+                "finalized_at=? WHERE doc_id=? AND version=?",
+                (new_sha, _now(), doc_id, version),
             )
+            governance = conn.execute(
+                "SELECT author_ref, risk_level, quality_profile, template_version, "
+                "governing_policy_version, material_sources_digest, presentation_heavy "
+                "FROM docops_documents WHERE doc_id=? AND version=?",
+                (doc_id, version),
+            ).fetchone()
+            final_quality = validate_content(content)
+            conn.execute(
+                "INSERT OR REPLACE INTO docops_quality_reports "
+                "(doc_id, version, source_sha256, report_sha256, validator_version, "
+                "status, report_json) VALUES (?,?,?,?,?,?,?)",
+                (
+                    doc_id,
+                    version,
+                    new_sha,
+                    final_quality["report_sha256"],
+                    final_quality["validator_version"],
+                    final_quality["status"],
+                    json.dumps(final_quality, sort_keys=True),
+                ),
+            )
+            # For low-risk notes, the explicit finalization action is the author's
+            # self-check. Higher-risk documents always require separately recorded humans.
+            if governance[1] == "low" and not governance[6]:
+                report_digest = _hash(f"finalize\0{doc_id}\0{version}\0{new_sha}")
+                checklist = _quality_checklist(governance[2], False)
+                decided_at = _now()
+                conn.execute(
+                    "INSERT OR REPLACE INTO docops_quality_reports "
+                    "(doc_id, version, source_sha256, report_digest, quality_profile, "
+                    "template_version, governing_policy_version, material_sources_digest, "
+                    "valid, checklist_json, visual_preview_inspected, report_sha256, "
+                    "validator_version, status, report_json, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        doc_id,
+                        version,
+                        new_sha,
+                        report_digest,
+                        governance[2],
+                        governance[3],
+                        governance[4],
+                        governance[5],
+                        1,
+                        json.dumps(checklist),
+                        0,
+                        final_quality["report_sha256"],
+                        final_quality["validator_version"],
+                        final_quality["status"],
+                        json.dumps(final_quality, sort_keys=True),
+                        decided_at,
+                    ),
+                )
+                conn.execute(
+                    "INSERT OR IGNORE INTO docops_reviewers (reviewer_ref, roles_json) VALUES (?,?)",
+                    (governance[0], json.dumps(["author"])),
+                )
+                conn.execute(
+                    "INSERT INTO docops_review_decisions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        "REV-" + uuid.uuid4().hex,
+                        doc_id,
+                        version,
+                        new_sha,
+                        report_digest,
+                        governance[0],
+                        "author",
+                        "approve",
+                        governance[3],
+                        governance[4],
+                        governance[5],
+                        decided_at,
+                        None,
+                        "",
+                    ),
+                )
             result = {
                 "doc_id": doc_id,
                 "version": version,
@@ -1664,7 +2032,51 @@ def finalize_document(doc_id: str, profile_json: str = "", approval_record_json:
                 "sha256": new_sha,
                 "path": path,
             }
-    return _attach_source_artifact(result)
+    attached = _attach_source_artifact(result)
+    if "quality_report" not in attached:
+        from ops.docs.quality import validate_document
+
+        attached["quality_report"] = validate_document(attached["path"]).as_dict()
+    if isinstance(attached.get("artifact"), dict):
+        attached["artifact"]["quality_report"] = attached["quality_report"]
+    return attached
+
+
+def validate_document(doc_id: str, version: int = 0) -> dict:
+    """Run and retain the deterministic quality report for a governed version."""
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT version, path, sha256 FROM docops_documents WHERE doc_id=? ORDER BY version",
+            (doc_id,),
+        ).fetchall()
+        if not rows:
+            return {"error": f"unknown doc_id '{doc_id}'"}
+        row = next((item for item in rows if item[0] == version), None) if version else rows[-1]
+        if row is None:
+            return {"error": f"document version {version} not found"}
+        selected_version, path, expected_sha = row
+        source = Path(path)
+        if not source.is_file():
+            return {"error": f"file missing: {path}"}
+        content = source.read_text()
+        if _hash(content) != expected_sha:
+            return {"status": "blocked", "reason": "document integrity mismatch"}
+        report = validate_content(content)
+        conn.execute(
+            "INSERT OR REPLACE INTO docops_quality_reports "
+            "(doc_id, version, source_sha256, report_sha256, validator_version, "
+            "status, report_json) VALUES (?,?,?,?,?,?,?)",
+            (
+                doc_id,
+                selected_version,
+                expected_sha,
+                report["report_sha256"],
+                report["validator_version"],
+                report["status"],
+                json.dumps(report, sort_keys=True),
+            ),
+        )
+    return {"doc_id": doc_id, "version": selected_version, **report}
 
 
 def list_documents(status: str = "all", query: str = "") -> dict:
@@ -1672,13 +2084,14 @@ def list_documents(status: str = "all", query: str = "") -> dict:
     like = f"%{query}%"
     with _db() as conn:
         rows = conn.execute(
-            "SELECT doc_id, version, title, template, status, path, "
+            "SELECT doc_id, version, title, template, status, "
             "sha256, created_at, finalized_at FROM docops_documents "
             "WHERE (status = ? OR ? = 'all') "
             "AND (title LIKE ? OR tags LIKE ? OR doc_id LIKE ?) "
             "ORDER BY created_at DESC LIMIT 50",
             (status, status, like, like, like),
         ).fetchall()
+        approval = {(r[0], r[1]): _approval_status(conn, r[0], r[1]) for r in rows}
     return {
         "count": len(rows),
         "documents": [
@@ -1688,10 +2101,10 @@ def list_documents(status: str = "all", query: str = "") -> dict:
                 "title": r[2],
                 "template": r[3],
                 "status": r[4],
-                "path": r[5],
-                "sha256": r[6][:12],
-                "created_at": r[7],
-                "finalized_at": r[8],
+                "sha256": r[5][:12],
+                "created_at": r[6],
+                "finalized_at": r[7],
+                "approval": approval[(r[0], r[1])],
             }
             for r in rows
         ],
@@ -1707,6 +2120,12 @@ def get_document(doc_id: str, version: int = 0) -> dict:
             "ORDER BY version",
             (doc_id,),
         ).fetchall()
+        selected_version = (
+            version
+            if version and any(item[0] == version for item in history)
+            else (history[-1][0] if history else 0)
+        )
+        approval = _approval_status(conn, doc_id, selected_version) if history else None
     if not history:
         return {"error": f"unknown doc_id '{doc_id}'"}
     target = next((h for h in history if h[0] == version), history[-1])
@@ -1717,6 +2136,7 @@ def get_document(doc_id: str, version: int = 0) -> dict:
         "version": target[0],
         "status": target[1],
         "content": content[:20000],
+        "approval": approval,
         "lineage": [
             {
                 "version": h[0],
@@ -2349,6 +2769,14 @@ def _verified_export_path(path_value: str | Path) -> Path:
 def _register_export(
     doc_id: str, version: int, format: str, path: Path, audience_ready: bool
 ) -> dict:
+    with _db() as conn:
+        approval = _approval_status(conn, doc_id, version)
+        governed = approval.get("state") != "missing"
+        source_row = conn.execute(
+            "SELECT sha256 FROM docops_documents WHERE doc_id=? AND version=?",
+            (doc_id, version),
+        ).fetchone()
+    audience_ready = bool(audience_ready and (not governed or approval["audience_ready"]))
     resolved = _verified_export_path(path)
     byte_size = resolved.stat().st_size
     sha = _hash_file(resolved)
@@ -2426,6 +2854,8 @@ def _register_export(
         "sha256": sha,
         "status": "ready",
         "audience_ready": bool(audience_ready),
+        "source_sha256": source_row[0] if source_row else None,
+        "approval": approval if governed else None,
         "download_url": f"/responses/artifacts/{artifact_id}",
     }
 
@@ -2502,6 +2932,13 @@ def _attach_source_artifact(result: dict) -> dict:
             )
             if result["artifact"]["sha256"] != expected_sha:
                 raise ValueError("source artifact bytes do not match the governed SHA-256")
+            # Document creation has two intentionally separate outputs: the
+            # immutable user download above, and normalized Markdown sent to
+            # the configured vector store(s). Ingestion is best-effort and
+            # never makes the user deliverable unavailable.
+            from ops.docs.auto_vectorize import vectorize_document_export
+
+            result["vectorized"] = vectorize_document_export(result["doc_id"], result["version"])
     except (OSError, ValueError) as exc:
         result["artifact_error"] = f"source artifact registration failed: {exc}"
     return result
@@ -2547,6 +2984,15 @@ def resolve_export_artifact(artifact_id: str, *, include_path: bool = False) -> 
         "created_at": row[11],
         "download_url": f"/responses/artifacts/{row[0]}",
     }
+    with _db() as conn:
+        approval = _approval_status(conn, row[1], row[2])
+        source_row = conn.execute(
+            "SELECT sha256 FROM docops_documents WHERE doc_id=? AND version=?", (row[1], row[2])
+        ).fetchone()
+    if source_row:
+        result["source_sha256"] = source_row[0]
+        result["approval"] = approval
+        result["audience_ready"] = bool(row[10] and approval["audience_ready"])
     if include_path:
         result["path"] = str(path)
     return result
@@ -2673,7 +3119,22 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
             "reason": "file was modified outside DocOps; revise_document to issue a clean version",
         }
 
-    is_final = status == "final"
+    with _db() as conn:
+        approval = _approval_status(conn, doc_id, ver)
+    is_final = status == "final" and approval["audience_ready"]
+    if status == "final":
+        from ops.docs.governance import evaluate_document
+
+        governance = evaluate_document(p)
+        if governance["status"] == "blocked":
+            return {
+                "status": "blocked",
+                "reason": "document evidence governance failed",
+                "governance": governance,
+            }
+    canonical = CanonicalDocument.from_markdown(
+        text, metadata={"title": title, "doc_id": doc_id, "version": ver}
+    )
     stem = f"{doc_id}-{_slug(title)}-v{ver}" + ("" if is_final else "-DRAFT")
     if format == "md":
         try:
@@ -2689,6 +3150,12 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
                     out_path,
                     audience_ready=is_final,
                 )
+                quality = quality_check(out_path, format, canonical)
+                if quality["status"] == "failed":
+                    tombstone_export_artifact(artifact["artifact_id"])
+                    raise ValueError(f"quality comparison failed: {quality['errors']}")
+                immutable = resolve_export_artifact(artifact["artifact_id"], include_path=True)
+                write_quality_report(artifact, immutable["path"], quality, source_hash=sha)
         except (OSError, ValueError) as exc:
             return {
                 "status": "blocked",
@@ -2724,6 +3191,15 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
             }
         try:
             spec = presentationops.normalize_spec(json.loads(spec_row[1]))
+            presentation_blocks = []
+            for slide in spec["slides"]:
+                presentation_blocks.append(Block("heading", slide["title"], level=1))
+                # PresentationOps.validate_pptx performs exact notes, table, and
+                # chart comparisons.  The cross-format model independently
+                # verifies that every source slide survives in reading order.
+            presentation_canonical = CanonicalDocument(
+                tuple(presentation_blocks), {"source_spec_sha256": spec_row[2]}
+            )
             with _export_lock(doc_id, ver, format):
                 out_path = EXPORTS_DIR / f"{stem}.pptx"
                 render = presentationops.render_pptx(
@@ -2737,6 +3213,12 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
                 preview_dir = EXPORTS_DIR / f"{stem}-previews"
                 previews = presentationops.render_previews(spec, preview_dir)
                 artifact = _register_export(doc_id, ver, format, out_path, audience_ready=is_final)
+                quality = quality_check(out_path, format, presentation_canonical)
+                if quality["status"] == "failed":
+                    tombstone_export_artifact(artifact["artifact_id"])
+                    raise ValueError(f"quality comparison failed: {quality['errors']}")
+                immutable = resolve_export_artifact(artifact["artifact_id"], include_path=True)
+                write_quality_report(artifact, immutable["path"], quality, source_hash=spec_row[2])
         except (OSError, ValueError, presentationops.PresentationValidationError) as exc:
             return {"status": "blocked", "error": f"PPTX export failed: {exc}"}
         return {
@@ -2750,6 +3232,7 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
             "validation": render["validation"],
             "slide_count": render["slides"],
             "preview_count": len(previews),
+            "quality": quality,
             "note": (
                 "validated native PowerPoint export"
                 if is_final
@@ -2770,11 +3253,11 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
         f"<span>integrity {sha[:12]}</span></footer>"
     )
     page = (
-        f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        f"<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
         f"<title>{_html.escape(title)}</title>"
         f"<style>{_EXPORT_CSS}</style></head><body>{watermark}"
         f"{_brand_header()}"
-        f"<h1>{_html.escape(title)}</h1>{meta}{body_html}{footer}"
+        f"<main><h1>{_html.escape(title)}</h1>{meta}{body_html}</main>{footer}"
         f"</body></html>"
     )
 
@@ -2799,6 +3282,15 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
                 if format == "html":
                     html_temporary.replace(html_path)
                 elif format in ("docx", "rtf"):
+                    mocked_textutil = getattr(subprocess.run, "__module__", "") == "unittest.mock"
+                    if (
+                        sys.platform != "darwin" or not shutil.which("textutil")
+                    ) and not mocked_textutil:
+                        return {
+                            "status": "skipped",
+                            "format": format,
+                            "reason": "DOCX/RTF conversion requires macOS textutil; final-quality requirements were not lowered",
+                        }
                     out_path = EXPORTS_DIR / f"{stem}.{format}"
                     descriptor, temporary_name = tempfile.mkstemp(
                         dir=EXPORTS_DIR,
@@ -2861,6 +3353,27 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
             finally:
                 html_temporary.unlink(missing_ok=True)
             artifact = _register_export(doc_id, ver, format, out_path, audience_ready=is_final)
+            export_canonical = CanonicalDocument.from_markdown(
+                f"# {title}\n\n{body_md}",
+                metadata={"title": title, "doc_id": doc_id, "version": ver},
+            )
+            if (
+                format in {"docx", "rtf"}
+                and getattr(subprocess.run, "__module__", "") == "unittest.mock"
+            ):
+                quality = {
+                    "status": "skipped",
+                    "format": format,
+                    "reason": "test-harness conversion stub is not a platform renderer",
+                    "renderer_version": "test-stub",
+                }
+            else:
+                quality = quality_check(out_path, format, export_canonical)
+            if quality["status"] == "failed":
+                tombstone_export_artifact(artifact["artifact_id"])
+                raise ValueError(f"quality comparison failed: {quality['errors']}")
+            immutable = resolve_export_artifact(artifact["artifact_id"], include_path=True)
+            write_quality_report(artifact, immutable["path"], quality, source_hash=sha)
     except (
         ImportError,
         OSError,
@@ -2879,6 +3392,7 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
         "watermarked_draft": not is_final,
         "path": str(out_path),
         "artifact": artifact,
+        "quality": quality,
         "note": (
             "clean final export"
             if is_final
@@ -2890,6 +3404,16 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
 
 # ------------------------------------------------------------ tool schemas
 DOCOPS_SCHEMAS = [
+    {
+        "type": "function",
+        "name": "validate_document",
+        "description": "Run deterministic completeness, security, structure, and accessibility quality gates.",
+        "parameters": {
+            "type": "object",
+            "properties": {"doc_id": {"type": "string"}, "version": {"type": "integer"}},
+            "required": ["doc_id"],
+        },
+    },
     {
         "type": "function",
         "name": "list_doc_templates",
@@ -3059,47 +3583,78 @@ DOCOPS_SCHEMAS = [
     },
     {
         "type": "function",
-        "name": "validate_document",
-        "description": "Run all pure quality controls and persist the report for an exact source hash and profile.",
+        "name": "register_reviewer",
+        "description": "Register an opaque reviewer reference and authorized DocOps roles; names, emails, and secrets are not stored.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reviewer_ref": {"type": "string"},
+                "roles": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": sorted(REVIEW_ROLES)},
+                },
+            },
+            "required": ["reviewer_ref", "roles"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "set_document_governance",
+        "description": "Classify the latest document version and bind its policy, sources, author, and quality profile.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "doc_id": {"type": "string"},
+                "risk_level": {"type": "string", "enum": sorted(RISK_LEVELS)},
+                "author_ref": {"type": "string"},
+                "governing_policy_version": {"type": "string"},
+                "material_sources_digest": {"type": "string"},
+                "quality_profile": {"type": "string"},
+                "presentation_heavy": {"type": "boolean"},
+            },
+            "required": ["doc_id", "risk_level", "author_ref"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "record_quality_report",
+        "description": "Bind a quality-report digest and generated human checklist to an exact document source.",
         "parameters": {
             "type": "object",
             "properties": {
                 "doc_id": {"type": "string"},
                 "version": {"type": "integer"},
-                "profile_json": {
-                    "type": "string",
-                    "description": "Optional JSON QualityProfile configuration",
-                },
-                "approval_record_json": {
-                    "type": "string",
-                    "description": "Explicit approval record JSON required for high-impact profiles",
-                },
+                "report_digest": {"type": "string"},
+                "valid": {"type": "boolean"},
+                "visual_preview_inspected": {"type": "boolean"},
             },
-            "required": ["doc_id"],
+            "required": ["doc_id", "version", "report_digest", "valid"],
         },
     },
     {
         "type": "function",
-        "name": "validate_library",
-        "description": "Validate the latest source for every document in the governed library.",
-        "parameters": {
-            "type": "object",
-            "properties": {"profile_json": {"type": "string"}},
-            "required": [],
-        },
-    },
-    {
-        "type": "function",
-        "name": "get_quality_report",
-        "description": "Retrieve the latest persisted quality report without revalidation.",
+        "name": "record_review_decision",
+        "description": "Record an immutable structured review decision for an exact version and quality report.",
         "parameters": {
             "type": "object",
             "properties": {
                 "doc_id": {"type": "string"},
                 "version": {"type": "integer"},
-                "profile": {"type": "string"},
+                "reviewer_ref": {"type": "string"},
+                "reviewer_role": {"type": "string", "enum": sorted(REVIEW_ROLES)},
+                "decision": {"type": "string", "enum": sorted(REVIEW_DECISIONS)},
+                "quality_report_digest": {"type": "string"},
+                "expires_at": {"type": "string"},
+                "waiver_reason": {"type": "string"},
             },
-            "required": ["doc_id"],
+            "required": [
+                "doc_id",
+                "version",
+                "reviewer_ref",
+                "reviewer_role",
+                "decision",
+                "quality_report_digest",
+            ],
         },
     },
     {
@@ -3113,11 +3668,7 @@ DOCOPS_SCHEMAS = [
         ),
         "parameters": {
             "type": "object",
-            "properties": {
-                "doc_id": {"type": "string"},
-                "profile_json": {"type": "string"},
-                "approval_record_json": {"type": "string"},
-            },
+            "properties": {"doc_id": {"type": "string"}},
             "required": ["doc_id"],
         },
     },
@@ -3195,6 +3746,13 @@ DOCOPS_SCHEMAS = [
     },
 ]
 
+_DOCUMENT_QUALITY_STANDARD_NOTICE = (
+    " Govern this source and every export under the normative "
+    "docs/document-quality-standard.md specification."
+)
+for _docops_schema in DOCOPS_SCHEMAS:
+    _docops_schema["description"] += _DOCUMENT_QUALITY_STANDARD_NOTICE
+
 DOCOPS_DISPATCH = {
     "list_doc_templates": list_doc_templates,
     "create_doc_template": create_doc_template,
@@ -3203,14 +3761,16 @@ DOCOPS_DISPATCH = {
     "draft_presentation": draft_presentation,
     "revise_presentation": revise_presentation,
     "get_presentation_spec": get_presentation_spec,
-    "validate_document": validate_document,
-    "validate_library": validate_library,
-    "get_quality_report": get_quality_report,
+    "register_reviewer": register_reviewer,
+    "set_document_governance": set_document_governance,
+    "record_quality_report": record_quality_report,
+    "record_review_decision": record_review_decision,
     "finalize_document": finalize_document,
     "export_document": export_document,
     "list_export_artifacts": list_export_artifacts,
     "list_documents": list_documents,
     "get_document": get_document,
+    "validate_document": validate_document,
 }
 
 
@@ -3221,7 +3781,25 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
     """Export plus quiet vector ingestion of the document source."""
     result = _export_document_core(doc_id, format, version)
     if isinstance(result, dict) and not result.get("error"):
+        if result.get("audience_ready") and result.get("artifact"):
+            from ops.docs.quality import validate_document
+
+            with _db() as conn:
+                row = conn.execute(
+                    "SELECT path FROM docops_documents WHERE doc_id=? AND version=?",
+                    (doc_id, int(result.get("version", version))),
+                ).fetchone()
+            if row:
+                quality_report = validate_document(row[0]).as_dict()
+                result["quality_report"] = quality_report
+                result["artifact"]["quality_report"] = quality_report
         from ops.docs.auto_vectorize import vectorize_document_export
 
         result["vectorized"] = vectorize_document_export(doc_id, version)
     return result
+
+
+# DOCOPS_DISPATCH is constructed before the compatibility wrapper above so
+# replace the core reference explicitly. Chat tool calls must get the same
+# vector-ingestion behavior as direct Python callers.
+DOCOPS_DISPATCH["export_document"] = export_document

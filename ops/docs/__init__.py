@@ -10,7 +10,6 @@ from .service import (
     finalize_document,
     get_document,
     get_presentation_spec,
-    get_quality_report,
     list_doc_templates,
     list_documents,
     list_export_artifacts,
@@ -18,9 +17,15 @@ from .service import (
     revise_document,
     revise_presentation,
     validate_document,
-    validate_library,
 )
-from .quality import ControlResult, QualityFinding, QualityProfile, QualityReport, Severity
+from .quality import (
+    calculate_scorecard,
+    generate_monthly_scorecard,
+    record_control_calibration,
+    record_quality_incident,
+    record_quality_run,
+    regression_alerts,
+)
 
 __all__ = [
     "DOCOPS_DISPATCH",
@@ -32,7 +37,6 @@ __all__ = [
     "finalize_document",
     "get_document",
     "get_presentation_spec",
-    "get_quality_report",
     "list_doc_templates",
     "list_documents",
     "list_export_artifacts",
@@ -40,10 +44,10 @@ __all__ = [
     "revise_document",
     "revise_presentation",
     "validate_document",
-    "validate_library",
-    "ControlResult",
-    "QualityFinding",
-    "QualityProfile",
-    "QualityReport",
-    "Severity",
+    "calculate_scorecard",
+    "generate_monthly_scorecard",
+    "record_control_calibration",
+    "record_quality_incident",
+    "record_quality_run",
+    "regression_alerts",
 ]

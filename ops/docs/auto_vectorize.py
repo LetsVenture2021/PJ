@@ -51,25 +51,29 @@ def vectorize_document_export(doc_id: str, version: int = 0) -> bool:
         )
         if not store_ids:
             return False
-        store_id = store_ids[0]
         document = service.get_document(doc_id, version)
         content = document.get("content") or document.get("markdown") or ""
         if not isinstance(content, str) or not content.strip():
             return False
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        if _ledger_seen(service._DB_PATH, digest, store_id):
-            return True  # already embedded; identical re-exports are a no-op
-        if _near_duplicate(service._DB_PATH, doc_id, content, store_id):
-            _ledger_seen(service._DB_PATH, digest, store_id, record=True)
-            return True  # semantically near-identical to an embedded version
         from openai import OpenAI
 
         client = OpenAI()
-        blob = io.BytesIO(content.encode("utf-8"))
-        blob.name = f"{doc_id}_v{document.get('version', version) or 1}.md"
-        uploaded = client.files.create(file=blob, purpose="assistants")
-        client.vector_stores.files.create(store_id, file_id=uploaded.id)
-        _ledger_seen(service._DB_PATH, digest, store_id, record=True)
+        for store_id in dict.fromkeys(str(item) for item in store_ids if item):
+            if _ledger_seen(service._DB_PATH, digest, store_id):
+                continue  # already embedded in this store
+            if _near_duplicate(service._DB_PATH, doc_id, content, store_id):
+                _ledger_seen(service._DB_PATH, digest, store_id, record=True)
+                continue
+            # Each store receives its own vector-ready Markdown upload. This
+            # keeps the downloadable deliverable separate from the normalized
+            # ingestion copy and avoids assuming that provider files can be
+            # safely shared across stores or tenants.
+            blob = io.BytesIO(content.encode("utf-8"))
+            blob.name = f"{doc_id}_v{document.get('version', version) or 1}.md"
+            uploaded = client.files.create(file=blob, purpose="assistants")
+            client.vector_stores.files.create(store_id, file_id=uploaded.id)
+            _ledger_seen(service._DB_PATH, digest, store_id, record=True)
         return True
     except Exception:
         return False

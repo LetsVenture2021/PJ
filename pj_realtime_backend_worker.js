@@ -103,7 +103,7 @@ function corsHeaders(corsOrigin) {
     "access-control-allow-origin": corsOrigin,
     "access-control-allow-methods": "GET,POST,OPTIONS",
     "access-control-allow-headers":
-      "content-type,authorization,x-pj-client-request-id,x-pj-contract-version,x-pj-protocol-version,x-pj-session-id",
+      "content-type,authorization,x-pj-client-request-id,x-pj-contract-version,x-pj-protocol-version,x-pj-session-id,x-pj-organization-id,x-pj-resource-type,x-pj-resource-id",
     "access-control-expose-headers":
       "x-request-id,x-pj-contract-version,x-pj-protocol-version,content-disposition,content-length,etag",
   };
@@ -282,6 +282,99 @@ function buildAccessConfig(env) {
   };
 }
 
+function buildCollaborationConfig(env) {
+  const enabled = String(env.PJ_COLLABORATION_ENABLED || "").toLowerCase() === "true";
+  if (!enabled) {
+    return { enabled: false };
+  }
+  if (!(env.PJ_IDENTITY_CONFIG || "").trim() || !(env.PJ_TENANT_CONFIG || "").trim()) {
+    throw new Error("Collaboration requires PJ_IDENTITY_CONFIG and PJ_TENANT_CONFIG");
+  }
+  let identities;
+  let grants;
+  try {
+    identities = JSON.parse(env.PJ_IDENTITY_CONFIG);
+    grants = JSON.parse(env.PJ_TENANT_CONFIG);
+  } catch {
+    throw new Error("Collaboration identity and tenant configuration must be valid JSON");
+  }
+  if (
+    !identities ||
+    typeof identities !== "object" ||
+    Array.isArray(identities) ||
+    !Array.isArray(grants)
+  ) {
+    throw new Error("Collaboration configuration has an invalid shape");
+  }
+  return { enabled: true, identities, grants };
+}
+
+function requiredResourcePermission(method, pathname) {
+  if (method === "GET" || method === "HEAD") return "viewer";
+  if (pathname.includes("/comments")) return "commenter";
+  if (pathname.includes("/approvals/")) return "approver";
+  return "editor";
+}
+
+const RESOURCE_PERMISSION_LEVEL = { viewer: 1, commenter: 2, editor: 3, approver: 4 };
+
+function authorizeResourceRequest(request, identity, collaboration, now = Date.now()) {
+  if (!collaboration.enabled) return { ok: true, mode: "owner_only" };
+  const principal = collaboration.identities[identity.email];
+  if (!principal || principal.subject !== identity.subject || !principal.organization_id) {
+    return { ok: false, code: "collaboration_identity_forbidden" };
+  }
+  const organizationId = request.headers.get("x-pj-organization-id");
+  const resourceType = request.headers.get("x-pj-resource-type");
+  const resourceId = request.headers.get("x-pj-resource-id");
+  if (
+    !organizationId ||
+    !resourceType ||
+    !resourceId ||
+    organizationId !== principal.organization_id
+  ) {
+    return { ok: false, code: "resource_scope_required" };
+  }
+  const required = requiredResourcePermission(request.method, new URL(request.url).pathname);
+  const grant = collaboration.grants.find(
+    (candidate) =>
+      candidate.principal_id === principal.id &&
+      candidate.organization_id === organizationId &&
+      candidate.resource_type === resourceType &&
+      candidate.resource_id === resourceId &&
+      !candidate.revoked_at &&
+      (!candidate.expires_at || Date.parse(candidate.expires_at) > now) &&
+      RESOURCE_PERMISSION_LEVEL[candidate.permission] >= RESOURCE_PERMISSION_LEVEL[required],
+  );
+  return grant
+    ? { ok: true, mode: "resource_grant", principal }
+    : { ok: false, code: "resource_access_denied" };
+}
+
+async function authorizeShareLink(request, links, token, now = Date.now()) {
+  if (!token || !Array.isArray(links)) return { ok: false, code: "share_link_denied" };
+  const organizationId = request.headers.get("x-pj-organization-id");
+  const resourceType = request.headers.get("x-pj-resource-type");
+  const resourceId = request.headers.get("x-pj-resource-id");
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
+  const tokenHash = [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  const required = requiredResourcePermission(request.method, new URL(request.url).pathname);
+  const link = links.find(
+    (candidate) =>
+      candidate.token_hash === tokenHash &&
+      candidate.organization_id === organizationId &&
+      candidate.resource_type === resourceType &&
+      candidate.resource_id === resourceId &&
+      !candidate.revoked_at &&
+      Date.parse(candidate.expires_at) > now &&
+      RESOURCE_PERMISSION_LEVEL[candidate.permission] >= RESOURCE_PERMISSION_LEVEL[required] &&
+      RESOURCE_PERMISSION_LEVEL[candidate.permission] <= RESOURCE_PERMISSION_LEVEL.commenter,
+  );
+  return link ? { ok: true, mode: "share_link" } : { ok: false, code: "share_link_denied" };
+}
+
 function decodeBase64Url(value) {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) {
     throw new Error("Invalid base64url value");
@@ -432,7 +525,8 @@ async function validateAccessIdentity(request, env, fetchImpl = fetch) {
       throw new Error("Access assertion signature mismatch");
     }
     const email = validateAccessClaims(jwt.claims, config);
-    if (!config.ownerEmails.has(email)) {
+    const collaboration = buildCollaborationConfig(env);
+    if (!config.ownerEmails.has(email) && !collaboration.enabled) {
       return {
         ok: false,
         status: 403,
@@ -656,6 +750,15 @@ function deriveResponsesBridgeBaseUrl(env) {
 }
 
 function isResponsesRoute(method, pathname) {
+  if (method === "POST" && pathname === "/conversations") {
+    return true;
+  }
+  if (
+    (/^\/conversations\/[A-Za-z0-9_-]{8,128}\/events$/.test(pathname) && method === "GET") ||
+    (/^\/conversations\/[A-Za-z0-9_-]{8,128}\/(turns|realtime-token)$/.test(pathname) && method === "POST")
+  ) {
+    return true;
+  }
   if (method === "GET" && pathname === "/responses/capabilities") {
     return true;
   }
@@ -1720,6 +1823,9 @@ export {
   PROTOCOL_VERSION,
   bridgeHeaders,
   buildAccessConfig,
+  buildCollaborationConfig,
+  authorizeResourceRequest,
+  authorizeShareLink,
   createSessionConfig,
   deriveResponsesBridgeBaseUrl,
   fetchTextWithTimeout,
@@ -1878,6 +1984,37 @@ export default {
           requestId,
         );
       }
+      let collaboration;
+      try {
+        collaboration = buildCollaborationConfig(env);
+      } catch {
+        return jsonResponse(
+          errorPayload(
+            "collaboration_configuration_error",
+            "Collaboration is enabled without valid identity and tenant configuration.",
+            requestId,
+          ),
+          503,
+          corsOrigin,
+          requestId,
+        );
+      }
+      if (collaboration.enabled && !buildAccessConfig(env).ownerEmails.has(access.identity.email)) {
+        const authorization = authorizeResourceRequest(request, access.identity, collaboration);
+        if (!authorization.ok) {
+          logEvent(requestId, "resource_access.denied", { code: authorization.code });
+          return jsonResponse(
+            errorPayload(
+              authorization.code,
+              "Access to this tenant resource is denied.",
+              requestId,
+            ),
+            403,
+            corsOrigin,
+            requestId,
+          );
+        }
+      }
     }
 
     if (request.method === "POST" && url.pathname === "/session") {
@@ -1896,7 +2033,7 @@ export default {
       return handleExecuteTool(request, env, corsOrigin, requestId);
     }
 
-    if (url.pathname.startsWith("/responses/")) {
+    if (url.pathname.startsWith("/responses/") || url.pathname.startsWith("/conversations")) {
       return handleResponsesProxy(request, env, corsOrigin, requestId);
     }
 
