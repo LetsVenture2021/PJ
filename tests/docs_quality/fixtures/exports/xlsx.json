@@ -1,0 +1,6 @@
+{
+  "format": "xlsx",
+  "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "audience_ready": true,
+  "requires_quality_report": true
+}

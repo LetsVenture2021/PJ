@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pj.local/schemas/document-quality-report-v1.json",
+  "title": "PJ document quality report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source", "source_sha256", "config_sha256", "status", "findings", "digest"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "source": {"type": "string"},
+    "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "config_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "status": {"enum": ["pass", "fail"]},
+    "findings": {"type": "array", "items": {"$ref": "#/$defs/finding"}}
+  },
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rule_id", "severity", "message", "line", "column", "waived"],
+      "properties": {
+        "rule_id": {"type": "string", "pattern": "^DOC-[A-Z]+-[0-9]{3}$"},
+        "severity": {"enum": ["blocker", "critical", "major", "minor", "advisory"]},
+        "message": {"type": "string"}, "line": {"type": "integer", "minimum": 0},
+        "column": {"type": "integer", "minimum": 0}, "waived": {"type": "boolean"}
+      }
+    }
+  }
+}
