@@ -1,4 +1,5 @@
 """Versioned prompt perfecting for PJ's text and Full Power surfaces."""
+
 import hashlib
 import json
 import re
@@ -10,7 +11,7 @@ from ops.shared.interfaces import ResponsesProvider
 from ops.shared.providers import OpenAIResponsesProvider
 
 
-PROMPT_PERFECTING_VERSION = "1.0"
+PROMPT_PERFECTING_VERSION = "2.0"
 DEFAULT_MAX_INPUT_CHARS = 20000
 DEFAULT_MAX_OUTPUT_CHARS = 30000
 _URL_RE = re.compile(r"https?://[^\s<>'\"]+")
@@ -63,9 +64,7 @@ class PromptPerfectingPayload(BaseModel):
     intent_summary: str = Field(min_length=1, max_length=4000)
     constraints_preserved: list[str] = Field(max_length=25)
 
-    @field_validator(
-        "refined_prompt", "intent_summary", mode="after"
-    )
+    @field_validator("refined_prompt", "intent_summary", mode="after")
     @classmethod
     def _non_whitespace(cls, value: str) -> str:
         if not value.strip():
@@ -91,9 +90,8 @@ def settings_from_config(cfg: dict) -> PromptPerfectingSettings:
             "prompt_perfecting configuration must be an object.",
         )
     surfaces = raw.get("surfaces", ["cli", "full_power", "full_power_voice"])
-    if (
-        not isinstance(surfaces, list)
-        or not all(isinstance(surface, str) and surface for surface in surfaces)
+    if not isinstance(surfaces, list) or not all(
+        isinstance(surface, str) and surface for surface in surfaces
     ):
         raise PromptPerfectingError(
             "invalid_prompt_perfecting_config",
@@ -104,22 +102,15 @@ def settings_from_config(cfg: dict) -> PromptPerfectingSettings:
     effort = raw.get("reasoning_effort") or "low"
     numbers = {
         "timeout_seconds": raw.get("timeout_seconds", 30),
-        "max_input_chars": raw.get(
-            "max_input_chars", DEFAULT_MAX_INPUT_CHARS
-        ),
-        "max_output_chars": raw.get(
-            "max_output_chars", DEFAULT_MAX_OUTPUT_CHARS
-        ),
+        "max_input_chars": raw.get("max_input_chars", DEFAULT_MAX_INPUT_CHARS),
+        "max_output_chars": raw.get("max_output_chars", DEFAULT_MAX_OUTPUT_CHARS),
     }
     if (
         not isinstance(enabled, bool)
         or not isinstance(model, str)
         or not isinstance(effort, str)
         or effort not in {"none", "minimal", "low", "medium", "high", "xhigh"}
-        or any(
-            isinstance(value, bool) or not isinstance(value, int)
-            for value in numbers.values()
-        )
+        or any(isinstance(value, bool) or not isinstance(value, int) for value in numbers.values())
     ):
         raise PromptPerfectingError(
             "invalid_prompt_perfecting_config",
@@ -132,12 +123,8 @@ def settings_from_config(cfg: dict) -> PromptPerfectingSettings:
             timeout_seconds=max(5, min(numbers["timeout_seconds"], 120)),
             reasoning_effort=effort,
             surfaces=frozenset(surfaces),
-            max_input_chars=max(
-                100, min(numbers["max_input_chars"], 50000)
-            ),
-            max_output_chars=max(
-                100, min(numbers["max_output_chars"], 50000)
-            ),
+            max_input_chars=max(100, min(numbers["max_input_chars"], 50000)),
+            max_output_chars=max(100, min(numbers["max_output_chars"], 50000)),
         )
     except ValidationError as exc:
         raise PromptPerfectingError(
@@ -204,25 +191,17 @@ def _validate_result(original: str, payload: dict, max_output_chars: int) -> dic
     return {
         "refined_prompt": normalized,
         "intent_summary": contract.intent_summary.strip(),
-        "constraints_preserved": [
-            item.strip() for item in contract.constraints_preserved
-        ],
+        "constraints_preserved": [item.strip() for item in contract.constraints_preserved],
     }
 
 
 def _missing_preserved_literals(original: str, refined: str) -> set[str]:
     extractors = {
-        "URL": lambda text: {
-            item.rstrip(".,);]") for item in _URL_RE.findall(text)
-        },
+        "URL": lambda text: {item.rstrip(".,);]") for item in _URL_RE.findall(text)},
         "date": lambda text: set(_DATE_RE.findall(text)),
         "quantity": lambda text: set(_QUANTITY_RE.findall(text)),
-        "quoted": lambda text: {
-            match.group(0) for match in _QUOTED_RE.finditer(text)
-        },
-        "code": lambda text: set(
-            _FENCED_CODE_RE.findall(text) + _INLINE_CODE_RE.findall(text)
-        ),
+        "quoted": lambda text: {match.group(0) for match in _QUOTED_RE.finditer(text)},
+        "code": lambda text: set(_FENCED_CODE_RE.findall(text) + _INLINE_CODE_RE.findall(text)),
         "identifier": lambda text: set(_IDENTIFIER_RE.findall(text)),
     }
     missing = set()
@@ -249,19 +228,18 @@ def _unchanged_result(original: str, surface: str, summary: str) -> dict:
 
 
 def perfect_prompt(
-        client,
-        cfg: dict,
-        prompt: str,
-        *,
-        surface: str,
-        required: bool = True,
-        provider: ResponsesProvider | None = None) -> dict:
+    client,
+    cfg: dict,
+    prompt: str,
+    *,
+    surface: str,
+    required: bool = True,
+    provider: ResponsesProvider | None = None,
+) -> dict:
     settings = settings_from_config(cfg)
     original = _normalize_prompt(prompt if isinstance(prompt, str) else "")
     if not original:
-        raise PromptPerfectingError(
-            "invalid_prompt", "Prompt must be a non-empty string."
-        )
+        raise PromptPerfectingError("invalid_prompt", "Prompt must be a non-empty string.")
     if len(original) > settings.max_input_chars:
         raise PromptPerfectingError(
             "prompt_too_large",
@@ -285,12 +263,25 @@ def perfect_prompt(
                 "Prompt perfecting model is not configured.",
             )
         instructions = (
-            "Refine the user's prompt for clarity and execution quality while "
-            "preserving the exact intent, requested format, named entities, facts, "
+            "Perfect the user's prompt into a complete brief with four parts, "
+            "keeping only the parts the request actually needs:\n"
+            "- Goal: state the result to produce, not a list of steps. Name the "
+            "audience or purpose when it changes the output.\n"
+            "- Context: carry over every source, file, tool, or fact the user "
+            "referenced, and note where the executor should look. Never invent "
+            "sources or details; mark essential-but-unstated dimensions as "
+            "open-ended rather than guessing.\n"
+            "- Output: specify format, length, structure, and level of detail. "
+            "Request tables or headers when they would organize the result.\n"
+            "- Boundaries: preserve every stated constraint verbatim - what must "
+            "stay unchanged, what to avoid, approvals required before acting - "
+            "and add a final self-check when the task is consequential.\n"
+            "Preserve the exact intent, requested format, named entities, facts, "
             "constraints, dates, quantities, permissions, scope, and uncertainty. "
-            "Do not answer the prompt. Do not invent requirements. Keep explicit "
-            "approval, refusal, stop, or confirmation language unchanged. Return "
-            "only the requested structured output."
+            "Write in the user's first person. Do not answer the prompt. Do not "
+            "invent requirements. Keep explicit approval, refusal, stop, or "
+            "confirmation language unchanged. Return only the requested "
+            "structured output."
         )
         try:
             provider = provider or OpenAIResponsesProvider(client)
@@ -336,16 +327,16 @@ def perfect_prompt(
             surface,
             "Prompt perfecting failed; the original prompt was retained.",
         )
-    result.update({
-        "original_prompt": original,
-        "changed": result["refined_prompt"] != original,
-        "version": PROMPT_PERFECTING_VERSION,
-        "surface": surface,
-        "original_sha256": hashlib.sha256(original.encode()).hexdigest(),
-        "refined_sha256": hashlib.sha256(
-            result["refined_prompt"].encode()
-        ).hexdigest(),
-    })
+    result.update(
+        {
+            "original_prompt": original,
+            "changed": result["refined_prompt"] != original,
+            "version": PROMPT_PERFECTING_VERSION,
+            "surface": surface,
+            "original_sha256": hashlib.sha256(original.encode()).hexdigest(),
+            "refined_sha256": hashlib.sha256(result["refined_prompt"].encode()).hexdigest(),
+        }
+    )
     return result
 
 

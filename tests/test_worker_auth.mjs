@@ -365,7 +365,7 @@ test("Realtime bridge validates contract, tool manifest, and instructions", asyn
     tool_manifest_sha256: digest(stableJson(tools)),
     instructions,
     instructions_sha256: digest(instructions),
-    prompt_perfecting_version: "1.0",
+    prompt_perfecting_version: "2.0",
     tool_policy_sha256: "a".repeat(64),
   };
   const originalFetch = globalThis.fetch;
@@ -390,7 +390,7 @@ test("Realtime bridge validates contract, tool manifest, and instructions", asyn
     assert.equal(bundle.tools.length, 1);
     assert.equal(bundle.instructions, instructions);
     assert.equal(bundle.tool_manifest_sha256, payload.tool_manifest_sha256);
-    assert.equal(bundle.prompt_perfecting_version, "1.0");
+    assert.equal(bundle.prompt_perfecting_version, "2.0");
     assert.equal(bundle.tool_policy_sha256, "a".repeat(64));
     const healthResponse = await worker.fetch(
       new Request("https://pj-assistant.ai/health"),
@@ -398,7 +398,7 @@ test("Realtime bridge validates contract, tool manifest, and instructions", asyn
     );
     const health = await healthResponse.json();
     assert.equal(health.full_tooling_ready, true);
-    assert.equal(health.prompt_perfecting_version, "1.0");
+    assert.equal(health.prompt_perfecting_version, "2.0");
     assert.equal(health.tool_policy_sha256, "a".repeat(64));
 
     payload.tool_manifest_sha256 = "b".repeat(64);
@@ -660,7 +660,7 @@ test("public health warms tool schemas and reports n8n readiness", async () => {
     tool_manifest_sha256: digest(stableJson(tools)),
     instructions,
     instructions_sha256: digest(instructions),
-    prompt_perfecting_version: "1.0",
+    prompt_perfecting_version: "2.0",
     tool_policy_sha256: "a".repeat(64),
   };
   globalThis.fetch = async (url, options = {}) => {

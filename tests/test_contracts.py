@@ -19,7 +19,7 @@ LEGACY_PROMPT_RESULT_V1_SCHEMA = {
     "properties": {
         "refined_prompt": {"type": "string", "minLength": 1},
         "changed": {"type": "boolean"},
-        "version": {"const": "1.0"},
+        "version": {"const": "2.0"},
         "surface": {"type": "string", "minLength": 1},
         "intent_summary": {"type": "string"},
         "constraints_preserved": {
@@ -41,13 +41,9 @@ LEGACY_PROMPT_RESULT_V1_SCHEMA = {
 class SchemaContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        schema_document = json.loads(
-            (ROOT / "schemas" / "task_triage.json").read_text()
-        )
+        schema_document = json.loads((ROOT / "schemas" / "task_triage.json").read_text())
         cls.task_triage_schema = schema_document["schema"]
-        cls.tool_schemas = {
-            tool["name"]: tool["parameters"] for tool in skills.TOOL_SCHEMAS
-        }
+        cls.tool_schemas = {tool["name"]: tool["parameters"] for tool in skills.TOOL_SCHEMAS}
 
     def test_representative_tool_request_payloads_match_exported_schemas(self):
         payloads = {
@@ -78,17 +74,21 @@ class SchemaContractTests(unittest.TestCase):
         Draft202012Validator.check_schema(self.task_triage_schema)
         validator = Draft202012Validator(self.task_triage_schema)
 
-        validator.validate({
-            "summary": "Two tasks need follow-up.",
-            "priority": "P1",
-            "next_actions": ["Assign an owner", "Set a due date"],
-        })
+        validator.validate(
+            {
+                "summary": "Two tasks need follow-up.",
+                "priority": "P1",
+                "next_actions": ["Assign an owner", "Set a due date"],
+            }
+        )
         with self.assertRaises(ValidationError):
-            validator.validate({
-                "summary": "Unsupported priority.",
-                "priority": "urgent",
-                "next_actions": [],
-            })
+            validator.validate(
+                {
+                    "summary": "Unsupported priority.",
+                    "priority": "urgent",
+                    "next_actions": [],
+                }
+            )
 
     def test_versioned_prompt_result_remains_compatible_with_v1_shape(self):
         result = promptops.perfect_prompt(
@@ -139,19 +139,23 @@ class ToolPolicyContractTests(unittest.TestCase):
         self.assertEqual(policy["tools"]["run_shortcut"], "approval")
 
     def test_explicit_allow_overrides_default_deny(self):
-        result, probe = self._dispatch_with_policy({
-            "default": "deny",
-            "tools": {"contract_probe": "allow"},
-        })
+        result, probe = self._dispatch_with_policy(
+            {
+                "default": "deny",
+                "tools": {"contract_probe": "allow"},
+            }
+        )
 
         self.assertEqual(result, {"ok": True})
         probe.assert_called_once_with(value="representative")
 
     def test_explicit_deny_blocks_tool_execution(self):
-        result, probe = self._dispatch_with_policy({
-            "default": "allow",
-            "tools": {"contract_probe": "deny"},
-        })
+        result, probe = self._dispatch_with_policy(
+            {
+                "default": "allow",
+                "tools": {"contract_probe": "deny"},
+            }
+        )
 
         self.assertIn("blocked by policy", result["error"])
         probe.assert_not_called()
@@ -163,9 +167,7 @@ class ToolPolicyContractTests(unittest.TestCase):
         }
 
         blocked, blocked_probe = self._dispatch_with_policy(policy)
-        allowed, allowed_probe = self._dispatch_with_policy(
-            policy, approval_granted=True
-        )
+        allowed, allowed_probe = self._dispatch_with_policy(policy, approval_granted=True)
 
         self.assertIn("requires explicit approval", blocked["error"])
         blocked_probe.assert_not_called()
