@@ -417,11 +417,19 @@ without it the Worker remains useful only for its direct Realtime path and
 reports degraded capability in `/health`.
 
 If the zone runs Super Bot Fight Mode or challenge-issuing security features,
-add a WAF custom skip rule for the bridge hostname's authenticated paths —
-`/execute-tool`, `/tool-schemas`, `/health`, `/responses/*`, and `/upload/*` —
-because Worker subrequests cannot answer browser challenges. A challenged
-bridge path fails silently: the client reports an upload or tool call in
-progress and nothing reaches the runtime.
+add a WAF custom skip rule for the authenticated API paths on both the apex
+and bridge hostnames — `/session`, `/token`, `/execute-tool`,
+`/tool-schemas`, `/health`, `/responses/*`, and `/upload/*` — because Worker
+subrequests and browser XHR cannot answer challenges. A challenged path fails
+silently: the client reports an upload or tool call in progress and nothing
+reaches the runtime.
+
+If the zone runs the OWASP Core Ruleset, also add a managed-phase skip
+exception for `/upload/*` on both hostnames: OWASP request-body scoring
+false-positives on uploaded source code and binaries. The upload path remains
+protected by Cloudflare Access, Worker identity checks, the bridge token, and
+the runtime's own signature validation, credential-name refusal, and scanner
+hook.
 
 `POST /webhook` is **not a supported or deployed API**. A legacy local-only
 Flask handler remains for reference, but it does not verify OpenAI webhook
