@@ -1,4 +1,5 @@
 """Bounded retry policy for provider I/O."""
+
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -20,12 +21,8 @@ class RetryPolicy:
 
 
 def get_with_retry(
-        provider: HttpProvider,
-        url: str,
-        *,
-        policy: RetryPolicy,
-        sleep=time.sleep,
-        **kwargs: Any) -> HttpResponse:
+    provider: HttpProvider, url: str, *, policy: RetryPolicy, sleep=time.sleep, **kwargs: Any
+) -> HttpResponse:
     attempts = policy.normalized_attempts()
     last_error = ""
     for attempt in range(attempts):
@@ -45,9 +42,7 @@ def get_with_retry(
                 raise RuntimeError(last_error)
             response.close()
         if attempt + 1 < attempts:
-            delay = policy.backoff_seconds * (2 ** attempt)
+            delay = policy.backoff_seconds * (2**attempt)
             _LOGGER.debug("Retrying provider request in %.3f seconds", delay)
             sleep(delay)
-    raise RuntimeError(
-        f"request failed after {attempts} attempts: {last_error}"
-    )
+    raise RuntimeError(f"request failed after {attempts} attempts: {last_error}")
