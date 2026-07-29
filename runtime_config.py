@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -228,7 +229,12 @@ def _normalize_mcp_servers(servers: Any, source: Path) -> list[dict[str, Any]]:
             raise ConfigError(f"{source}: server {index} must define a non-empty label")
         if label in labels:
             raise ConfigError(f"{source}: duplicate MCP server label {label!r}")
-        if not isinstance(url, str) or not url.startswith(("http://", "https://")):
+        url_is_environment_reference = isinstance(url, str) and bool(
+            re.fullmatch(r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})", url)
+        )
+        if not isinstance(url, str) or not (
+            url.startswith(("http://", "https://")) or url_is_environment_reference
+        ):
             raise ConfigError(f"{source}: MCP server {label!r} must define an HTTP(S) URL")
         labels.add(label)
         normalized.append(copy.deepcopy(server))

@@ -158,6 +158,24 @@ class TestResponsesRuntime(unittest.TestCase):
         names = {tool.get("name") for tool in tools}
         self.assertNotIn("delegate_advanced_task", names)
 
+    def test_tool_assembly_expands_tenant_specific_mcp_url(self):
+        server = {
+            "label": "tenant",
+            "url": "${TENANT_MCP_URL}",
+            "enabled": True,
+            "require_approval": "always",
+        }
+        tools = responses_runtime.build_tools(
+            self.cfg,
+            mcp_servers=[server],
+            environ={"TENANT_MCP_URL": "https://tenant.example/mcp"},
+        )
+        mcp = next(tool for tool in tools if tool["type"] == "mcp")
+        self.assertEqual(mcp["server_url"], "https://tenant.example/mcp")
+
+        unavailable = responses_runtime.build_tools(self.cfg, mcp_servers=[server], environ={})
+        self.assertFalse(any(tool.get("type") == "mcp" for tool in unavailable))
+
     def test_approval_required_mcp_uses_explicit_owner_flow(self):
         server = {
             "label": "protected",

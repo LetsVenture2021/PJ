@@ -45,5 +45,229 @@
       "Authorization": "Bearer ${PJ_CLOUDFLARE_READ_ALL_RESOURCES}"
     },
     "_comment": "Create a Cloudflare API token and set PJ_CLOUDFLARE_READ_ALL_RESOURCES in ~/.env (token only, no quotes)."
+  },
+  {
+    "label": "microsoft-outlook",
+    "url": "${MICROSOFT_OUTLOOK_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Microsoft Outlook Mail and Calendar. Set the URL issued by your chosen MCP provider after completing Microsoft OAuth. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "google-workspace",
+    "url": "${GOOGLE_WORKSPACE_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Gmail, Google Calendar, Drive, Docs, and Sheets. Set the URL issued by your chosen MCP provider after completing Google OAuth. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "zillow",
+    "url": "${ZILLOW_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Zillow/property workflows. No official public endpoint is assumed; set a trusted self-hosted or provider-issued MCP URL. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "zoom",
+    "url": "${ZOOM_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Zoom meetings and recordings. Set the URL issued by your chosen MCP provider after completing Zoom OAuth. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "adobe",
+    "url": "${ADOBE_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Adobe Acrobat, PDF, or Creative Cloud workflows. Set a trusted self-hosted or provider-issued MCP URL. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "n8n",
+    "url": "${N8N_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "n8n workflow access. Set the MCP endpoint exposed by your controlled n8n deployment or trusted provider. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "slack",
+    "url": "${SLACK_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: Slack search and messaging. Set a trusted provider-issued MCP URL after OAuth. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "microsoft-365",
+    "url": "${MICROSOFT_365_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: broader Microsoft 365 access (OneDrive, SharePoint, and Teams). Set a trusted provider-issued MCP URL after OAuth. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "atlassian",
+    "url": "${ATLASSIAN_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: Jira and Confluence project context. Set a trusted provider-issued MCP URL after OAuth. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "salesforce",
+    "url": "${SALESFORCE_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: Salesforce CRM workflows. Set a trusted provider-issued MCP URL after OAuth. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "hubspot",
+    "url": "${HUBSPOT_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: HubSpot CRM and marketing workflows. Set a trusted provider-issued MCP URL after OAuth. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "automation-hub",
+    "url": "${AUTOMATION_HUB_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: a Zapier, Pipedream, or equivalent MCP endpoint for other SaaS tools; restrict its enabled actions and connected accounts. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "dropbox",
+    "url": "${DROPBOX_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: Dropbox file search and management. Set a trusted self-hosted or provider-issued MCP URL after authorization. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "box",
+    "url": "${BOX_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: Box enterprise content workflows. Set a trusted self-hosted or provider-issued MCP URL after authorization. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "docusign",
+    "url": "${DOCUSIGN_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: DocuSign agreement and signature workflows. Set a trusted self-hosted or provider-issued MCP URL after authorization. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "asana",
+    "url": "${ASANA_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: Asana project and task management. Set a trusted self-hosted or provider-issued MCP URL after authorization. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "monday",
+    "url": "${MONDAY_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: monday.com boards and work management. Set a trusted self-hosted or provider-issued MCP URL after authorization. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "trello",
+    "url": "${TRELLO_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: Trello boards, lists, and cards. Set a trusted self-hosted or provider-issued MCP URL after authorization. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "airtable",
+    "url": "${AIRTABLE_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: Airtable bases, tables, and records. Set a trusted self-hosted or provider-issued MCP URL after authorization. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "linear",
+    "url": "${LINEAR_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: Linear issues and project planning. Set a trusted self-hosted or provider-issued MCP URL after authorization. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "gitlab",
+    "url": "${GITLAB_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: GitLab repositories, issues, and pipelines. Set a trusted self-hosted or provider-issued MCP URL after authorization. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "sentry",
+    "url": "${SENTRY_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: Sentry application errors and diagnostics. Set a trusted self-hosted or provider-issued MCP URL after authorization. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "datadog",
+    "url": "${DATADOG_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: Datadog observability and incident workflows. Set a trusted self-hosted or provider-issued MCP URL after authorization. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "aws",
+    "url": "${AWS_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: Amazon Web Services operations through a narrowly scoped MCP server. Set a trusted self-hosted or provider-issued MCP URL after authorization. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "azure",
+    "url": "${AZURE_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: Microsoft Azure resource operations through a narrowly scoped MCP server. Set a trusted self-hosted or provider-issued MCP URL after authorization. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "google-cloud",
+    "url": "${GOOGLE_CLOUD_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: Google Cloud resource operations through a narrowly scoped MCP server. Set a trusted self-hosted or provider-issued MCP URL after authorization. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "shopify",
+    "url": "${SHOPIFY_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: Shopify store, catalog, and order workflows. Set a trusted self-hosted or provider-issued MCP URL after authorization. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "quickbooks",
+    "url": "${QUICKBOOKS_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: QuickBooks accounting workflows. Set a trusted self-hosted or provider-issued MCP URL after authorization. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "xero",
+    "url": "${XERO_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: Xero accounting workflows. Set a trusted self-hosted or provider-issued MCP URL after authorization. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "servicenow",
+    "url": "${SERVICENOW_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: ServiceNow incidents, requests, and service workflows. Set a trusted self-hosted or provider-issued MCP URL after authorization. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "workday",
+    "url": "${WORKDAY_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: Workday HR and finance workflows. Set a trusted self-hosted or provider-issued MCP URL after authorization. Keep disabled until configured and reviewed."
+  },
+  {
+    "label": "figma",
+    "url": "${FIGMA_MCP_URL}",
+    "require_approval": "always",
+    "enabled": false,
+    "_comment": "Suggested: Figma design context and collaboration workflows. Set a trusted self-hosted or provider-issued MCP URL after authorization. Keep disabled until configured and reviewed."
   }
 ]
