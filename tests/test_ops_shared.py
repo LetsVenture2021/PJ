@@ -130,6 +130,35 @@ class OpsSharedTestCase(unittest.TestCase):
         self.assertTrue(failed.closed)
         self.assertEqual(delays, [0.25])
 
+    def test_retry_honors_bounded_retry_after_guidance(self):
+        rate_limited = _Response(429, "slow down")
+        rate_limited.headers["Retry-After"] = "120"
+        ready = _Response(200, "ok")
+        delays = []
+
+        result = get_with_retry(
+            _HttpProvider([rate_limited, ready]),
+            "https://provider.example/resource",
+            policy=RetryPolicy(
+                attempts=2,
+                backoff_seconds=0.25,
+                max_delay_seconds=5,
+            ),
+            sleep=delays.append,
+        )
+
+        self.assertIs(result, ready)
+        self.assertTrue(rate_limited.closed)
+        self.assertEqual(delays, [5.0])
+
+    def test_retry_caps_exponential_backoff_and_ignores_bad_guidance(self):
+        policy = RetryPolicy(backoff_seconds=10, max_delay_seconds=3)
+        malformed = _Response(503)
+        malformed.headers["retry-after"] = "eventually"
+
+        self.assertEqual(policy.delay_for(8), 3.0)
+        self.assertEqual(policy.delay_for(8, malformed), 3.0)
+
     def test_non_retryable_response_fails_immediately(self):
         failed = _Response(400, "bad request")
 
