@@ -49,6 +49,7 @@ def propose_records(manifest_path: Path = DEFAULT_MANIFEST) -> list[dict]:
             )
             records.append(
                 {
+                    "schema_version": previous.get("schema_version", "1.0.0"),
                     "path": relative,
                     "stable_id": previous.get("stable_id", _stable_id(relative)),
                     "class": document_class,

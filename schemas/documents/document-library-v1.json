@@ -6,7 +6,22 @@
   "additionalProperties": false,
   "required": ["schema_version", "documents"],
   "properties": {
-    "schema_version": {"const": "1.0"},
+    "schema_version": {"enum": ["1.0", "1.0.0"]},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "inventory_scope": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "excluded_paths": {
+      "type": "array",
+      "items": {"type": "string"},
+      "uniqueItems": true
+    },
+    "quality_profile_versions": {
+      "type": "object",
+      "additionalProperties": {"type": "string"}
+    },
     "documents": {
       "type": "array",
       "items": {"$ref": "document-metadata-v1.json"}

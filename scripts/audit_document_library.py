@@ -24,16 +24,27 @@ SCHEMA_DIR = ROOT / "schemas" / "documents"
 def audit(manifest_path: Path = DEFAULT_MANIFEST) -> dict:
     root = ROOT.resolve()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    # Manifests written before the versioned governance inventory used
+    # ``document_id`` and ``sha256``.  They remain readable so operators can
+    # audit existing local catalogs before explicitly bootstrapping the new
+    # format.
+    legacy_manifest = any(
+        "document_id" in entry or "sha256" in entry for entry in manifest.get("documents", [])
+    )
     schema = json.loads((SCHEMA_DIR / "document-library-v1.json").read_text())
     schema["properties"]["documents"]["items"] = json.loads(
         (SCHEMA_DIR / "document-metadata-v1.json").read_text()
     )
     validator = Draft202012Validator(schema)
-    schema_errors = sorted(error.message for error in validator.iter_errors(manifest))
+    schema_errors = (
+        []
+        if legacy_manifest
+        else sorted(error.message for error in validator.iter_errors(manifest))
+    )
     findings: list[dict] = []
     seen: set[str] = set()
     for entry in manifest.get("documents", []):
-        document_id = entry.get("document_id", "")
+        document_id = entry.get("stable_id") or entry.get("document_id", "")
         if document_id in seen:
             findings.append({"document_id": document_id, "error": "duplicate_document_id"})
         seen.add(document_id)
@@ -47,9 +58,14 @@ def audit(manifest_path: Path = DEFAULT_MANIFEST) -> dict:
             findings.append({"document_id": document_id, "error": "missing_file"})
             continue
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
-        if digest != entry.get("sha256"):
+        expected_digest = entry.get("content_sha256") or entry.get("sha256")
+        if digest != expected_digest:
             findings.append({"document_id": document_id, "error": "sha256_mismatch"})
-        if path.suffix.casefold() == ".md" and entry.get("class") != "corpus":
+        if (
+            not legacy_manifest
+            and path.suffix.casefold() == ".md"
+            and entry.get("class") != "corpus"
+        ):
             report = validate_content(
                 path.read_text(encoding="utf-8"), profile=entry.get("class", "governed")
             )
