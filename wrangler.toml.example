@@ -17,6 +17,7 @@ routes = [
   { pattern = "pj-assistant.ai/tool-schemas", zone_name = "pj-assistant.ai" },
   { pattern = "pj-assistant.ai/execute-tool", zone_name = "pj-assistant.ai" },
   { pattern = "pj-assistant.ai/responses/*", zone_name = "pj-assistant.ai" },
+  { pattern = "pj-assistant.ai/upload/*", zone_name = "pj-assistant.ai" },
 ]
 
 [vars]
@@ -25,6 +26,7 @@ CF_ACCESS_TEAM_DOMAIN = "aimhi.cloudflareaccess.com"
 CF_ACCESS_AUD = "replace-with-access-application-aud"
 PJ_TOOL_BRIDGE_URL = "https://replace-with-private-runtime/execute-tool"
 PJ_TOOL_SCHEMAS_URL = "https://replace-with-private-runtime/tool-schemas"
+PJ_MAX_UPLOAD_BYTES = "104857600"
 
 # Store these with `wrangler secret put`; never commit their values:
 # OPENAI_API_KEY

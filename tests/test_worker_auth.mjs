@@ -31,6 +31,7 @@ const {
   fetchTextWithTimeout,
   handleSession,
   handleResponsesProxy,
+  handleUploadProxy,
   isPublicRoute,
   isResponsesRoute,
   normalizeFunctionTools,
@@ -120,6 +121,7 @@ test("deployment routes cover APIs without claiming frontend assets", () => {
     "pj-assistant.ai/tool-schemas",
     "pj-assistant.ai/execute-tool",
     "pj-assistant.ai/responses/*",
+    "pj-assistant.ai/upload/*",
   ]) {
     assert.ok(wranglerSource.includes(`pattern = "${route}"`));
   }
@@ -142,6 +144,7 @@ test("only health and preflight are public", () => {
     ["POST", "/execute-tool"],
     ["GET", "/responses/capabilities"],
     ["POST", "/responses/sessions/example_123/turns"],
+    ["POST", "/upload/files"],
     ["POST", "/future-full-power"],
   ]) {
     assert.equal(isPublicRoute(method, path), false, `${method} ${path} must be privileged`);
@@ -178,6 +181,80 @@ test("Full Power routes and bridge URL derivation are narrowly scoped", () => {
 test("prompt perfecting is an authenticated Full Power bridge route", () => {
   assert.equal(isResponsesRoute("POST", "/responses/prompt-perfect"), true);
   assert.equal(isPublicRoute("POST", "/responses/prompt-perfect"), false);
+});
+
+test("upload proxy forwards bounded multipart bodies with allowlisted headers", async () => {
+  let captured = null;
+  const body = "--boundary\r\ncontent\r\n--boundary--\r\n";
+  const response = await handleUploadProxy(
+    new Request("https://pj-assistant.ai/upload/folder", {
+      method: "POST",
+      headers: {
+        "content-type": "multipart/form-data; boundary=boundary",
+        "content-length": String(Buffer.byteLength(body)),
+        "x-pj-session-id": "session_upload_123",
+      },
+      body,
+    }),
+    {
+      PJ_TOOL_BRIDGE_URL: "https://tools.pj-assistant.ai/execute-tool",
+      PJ_TOOL_BRIDGE_TOKEN: "bridge-secret",
+      PJ_MAX_UPLOAD_BYTES: "1024",
+    },
+    "https://pj-assistant.ai",
+    "request-upload",
+    async (url, options) => {
+      captured = { url, options };
+      return new Response(JSON.stringify({ ok: true, count: 1, version: PROTOCOL_VERSION }), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  );
+
+  assert.equal(captured.url, "https://tools.pj-assistant.ai/upload/folder");
+  assert.equal(
+    captured.options.headers.authorization,
+    bridgeHeaders({ PJ_TOOL_BRIDGE_TOKEN: "bridge-secret" }, "request-upload").authorization,
+  );
+  assert.equal(captured.options.headers["x-pj-session-id"], "session_upload_123");
+  assert.match(captured.options.headers["content-type"], /^multipart\/form-data/);
+  assert.equal(response.status, 201);
+  assert.equal((await response.json()).count, 1);
+});
+
+test("upload proxy rejects missing or oversized content lengths", async () => {
+  const proxyEnv = {
+    PJ_TOOL_BRIDGE_URL: "https://tools.pj-assistant.ai/execute-tool",
+    PJ_TOOL_BRIDGE_TOKEN: "bridge-secret",
+    PJ_MAX_UPLOAD_BYTES: "10",
+  };
+  const missing = await handleUploadProxy(
+    new Request("https://pj-assistant.ai/upload/files", {
+      method: "POST",
+      headers: { "content-type": "multipart/form-data; boundary=boundary" },
+      body: "body",
+    }),
+    proxyEnv,
+    "https://pj-assistant.ai",
+    "request-upload-missing",
+  );
+  assert.equal(missing.status, 411);
+
+  const oversized = await handleUploadProxy(
+    new Request("https://pj-assistant.ai/upload/files", {
+      method: "POST",
+      headers: {
+        "content-type": "multipart/form-data; boundary=boundary",
+        "content-length": "11",
+      },
+      body: "body",
+    }),
+    proxyEnv,
+    "https://pj-assistant.ai",
+    "request-upload-large",
+  );
+  assert.equal(oversized.status, 413);
 });
 
 test("voice policies keep Fast Voice automatic and Full Power Voice explicit", () => {
@@ -346,7 +423,10 @@ test("Full Power proxy streams SSE with only allowlisted bridge headers", async 
   );
 
   assert.equal(captured.url, "https://tools.pj-assistant.ai/responses/sessions/example_123/turns");
-  assert.equal(captured.options.headers.authorization, "Bearer bridge-secret");
+  assert.equal(
+    captured.options.headers.authorization,
+    bridgeHeaders({ PJ_TOOL_BRIDGE_TOKEN: "bridge-secret" }, "request-stream").authorization,
+  );
   assert.equal(captured.options.headers["cf-access-jwt-assertion"], undefined);
   assert.equal(captured.options.headers.accept, "text/event-stream");
   assert.equal(response.headers.get("content-type"), "text/event-stream");
