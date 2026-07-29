@@ -6,10 +6,10 @@ voice, a local browser client, and an optional Cloudflare Worker edge proxy.
 
 ## Documentation
 
+- [Architecture and technology-stack assessment (July 29, 2026)](docs/architecture-stack-assessment-2026-07-29.md)
 - [Market-competitive capability gaps](docs/market-competitive-capabilities-2026-07-29.md)
   prioritizes the additional product capabilities PJ needs for parity and
   differentiation across assistant, research, work-copilot, and agent markets.
-
 - [Product and technology report (July 28, 2026)](docs/product-technology-report-2026-07-28.md)
 - [Product vision: the governed personal intelligence layer](docs/product-vision.md)
 - [End-to-end architecture](docs/architecture.md)
