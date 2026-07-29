@@ -653,6 +653,7 @@
       activePlaybackStartSeconds: null,
       uploadMode: "files",
       uploadItems: [],
+      uploadLocalSkips: [],
       uploadBusy: false,
       uploadSessionId: `upload_${createRequestId().replace(/[^A-Za-z0-9_-]/g, "_")}`,
     };
@@ -698,12 +699,33 @@
       el.composerFolderBtn.disabled = busy;
     }
 
+    // Mirrors the server's credential-shaped filename refusal (ops/docs/formats.py)
+    // so secrets are never sent at all: the edge WAF blocks bodies that carry
+    // credential material, which would fail the whole batch in transit.
+    const SECRET_NAME_PATTERNS = [
+      /^\.env$/i,
+      /^\.env\.(?!example$|sample$|template$).+$/i,
+      /^\.(npmrc|pypirc|netrc|htpasswd)$/i,
+      /^id_(rsa|dsa|ecdsa|ed25519)(\.pub)?$/i,
+      /\.(pem|key|p12|pfx|jks|keystore|ppk)$/i,
+      /^service[-_]?account.*\.json$/i,
+      /^credentials\.json$/i,
+      /^token\.json$/i,
+      /^.*secret.*\.(json|ya?ml|txt)$/i,
+    ];
+
     function selectUploadItems(fileList, mode) {
       state.uploadMode = mode;
-      state.uploadItems = Array.from(fileList).map((file) => ({
-        file,
-        path: mode === "folder" ? file.webkitRelativePath : file.name,
-      }));
+      state.uploadItems = [];
+      state.uploadLocalSkips = [];
+      for (const file of Array.from(fileList)) {
+        const path = mode === "folder" ? file.webkitRelativePath : file.name;
+        if (SECRET_NAME_PATTERNS.some((pattern) => pattern.test(file.name))) {
+          state.uploadLocalSkips.push(path);
+        } else {
+          state.uploadItems.push({ file, path });
+        }
+      }
     }
 
     function uploadSessionId() {
@@ -711,7 +733,20 @@
     }
 
     async function uploadSelectedDocuments() {
-      if (state.uploadBusy || !state.uploadItems.length) return;
+      if (state.uploadBusy) return;
+      const localSkips = state.uploadLocalSkips;
+      if (!state.uploadItems.length) {
+        if (localSkips.length) {
+          appendBubble(
+            "system",
+            `Not uploaded: ${localSkips.length} credential-like file` +
+              `${localSkips.length === 1 ? "" : "s"} ` +
+              `(${localSkips.slice(0, 3).join(", ")}) — credential files are never sent.`,
+          );
+          state.uploadLocalSkips = [];
+        }
+        return;
+      }
       if (!apiBase()) {
         setStatus("Set a valid server URL");
         return;
@@ -772,7 +807,9 @@
             if (responseType.includes("text/html") || /^\s*</.test(xhr.responseText || "")) {
               settleReject(new Error(
                 "Upload blocked before reaching PJ (upload_edge_challenged): the edge " +
-                "returned an HTML challenge page. Verify the WAF skip rule covers /upload/*.",
+                "returned an HTML challenge page. This usually means a file's content " +
+                "resembles credentials or other blocked patterns — remove that file and " +
+                "retry. Otherwise verify the WAF skip rule covers /upload/*.",
               ));
               return;
             }
@@ -809,14 +846,15 @@
           (sum, file) => sum + (file.size || 0),
           0,
         );
-        const skippedFiles = parsed.skipped || [];
+        const skippedFiles = (parsed.skipped || []).length + localSkips.length;
         statusBubble.textContent =
           `Uploaded ${parsed.count} document${parsed.count === 1 ? "" : "s"} ` +
           `(${formatBytes(totalBytes)}) to DocOps.` +
-          (skippedFiles.length
-            ? ` Skipped ${skippedFiles.length} file${skippedFiles.length === 1 ? "" : "s"}` +
-              ` (${skippedFiles[0].code}).`
+          (skippedFiles
+            ? ` Skipped ${skippedFiles} file${skippedFiles === 1 ? "" : "s"}` +
+              ` (${(parsed.skipped || [])[0]?.code || "credential_like_filename"}).`
             : "");
+        state.uploadLocalSkips = [];
       } catch (error) {
         statusBubble.textContent = shorten(String(error), 300);
       } finally {
