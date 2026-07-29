@@ -17,6 +17,7 @@ Slash commands (type "/" then Tab for completion):
   /search <keyword>        search across all chat history
   /exit                    quit
 """
+
 import hashlib
 import json
 import secrets
@@ -41,22 +42,13 @@ def _db():
             active_turn_started_at TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
-        columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(chat_sessions)")
-        }
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(chat_sessions)")}
         if "channel" not in columns:
-            conn.execute(
-                "ALTER TABLE chat_sessions ADD COLUMN channel TEXT "
-                "DEFAULT 'terminal'"
-            )
+            conn.execute("ALTER TABLE chat_sessions ADD COLUMN channel TEXT DEFAULT 'terminal'")
         if "active_turn_token" not in columns:
-            conn.execute(
-                "ALTER TABLE chat_sessions ADD COLUMN active_turn_token TEXT"
-            )
+            conn.execute("ALTER TABLE chat_sessions ADD COLUMN active_turn_token TEXT")
         if "active_turn_started_at" not in columns:
-            conn.execute(
-                "ALTER TABLE chat_sessions ADD COLUMN active_turn_started_at TEXT"
-            )
+            conn.execute("ALTER TABLE chat_sessions ADD COLUMN active_turn_started_at TEXT")
         conn.execute("""CREATE TABLE IF NOT EXISTS chat_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id TEXT NOT NULL,
@@ -70,9 +62,7 @@ def _db():
             playback_ms INTEGER,
             metadata_json TEXT DEFAULT '{}',
             ts TEXT DEFAULT CURRENT_TIMESTAMP)""")
-        message_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(chat_messages)")
-        }
+        message_columns = {row[1] for row in conn.execute("PRAGMA table_info(chat_messages)")}
         for name, definition in (
             ("external_id", "TEXT"),
             ("source", "TEXT DEFAULT 'chat'"),
@@ -83,9 +73,7 @@ def _db():
             ("metadata_json", "TEXT DEFAULT '{}'"),
         ):
             if name not in message_columns:
-                conn.execute(
-                    f"ALTER TABLE chat_messages ADD COLUMN {name} {definition}"
-                )
+                conn.execute(f"ALTER TABLE chat_messages ADD COLUMN {name} {definition}")
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS "
             "idx_chat_messages_external_id "
@@ -111,30 +99,16 @@ def _db():
             decided_at TEXT,
             execution_result_json TEXT)""")
         approval_columns = {
-            row[1] for row in conn.execute(
-                "PRAGMA table_info(chat_pending_approvals)"
-            )
+            row[1] for row in conn.execute("PRAGMA table_info(chat_pending_approvals)")
         }
         if "deliverable_format" not in approval_columns:
-            conn.execute(
-                "ALTER TABLE chat_pending_approvals "
-                "ADD COLUMN deliverable_format TEXT"
-            )
+            conn.execute("ALTER TABLE chat_pending_approvals ADD COLUMN deliverable_format TEXT")
         if "artifact_ids_json" not in approval_columns:
-            conn.execute(
-                "ALTER TABLE chat_pending_approvals "
-                "ADD COLUMN artifact_ids_json TEXT"
-            )
+            conn.execute("ALTER TABLE chat_pending_approvals ADD COLUMN artifact_ids_json TEXT")
         if "artifact_hashes_json" not in approval_columns:
-            conn.execute(
-                "ALTER TABLE chat_pending_approvals "
-                "ADD COLUMN artifact_hashes_json TEXT"
-            )
+            conn.execute("ALTER TABLE chat_pending_approvals ADD COLUMN artifact_hashes_json TEXT")
         if "execution_result_json" not in approval_columns:
-            conn.execute(
-                "ALTER TABLE chat_pending_approvals "
-                "ADD COLUMN execution_result_json TEXT"
-            )
+            conn.execute("ALTER TABLE chat_pending_approvals ADD COLUMN execution_result_json TEXT")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_chat_pending_approvals_session "
             "ON chat_pending_approvals(session_id, status, expires_at)"
@@ -208,7 +182,9 @@ def get_session(sid: str) -> dict:
         row = conn.execute(
             "SELECT id, title, last_response_id, channel, created_at, updated_at "
             "FROM chat_sessions "
-            "WHERE id=?", (sid,)).fetchone()
+            "WHERE id=?",
+            (sid,),
+        ).fetchone()
     if not row:
         return None
     return {
@@ -225,7 +201,8 @@ def latest_session() -> dict:
     with _db() as conn:
         row = conn.execute(
             "SELECT id, title, last_response_id, channel FROM chat_sessions "
-            "ORDER BY updated_at DESC LIMIT 1").fetchone()
+            "ORDER BY updated_at DESC LIMIT 1"
+        ).fetchone()
     if not row:
         return None
     return {
@@ -243,18 +220,27 @@ def list_sessions(limit: int = 15) -> list:
             "(SELECT COUNT(*) FROM chat_messages m WHERE m.session_id = s.id), "
             "s.channel "
             " FROM chat_sessions s ORDER BY s.updated_at DESC LIMIT ?",
-            (limit,)).fetchall()
-    return [{"id": r[0], "title": r[1] or "(untitled)", "created_at": r[2],
-             "updated_at": r[3], "messages": r[4],
-             "channel": r[5] or "terminal"} for r in rows]
+            (limit,),
+        ).fetchall()
+    return [
+        {
+            "id": r[0],
+            "title": r[1] or "(untitled)",
+            "created_at": r[2],
+            "updated_at": r[3],
+            "messages": r[4],
+            "channel": r[5] or "terminal",
+        }
+        for r in rows
+    ]
 
 
-def record_turn(session: dict, role: str, content: str,
-                response_id: str = None):
+def record_turn(session: dict, role: str, content: str, response_id: str = None):
     with _db() as conn:
         conn.execute(
-            "INSERT INTO chat_messages (session_id, role, content) "
-            "VALUES (?,?,?)", (session["id"], role, content[:20000]))
+            "INSERT INTO chat_messages (session_id, role, content) VALUES (?,?,?)",
+            (session["id"], role, content[:20000]),
+        )
         sets = ["updated_at=?"]
         vals = [_now()]
         if response_id:
@@ -267,28 +253,26 @@ def record_turn(session: dict, role: str, content: str,
             vals.append(title)
             session["title"] = title
         vals.append(session["id"])
-        conn.execute(f"UPDATE chat_sessions SET {', '.join(sets)} WHERE id=?",
-                     vals)
+        conn.execute(f"UPDATE chat_sessions SET {', '.join(sets)} WHERE id=?", vals)
 
 
 def record_external_turn(
-        session: dict,
-        role: str,
-        content: str,
-        *,
-        external_id: str,
-        source: str,
-        response_id: str = None,
-        status: str = "completed",
-        playback_ms: int = None,
-        metadata: dict = None) -> dict:
+    session: dict,
+    role: str,
+    content: str,
+    *,
+    external_id: str,
+    source: str,
+    response_id: str = None,
+    status: str = "completed",
+    playback_ms: int = None,
+    metadata: dict = None,
+) -> dict:
     if role not in {"user", "assistant"}:
         raise ValueError("external turn role must be user or assistant")
     if source not in {"typed", "input_audio", "output_audio", "output_text"}:
         raise ValueError("external turn source is invalid")
-    if (
-        role == "user" and source not in {"typed", "input_audio"}
-    ) or (
+    if (role == "user" and source not in {"typed", "input_audio"}) or (
         role == "assistant" and source not in {"output_audio", "output_text"}
     ):
         raise ValueError("external turn role and source are incompatible")
@@ -296,21 +280,11 @@ def record_external_turn(
         raise ValueError("external turn status is invalid")
     if role == "user" and status != "completed":
         raise ValueError("user external turns must be completed")
-    if (
-        not isinstance(external_id, str)
-        or not external_id
-        or len(external_id) > 200
-    ):
+    if not isinstance(external_id, str) or not external_id or len(external_id) > 200:
         raise ValueError("external_id is invalid")
-    if (
-        not isinstance(content, str)
-        or not content.strip()
-        or len(content) > 20000
-    ):
+    if not isinstance(content, str) or not content.strip() or len(content) > 20000:
         raise ValueError("external turn content is invalid")
-    if response_id is not None and (
-        not isinstance(response_id, str) or len(response_id) > 200
-    ):
+    if response_id is not None and (not isinstance(response_id, str) or len(response_id) > 200):
         raise ValueError("response_id is invalid")
     if playback_ms is not None and (
         isinstance(playback_ms, bool)
@@ -318,16 +292,12 @@ def record_external_turn(
         or not 0 <= playback_ms <= 86_400_000
     ):
         raise ValueError("playback_ms is invalid")
-    if playback_ms is not None and not (
-        role == "assistant" and status == "interrupted"
-    ):
+    if playback_ms is not None and not (role == "assistant" and status == "interrupted"):
         raise ValueError("playback_ms is only valid for interrupted assistant turns")
     metadata = metadata or {}
     if not isinstance(metadata, dict):
         raise ValueError("external turn metadata must be an object")
-    metadata_json = json.dumps(
-        metadata, sort_keys=True, separators=(",", ":"), default=str
-    )
+    metadata_json = json.dumps(metadata, sort_keys=True, separators=(",", ":"), default=str)
     if len(metadata_json) > 10000:
         raise ValueError("external turn metadata exceeds the persistence limit")
     now = _now()
@@ -350,9 +320,7 @@ def record_external_turn(
         )
         if existing:
             if tuple(existing) != expected:
-                raise ValueError(
-                    "external_id is already bound to a different terminal message"
-                )
+                raise ValueError("external_id is already bound to a different terminal message")
             return {
                 "external_id": external_id,
                 "role": role,
@@ -411,7 +379,9 @@ def history(sid: str, limit: int = 10) -> list:
             "SELECT role, content, ts, external_id, source, response_id, "
             "status, interrupted_at, playback_ms, metadata_json "
             "FROM chat_messages WHERE session_id=? "
-            "ORDER BY id DESC LIMIT ?", (sid, limit)).fetchall()
+            "ORDER BY id DESC LIMIT ?",
+            (sid, limit),
+        ).fetchall()
     return [
         {
             "role": row[0],
@@ -444,9 +414,7 @@ def session_detail(sid: str, message_limit: int = 50) -> dict:
 def link_session_artifact(sid: str, artifact_id: str) -> bool:
     """Persist an artifact relationship only for an existing chat session."""
     with _db() as conn:
-        exists = conn.execute(
-            "SELECT 1 FROM chat_sessions WHERE id=?", (sid,)
-        ).fetchone()
+        exists = conn.execute("SELECT 1 FROM chat_sessions WHERE id=?", (sid,)).fetchone()
         if not exists:
             return False
         conn.execute(
@@ -461,8 +429,7 @@ def link_session_artifact(sid: str, artifact_id: str) -> bool:
 def list_session_artifact_ids(sid: str) -> list[str]:
     with _db() as conn:
         rows = conn.execute(
-            "SELECT artifact_id FROM chat_session_artifacts "
-            "WHERE session_id=? ORDER BY linked_at",
+            "SELECT artifact_id FROM chat_session_artifacts WHERE session_id=? ORDER BY linked_at",
             (sid,),
         ).fetchall()
     return [row[0] for row in rows]
@@ -475,8 +442,7 @@ def _expire_pending_approvals(conn, sid: str = None):
         where += " AND session_id=?"
         params.append(sid)
     conn.execute(
-        f"UPDATE chat_pending_approvals SET status='expired', decided_at=? "
-        f"WHERE {where}",
+        f"UPDATE chat_pending_approvals SET status='expired', decided_at=? WHERE {where}",
         [_now(), *params],
     )
 
@@ -496,20 +462,18 @@ def _approval_from_row(row: tuple, *, include_provider: bool = False) -> dict:
     if row[9] in ("executing_approved", "executing_rejected"):
         approval["execution_decision"] = row[9] == "executing_approved"
     if include_provider:
-        approval.update({
-            "provider_response_id": row[3],
-            "provider_item_id": row[4],
-            "text_format": (
-                json.loads(row[8]) if row[8] else None
-            ),
-            "deliverable_format": row[12],
-            "artifact_ids": json.loads(row[13] or "[]"),
-            "artifact_hashes": json.loads(row[14] or "{}"),
-            "execution_result_recorded": row[15] is not None,
-            "execution_result": (
-                json.loads(row[15]) if row[15] is not None else None
-            ),
-        })
+        approval.update(
+            {
+                "provider_response_id": row[3],
+                "provider_item_id": row[4],
+                "text_format": (json.loads(row[8]) if row[8] else None),
+                "deliverable_format": row[12],
+                "artifact_ids": json.loads(row[13] or "[]"),
+                "artifact_hashes": json.loads(row[14] or "{}"),
+                "execution_result_recorded": row[15] is not None,
+                "execution_result": (json.loads(row[15]) if row[15] is not None else None),
+            }
+        )
     return approval
 
 
@@ -549,27 +513,26 @@ def get_pending_approval(sid: str, approval_id: str) -> dict:
 
 
 def pause_session_turn_for_approval(
-        session: dict,
-        token: str,
-        *,
-        approval_kind: str,
-        provider_response_id: str,
-        provider_item_id: str,
-        tool_name: str,
-        arguments: dict,
-        server_label: str = "",
-        text_format: dict = None,
-        deliverable_format: str = None,
-        artifact_ids: list[str] = None,
-        artifact_hashes: dict[str, str] = None,
-        completed_approval_id: str = None,
-        completed_approval_decision: bool = None,
-        ttl_seconds: int = 900) -> dict:
+    session: dict,
+    token: str,
+    *,
+    approval_kind: str,
+    provider_response_id: str,
+    provider_item_id: str,
+    tool_name: str,
+    arguments: dict,
+    server_label: str = "",
+    text_format: dict = None,
+    deliverable_format: str = None,
+    artifact_ids: list[str] = None,
+    artifact_hashes: dict[str, str] = None,
+    completed_approval_id: str = None,
+    completed_approval_decision: bool = None,
+    ttl_seconds: int = 900,
+) -> dict:
     if approval_kind not in ("local_function", "mcp"):
         raise ValueError("unsupported approval kind")
-    if (completed_approval_id is None) != (
-        completed_approval_decision is None
-    ) or (
+    if (completed_approval_id is None) != (completed_approval_decision is None) or (
         completed_approval_decision is not None
         and not isinstance(completed_approval_decision, bool)
     ):
@@ -578,9 +541,7 @@ def pause_session_turn_for_approval(
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=max(60, min(ttl_seconds, 3600)))
     arguments_json = json.dumps(arguments or {}, default=str)
-    text_format_json = (
-        json.dumps(text_format, default=str) if text_format else None
-    )
+    text_format_json = json.dumps(text_format, default=str) if text_format else None
     artifact_ids = list(dict.fromkeys(artifact_ids or []))
     if len(artifact_ids) > 50 or any(
         not isinstance(artifact_id, str)
@@ -591,22 +552,15 @@ def pause_session_turn_for_approval(
         raise ValueError("approval artifact state is invalid")
     artifact_ids_json = json.dumps(artifact_ids)
     artifact_hashes = artifact_hashes or {}
-    if (
-        set(artifact_hashes) != set(artifact_ids)
-        or any(
-            not isinstance(sha, str)
-            or len(sha) != 64
-            or any(char not in "0123456789abcdef" for char in sha)
-            for sha in artifact_hashes.values()
-        )
+    if set(artifact_hashes) != set(artifact_ids) or any(
+        not isinstance(sha, str)
+        or len(sha) != 64
+        or any(char not in "0123456789abcdef" for char in sha)
+        for sha in artifact_hashes.values()
     ):
         raise ValueError("approval artifact hashes are invalid")
-    artifact_hashes_json = json.dumps(
-        artifact_hashes, sort_keys=True, separators=(",", ":")
-    )
-    if len(arguments_json) > 50000 or (
-        text_format_json and len(text_format_json) > 50000
-    ):
+    artifact_hashes_json = json.dumps(artifact_hashes, sort_keys=True, separators=(",", ":"))
+    if len(arguments_json) > 50000 or (text_format_json and len(text_format_json) > 50000):
         raise ValueError("approval state exceeds the persistence limit")
     with _db() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -655,8 +609,7 @@ def pause_session_turn_for_approval(
     return get_pending_approval(session["id"], approval_id)
 
 
-def begin_pending_approval_execution(
-        sid: str, approval_id: str, approve: bool) -> dict:
+def begin_pending_approval_execution(sid: str, approval_id: str, approve: bool) -> dict:
     desired_status = "executing_approved" if approve else "executing_rejected"
     with _db() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -686,23 +639,20 @@ def begin_pending_approval_execution(
 
 
 def store_pending_approval_execution(
-        sid: str,
-        approval_id: str,
-        approve: bool,
-        result,
-        artifact_ids: list[str],
-        artifact_hashes: dict[str, str]) -> bool:
+    sid: str,
+    approval_id: str,
+    approve: bool,
+    result,
+    artifact_ids: list[str],
+    artifact_hashes: dict[str, str],
+) -> bool:
     artifact_ids = list(dict.fromkeys(artifact_ids))
     if set(artifact_hashes) != set(artifact_ids):
         raise ValueError("approval execution artifact hashes are invalid")
     expected = "executing_approved" if approve else "executing_rejected"
-    result_json = json.dumps(
-        result, default=str, sort_keys=True, separators=(",", ":")
-    )
+    result_json = json.dumps(result, default=str, sort_keys=True, separators=(",", ":"))
     artifact_ids_json = json.dumps(artifact_ids)
-    artifact_hashes_json = json.dumps(
-        artifact_hashes, sort_keys=True, separators=(",", ":")
-    )
+    artifact_hashes_json = json.dumps(artifact_hashes, sort_keys=True, separators=(",", ":"))
     with _db() as conn:
         cursor = conn.execute(
             "UPDATE chat_pending_approvals SET execution_result_json=?, "
@@ -720,8 +670,7 @@ def store_pending_approval_execution(
     return cursor.rowcount == 1
 
 
-def _complete_approval(
-        conn, sid: str, approval_id: str, approve: bool) -> bool:
+def _complete_approval(conn, sid: str, approval_id: str, approve: bool) -> bool:
     expected = "executing_approved" if approve else "executing_rejected"
     terminal = "approved" if approve else "rejected"
     cursor = conn.execute(
@@ -732,8 +681,7 @@ def _complete_approval(
     return cursor.rowcount == 1
 
 
-def complete_pending_approval(
-        sid: str, approval_id: str, approve: bool) -> bool:
+def complete_pending_approval(sid: str, approval_id: str, approve: bool) -> bool:
     with _db() as conn:
         return _complete_approval(conn, sid, approval_id, approve)
 
@@ -750,8 +698,7 @@ def retry_pending_approval(sid: str, approval_id: str) -> bool:
     return cursor.rowcount == 1
 
 
-def mark_pending_approval_execution_unknown(
-        sid: str, approval_id: str, approve: bool) -> bool:
+def mark_pending_approval_execution_unknown(sid: str, approval_id: str, approve: bool) -> bool:
     expected = "executing_approved" if approve else "executing_rejected"
     with _db() as conn:
         cursor = conn.execute(
@@ -785,12 +732,8 @@ def _execution_from_row(row: tuple) -> dict:
 
 
 def reserve_tool_execution(
-        sid: str,
-        execution_key: str,
-        tool_name: str,
-        arguments: dict,
-        *,
-        approval_id: str = "") -> dict:
+    sid: str, execution_key: str, tool_name: str, arguments: dict, *, approval_id: str = ""
+) -> dict:
     """Reserve one tool effect or recover its write-once completed result."""
     execution_key = str(execution_key or "").strip()
     tool_name = str(tool_name or "").strip()
@@ -830,9 +773,7 @@ def reserve_tool_execution(
                     "completed_at": now,
                 }
             return _execution_from_row(row[:6])
-        session_exists = conn.execute(
-            "SELECT 1 FROM chat_sessions WHERE id=?", (sid,)
-        ).fetchone()
+        session_exists = conn.execute("SELECT 1 FROM chat_sessions WHERE id=?", (sid,)).fetchone()
         if not session_exists:
             return {"state": "conflict"}
         conn.execute(
@@ -854,19 +795,18 @@ def reserve_tool_execution(
 
 
 def complete_tool_execution(
-        sid: str,
-        execution_key: str,
-        execution_token: str,
-        result,
-        artifact_ids: list[str],
-        artifact_hashes: dict[str, str]) -> bool:
+    sid: str,
+    execution_key: str,
+    execution_token: str,
+    result,
+    artifact_ids: list[str],
+    artifact_hashes: dict[str, str],
+) -> bool:
     artifact_ids = list(dict.fromkeys(artifact_ids or []))
     artifact_hashes = dict(artifact_hashes or {})
     if set(artifact_ids) != set(artifact_hashes):
         raise ValueError("tool execution artifact hashes are invalid")
-    result_json = json.dumps(
-        result, default=str, sort_keys=True, separators=(",", ":")
-    )
+    result_json = json.dumps(result, default=str, sort_keys=True, separators=(",", ":"))
     if len(result_json) > 200000:
         raise ValueError("tool execution result exceeds the persistence limit")
     with _db() as conn:
@@ -878,9 +818,7 @@ def complete_tool_execution(
             (
                 result_json,
                 json.dumps(artifact_ids),
-                json.dumps(
-                    artifact_hashes, sort_keys=True, separators=(",", ":")
-                ),
+                json.dumps(artifact_hashes, sort_keys=True, separators=(",", ":")),
                 _now(),
                 sid,
                 execution_key,
@@ -890,8 +828,7 @@ def complete_tool_execution(
     return cursor.rowcount == 1
 
 
-def mark_tool_execution_unknown(
-        sid: str, execution_key: str, execution_token: str) -> bool:
+def mark_tool_execution_unknown(sid: str, execution_key: str, execution_token: str) -> bool:
     with _db() as conn:
         cursor = conn.execute(
             "UPDATE chat_tool_executions SET status='outcome_unknown', "
@@ -902,17 +839,11 @@ def mark_tool_execution_unknown(
     return cursor.rowcount == 1
 
 
-def record_provider_response_checkpoint(
-        sid: str, operation_key: str, response_id: str) -> bool:
+def record_provider_response_checkpoint(sid: str, operation_key: str, response_id: str) -> bool:
     """Bind one stable provider idempotency key to exactly one response ID."""
     operation_key = str(operation_key or "").strip()
     response_id = str(response_id or "").strip()
-    if (
-        not operation_key
-        or len(operation_key) > 300
-        or not response_id
-        or len(response_id) > 300
-    ):
+    if not operation_key or len(operation_key) > 300 or not response_id or len(response_id) > 300:
         raise ValueError("provider checkpoint identity is invalid")
     with _db() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -932,10 +863,7 @@ def record_provider_response_checkpoint(
     return True
 
 
-def claim_session_turn(
-        sid: str,
-        lease_seconds: int = 600,
-        pending_approval_id: str = None) -> str:
+def claim_session_turn(sid: str, lease_seconds: int = 600, pending_approval_id: str = None) -> str:
     token = secrets.token_urlsafe(24)
     now = datetime.now(timezone.utc)
     stale_before = now - timedelta(seconds=lease_seconds)
@@ -949,13 +877,11 @@ def claim_session_turn(
             (sid,),
         ).fetchall()
         if pending and (
-            not pending_approval_id
-            or pending_approval_id not in {row[0] for row in pending}
+            not pending_approval_id or pending_approval_id not in {row[0] for row in pending}
         ):
             return None
         row = conn.execute(
-            "SELECT active_turn_token, active_turn_started_at "
-            "FROM chat_sessions WHERE id=?",
+            "SELECT active_turn_token, active_turn_started_at FROM chat_sessions WHERE id=?",
             (sid,),
         ).fetchone()
         if not row:
@@ -969,21 +895,21 @@ def claim_session_turn(
         if row[0] and (started_at is None or started_at > stale_before):
             return None
         conn.execute(
-            "UPDATE chat_sessions SET active_turn_token=?, "
-            "active_turn_started_at=? WHERE id=?",
+            "UPDATE chat_sessions SET active_turn_token=?, active_turn_started_at=? WHERE id=?",
             (token, now.isoformat(), sid),
         )
     return token
 
 
 def finish_session_turn(
-        session: dict,
-        token: str,
-        content: str,
-        response_id: str,
-        *,
-        completed_approval_id: str = None,
-        completed_approval_decision: bool = None) -> bool:
+    session: dict,
+    token: str,
+    content: str,
+    response_id: str,
+    *,
+    completed_approval_id: str = None,
+    completed_approval_decision: bool = None,
+) -> bool:
     with _db() as conn:
         conn.execute("BEGIN IMMEDIATE")
         row = conn.execute(
@@ -1000,8 +926,7 @@ def finish_session_turn(
         ):
             return False
         conn.execute(
-            "INSERT INTO chat_messages (session_id, role, content) "
-            "VALUES (?,?,?)",
+            "INSERT INTO chat_messages (session_id, role, content) VALUES (?,?,?)",
             (session["id"], "assistant", content[:20000]),
         )
         conn.execute(
@@ -1033,9 +958,18 @@ def search(keyword: str, limit: int = 15) -> list:
             "SELECT m.session_id, s.title, m.role, m.content, m.ts "
             "FROM chat_messages m JOIN chat_sessions s ON s.id=m.session_id "
             "WHERE m.content LIKE ? ORDER BY m.id DESC LIMIT ?",
-            (like, limit)).fetchall()
-    return [{"session_id": r[0], "title": r[1] or "(untitled)",
-             "role": r[2], "content": r[3], "ts": r[4]} for r in rows]
+            (like, limit),
+        ).fetchall()
+    return [
+        {
+            "session_id": r[0],
+            "title": r[1] or "(untitled)",
+            "role": r[2],
+            "content": r[3],
+            "ts": r[4],
+        }
+        for r in rows
+    ]
 
 
 # -------------------------------------------------------- command palette
@@ -1050,31 +984,86 @@ _COMMANDS = {
 }
 
 _PALETTE_KEYS = {
-    "/": "commands", "#": "tools", "%": "features", "$": "skills",
+    "/": "commands",
+    "#": "tools",
+    "%": "features",
+    "$": "skills",
 }
 
 _GROUPS = [
-    ("Tasks & Notes", ("add_task", "list_tasks", "complete_task",
-                       "save_note", "search_notes", "get_current_time")),
-    ("Mac & Browser", ("get_active_browser_tab", "run_shortcut",
-                       "list_calendar_events", "create_calendar_event",
-                       "list_reminders", "create_reminder")),
-    ("Email & People", ("draft_email", "list_recent_emails",
-                        "log_contact_interaction", "search_contact_history")),
-    ("Portfolio & Pipeline", ("create_project", "update_project",
-                              "portfolio_review", "log_opportunity",
-                              "update_opportunity", "pipeline_review")),
-    ("Commitments & Memory", ("log_commitment", "list_commitments",
-                              "complete_commitment", "log_decision",
-                              "search_decisions", "log_risk")),
+    (
+        "Tasks & Notes",
+        (
+            "add_task",
+            "list_tasks",
+            "complete_task",
+            "save_note",
+            "search_notes",
+            "get_current_time",
+        ),
+    ),
+    (
+        "Mac & Browser",
+        (
+            "get_active_browser_tab",
+            "run_shortcut",
+            "list_calendar_events",
+            "create_calendar_event",
+            "list_reminders",
+            "create_reminder",
+        ),
+    ),
+    (
+        "Email & People",
+        ("draft_email", "list_recent_emails", "log_contact_interaction", "search_contact_history"),
+    ),
+    (
+        "Portfolio & Pipeline",
+        (
+            "create_project",
+            "update_project",
+            "portfolio_review",
+            "log_opportunity",
+            "update_opportunity",
+            "pipeline_review",
+        ),
+    ),
+    (
+        "Commitments & Memory",
+        (
+            "log_commitment",
+            "list_commitments",
+            "complete_commitment",
+            "log_decision",
+            "search_decisions",
+            "log_risk",
+        ),
+    ),
     ("Web & Briefing", ("fetch_url", "check_website", "daily_brief")),
-    ("Documents (DocOps)", ("list_doc_templates", "create_doc_template",
-                            "draft_document", "revise_document",
-                            "finalize_document", "export_document",
-                            "list_documents", "get_document")),
-    ("Self-Improvement (SkillOps)", ("observe_pattern", "list_observations",
-                                     "create_skill", "activate_skill",
-                                     "review_skills", "deprecate_skill")),
+    (
+        "Documents (DocOps)",
+        (
+            "list_doc_templates",
+            "create_doc_template",
+            "draft_document",
+            "revise_document",
+            "finalize_document",
+            "export_document",
+            "list_documents",
+            "get_document",
+        ),
+    ),
+    (
+        "Self-Improvement (SkillOps)",
+        (
+            "observe_pattern",
+            "list_observations",
+            "create_skill",
+            "activate_skill",
+            "review_skills",
+            "deprecate_skill",
+        ),
+    ),
 ]
 
 
@@ -1096,16 +1085,13 @@ def render_commands() -> str:
     lines = ["", "  COMMANDS   (select: /<n> or type the command)"]
     for i, (cmd, desc) in enumerate(items, 1):
         lines.append(f"   {i:>2}. {cmd:<10} {desc}")
-    lines.append("\n  Palettes:  /  commands   #  tools   %  features   "
-                 "$  skills\n")
+    lines.append("\n  Palettes:  /  commands   #  tools   %  features   $  skills\n")
     return "\n".join(lines)
 
 
 def render_tools(tool_schemas: list) -> str:
-    by_name = {t["name"]: t for t in tool_schemas
-               if t.get("type") == "function"}
-    ordered, lines = [], ["", "  TOOLS   (deploy: #<n> or #<name> — "
-                             "PJ prompts for any arguments)"]
+    by_name = {t["name"]: t for t in tool_schemas if t.get("type") == "function"}
+    ordered, lines = [], ["", "  TOOLS   (deploy: #<n> or #<name> — PJ prompts for any arguments)"]
     seen = set()
     for group, names in _GROUPS:
         members = [n for n in names if n in by_name]
@@ -1133,40 +1119,77 @@ def _feature_defs(cfg):
 
     vector_store_ids = cfg.get("vector_store_ids")
     if not isinstance(vector_store_ids, list):
-        vector_store_ids = (
-            [cfg["vector_store_id"]] if cfg.get("vector_store_id") else []
-        )
+        vector_store_ids = [cfg["vector_store_id"]] if cfg.get("vector_store_id") else []
     feats = [
-        ("streaming", "Streaming responses", "info", True,
-         "text, function calls, and structured output always stream"),
-        ("structured_output", "Structured output (JSON schema)", "info", True,
-         'one-shot: pj.py --json schemas/<schema>.json "msg"'),
-        ("web_search", "Web search", "info", True,
-         "live internet lookups, always on"),
-        ("code_interpreter_enabled", "Code interpreter (Codex sandbox)",
-         "toggle", bool(cfg.get("code_interpreter_enabled")),
-         "sandboxed python/shell execution; adds latency per call"),
-        ("image_generation_enabled", "Image generation", "toggle",
-         bool(cfg.get("image_generation_enabled")),
-         "create/edit images in responses"),
-        ("file_search", "File search (vector store)", "info",
-         bool(vector_store_ids),
-         "vector store "
-         + (str(vector_store_ids[0])[:28] if vector_store_ids else "not configured")),
-        ("tool_search_enabled", "Tool search", "toggle",
-         bool(cfg.get("tool_search_enabled")),
-         "dynamic tool discovery across the full catalog"),
-        ("computer_use_enabled", "Computer use", "toggle",
-         bool(cfg.get("computer_use_enabled")),
-         "GUI/browser automation (activates when model supports it)"),
-        ("reasoning_effort", f"Reasoning effort: "
-         f"{cfg.get('reasoning_effort', 'medium')}", "cycle", True,
-         "select to cycle low → medium → high"),
+        (
+            "streaming",
+            "Streaming responses",
+            "info",
+            True,
+            "text, function calls, and structured output always stream",
+        ),
+        (
+            "structured_output",
+            "Structured output (JSON schema)",
+            "info",
+            True,
+            'one-shot: pj.py --json schemas/<schema>.json "msg"',
+        ),
+        ("web_search", "Web search", "info", True, "live internet lookups, always on"),
+        (
+            "code_interpreter_enabled",
+            "Code interpreter (Codex sandbox)",
+            "toggle",
+            bool(cfg.get("code_interpreter_enabled")),
+            "sandboxed python/shell execution; adds latency per call",
+        ),
+        (
+            "image_generation_enabled",
+            "Image generation",
+            "toggle",
+            bool(cfg.get("image_generation_enabled")),
+            "create/edit images in responses",
+        ),
+        (
+            "file_search",
+            "File search (vector store)",
+            "info",
+            bool(vector_store_ids),
+            "vector store "
+            + (str(vector_store_ids[0])[:28] if vector_store_ids else "not configured"),
+        ),
+        (
+            "tool_search_enabled",
+            "Tool search",
+            "toggle",
+            bool(cfg.get("tool_search_enabled")),
+            "dynamic tool discovery across the full catalog",
+        ),
+        (
+            "computer_use_enabled",
+            "Computer use",
+            "toggle",
+            bool(cfg.get("computer_use_enabled")),
+            "GUI/browser automation (activates when model supports it)",
+        ),
+        (
+            "reasoning_effort",
+            f"Reasoning effort: {cfg.get('reasoning_effort', 'medium')}",
+            "cycle",
+            True,
+            "select to cycle low → medium → high",
+        ),
     ]
     for s in load_mcp_config():
-        feats.append((f"mcp:{s['label']}", f"MCP connector: {s['label']}",
-                      "mcp", bool(s.get("enabled")),
-                      s.get("url", "")[:44]))
+        feats.append(
+            (
+                f"mcp:{s['label']}",
+                f"MCP connector: {s['label']}",
+                "mcp",
+                bool(s.get("enabled")),
+                s.get("url", "")[:44],
+            )
+        )
     return feats
 
 
@@ -1176,37 +1199,45 @@ def render_features(cfg) -> str:
     lines = ["", "  FEATURES   (deploy/toggle: %<n> or %<name>)"]
     for i, (key, label, kind, on, detail) in enumerate(feats, 1):
         mark = "🟢" if on else "⚪"
-        suffix = {"info": "", "toggle": "  [toggleable]",
-                  "cycle": "  [selectable]", "mcp": "  [toggleable]"}[kind]
+        suffix = {
+            "info": "",
+            "toggle": "  [toggleable]",
+            "cycle": "  [selectable]",
+            "mcp": "  [toggleable]",
+        }[kind]
         lines.append(f"   {i:>2}. {mark} {label:<36} {detail}{suffix}")
-    lines.append("\n  Toggles persist to config.json / mcp_servers.json and "
-                 "apply to the next message.\n")
+    lines.append(
+        "\n  Toggles persist to config.json / mcp_servers.json and apply to the next message.\n"
+    )
     return "\n".join(lines)
 
 
 def render_skills() -> str:
     import skillops
+
     with skillops._db() as conn:
         rows = conn.execute(
             "SELECT name, version, status, description FROM skillops_registry "
             "ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'candidate' "
-            "THEN 1 ELSE 2 END, name").fetchall()
+            "THEN 1 ELSE 2 END, name"
+        ).fetchall()
     obs = skillops.list_observations("open")
     _LAST["skills"] = [r[0] for r in rows]
     lines = ["", "  SKILLS   (SkillOps registry — deploy: $<n> or $<name>)"]
     if not rows:
-        lines.append("   (no generated skills yet — ask PJ to create one, "
-                     "or record patterns with observe_pattern)")
+        lines.append(
+            "   (no generated skills yet — ask PJ to create one, "
+            "or record patterns with observe_pattern)"
+        )
     for i, (name, ver, status, desc) in enumerate(rows, 1):
-        mark = {"active": "🟢", "candidate": "🟡",
-                "deprecated": "⚪"}.get(status, "⚪")
-        action = {"active": "select to run", "candidate":
-                  "select to activate", "deprecated":
-                  "select to re-activate"}.get(status, "")
-        lines.append(f"   {i:>2}. {mark} {name:<26} v{ver} [{status}] "
-                     f"{desc[:44]}  ({action})")
-    lines.append(f"\n  Open observations: {obs['count']}   ·   "
-                 "$review runs the lifecycle review\n")
+        mark = {"active": "🟢", "candidate": "🟡", "deprecated": "⚪"}.get(status, "⚪")
+        action = {
+            "active": "select to run",
+            "candidate": "select to activate",
+            "deprecated": "select to re-activate",
+        }.get(status, "")
+        lines.append(f"   {i:>2}. {mark} {name:<26} v{ver} [{status}] {desc[:44]}  ({action})")
+    lines.append(f"\n  Open observations: {obs['count']}   ·   $review runs the lifecycle review\n")
     return "\n".join(lines)
 
 
@@ -1233,8 +1264,7 @@ def _prompt_args(schema: dict) -> dict:
         desc = spec.get("description", "")
         enum = f" one of {spec['enum']}" if "enum" in spec else ""
         while True:
-            raw = input(f"   {name}{req}{enum}"
-                        f"{' — ' + desc if desc else ''}: ").strip()
+            raw = input(f"   {name}{req}{enum}{' — ' + desc if desc else ''}: ").strip()
             if not raw:
                 if name in required:
                     print("   this field is required.")
@@ -1259,8 +1289,10 @@ def _prompt_args(schema: dict) -> dict:
 
 def _deploy_tool(name: str, tool_schemas: list):
     import skills as _skills
-    schema = next((t for t in tool_schemas
-                   if t.get("type") == "function" and t["name"] == name), None)
+
+    schema = next(
+        (t for t in tool_schemas if t.get("type") == "function" and t["name"] == name), None
+    )
     if not schema:
         print(f"  Unknown tool '{name}'. Press # for the list.")
         return
@@ -1276,6 +1308,7 @@ def _deploy_tool(name: str, tool_schemas: list):
 
 def _deploy_feature(key: str, cfg):
     import pathlib
+
     feats = {f[0]: f for f in _feature_defs(cfg)}
     if key not in feats:
         print(f"  Unknown feature '{key}'. Press % for the list.")
@@ -1297,8 +1330,7 @@ def _deploy_feature(key: str, cfg):
     if kind == "toggle":
         cfg[key] = not on
         _patch_config(base, {key: cfg[key]})
-        print(f"  {label} → {'ON' if cfg[key] else 'OFF'} "
-              f"(applies to the next message).")
+        print(f"  {label} → {'ON' if cfg[key] else 'OFF'} (applies to the next message).")
         return
     if kind == "mcp":
         label_name = key.split(":", 1)[1]
@@ -1308,27 +1340,26 @@ def _deploy_feature(key: str, cfg):
             if s["label"] == label_name:
                 s["enabled"] = not s.get("enabled", False)
                 mcp_path.write_text(json.dumps(servers, indent=2))
-                if s["enabled"] and any(
-                        "$" in str(v) for v in s.get("headers", {}).values()):
-                    print(f"  MCP {label_name} → ON, but its auth env var "
-                          "looks unset in ~/.env — it may not authenticate.")
+                if s["enabled"] and any("$" in str(v) for v in s.get("headers", {}).values()):
+                    print(
+                        f"  MCP {label_name} → ON, but its auth env var "
+                        "looks unset in ~/.env — it may not authenticate."
+                    )
                 else:
-                    print(f"  MCP {label_name} → "
-                          f"{'ON' if s['enabled'] else 'OFF'}.")
+                    print(f"  MCP {label_name} → {'ON' if s['enabled'] else 'OFF'}.")
                 return
         print(f"  MCP server '{label_name}' not found.")
 
 
 def _deploy_skill(name: str, tool_schemas: list):
     import skillops
+
     if name == "review":
         print("  Running lifecycle review...")
-        print("  → " + json.dumps(skillops.review_skills(), indent=2)[:2500]
-              + "\n")
+        print("  → " + json.dumps(skillops.review_skills(), indent=2)[:2500] + "\n")
         return
     with skillops._db() as conn:
-        row = conn.execute("SELECT status FROM skillops_registry "
-                           "WHERE name=?", (name,)).fetchone()
+        row = conn.execute("SELECT status FROM skillops_registry WHERE name=?", (name,)).fetchone()
     if not row:
         print(f"  Unknown skill '{name}'. Press $ for the registry.")
         return
@@ -1342,8 +1373,7 @@ def _deploy_skill(name: str, tool_schemas: list):
     schemas, dispatch_map = skillops.load_generated_skills()
     schema = next((s for s in schemas if s["name"] == name), None)
     if not schema or name not in dispatch_map:
-        print(f"  '{name}' is active but failed to load; check its file in "
-              "generated_skills/.")
+        print(f"  '{name}' is active but failed to load; check its file in generated_skills/.")
         return
     print(f"\n  Deploying {name} — {_desc(schema)}")
     try:
@@ -1374,9 +1404,8 @@ def setup_readline(tool_schemas: list):
         import readline
     except ImportError:
         return
-    fn_names = [t["name"] for t in tool_schemas
-                if t.get("type") == "function"]
-    vocab = (list(_COMMANDS) + ["#" + n for n in fn_names] + fn_names)
+    fn_names = [t["name"] for t in tool_schemas if t.get("type") == "function"]
+    vocab = list(_COMMANDS) + ["#" + n for n in fn_names] + fn_names
 
     def completer(text, state_i):
         matches = [w for w in vocab if w.startswith(text)]
@@ -1463,8 +1492,10 @@ def handle_command(line: str, session: dict, tool_schemas: list, cfg=None):
         print("\n  #  UPDATED           MSGS  TITLE")
         for i, s in enumerate(sessions, 1):
             marker = "→" if s["id"] == session["id"] else " "
-            print(f" {marker}{i:>2}  {_fmt_ts(s['updated_at'])}  "
-                  f"{s['messages']:>4}  {s['title'][:52]}  ({s['id']})")
+            print(
+                f" {marker}{i:>2}  {_fmt_ts(s['updated_at'])}  "
+                f"{s['messages']:>4}  {s['title'][:52]}  ({s['id']})"
+            )
         print("\n  /resume <#> or /resume <id> to continue one.\n")
         return True, None
 
@@ -1505,8 +1536,7 @@ def handle_command(line: str, session: dict, tool_schemas: list, cfg=None):
         print()
         for m in msgs:
             who = "You" if m["role"] == "user" else "PJ"
-            print(f"  [{_fmt_ts(m['ts'])}] {who}: "
-                  f"{m['content'][:160].replace(chr(10), ' ')}")
+            print(f"  [{_fmt_ts(m['ts'])}] {who}: {m['content'][:160].replace(chr(10), ' ')}")
         print()
         return True, None
 
@@ -1521,8 +1551,10 @@ def handle_command(line: str, session: dict, tool_schemas: list, cfg=None):
         print()
         for h in hits:
             who = "You" if h["role"] == "user" else "PJ"
-            print(f"  [{_fmt_ts(h['ts'])}] ({h['title'][:28]}) {who}: "
-                  f"{h['content'][:120].replace(chr(10), ' ')}")
+            print(
+                f"  [{_fmt_ts(h['ts'])}] ({h['title'][:28]}) {who}: "
+                f"{h['content'][:120].replace(chr(10), ' ')}"
+            )
         print("\n  /resume <id> to reopen a chat.\n")
         return True, None
 
