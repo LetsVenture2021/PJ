@@ -1247,6 +1247,8 @@ def delegate_advanced_task(prompt, *, client=None, cfg=None):
     token = _delegation_active.set(True)
     try:
         cfg = load_config() if cfg is None else cfg
+        # Delegated tasks are the complex, tool-heavy bucket: plan harder.
+        cfg = {**cfg, "reasoning_effort": "high"}
         client = OpenAI() if client is None else client
         completion = None
         approval = None

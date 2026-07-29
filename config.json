@@ -11,7 +11,7 @@
   ],
   "computer_use_enabled": true,
   "tool_search_enabled": true,
-  "reasoning_effort": "low",
+  "reasoning_effort": "medium",
   "code_interpreter_enabled": false,
   "image_generation_enabled": true,
   "n8n_evaluation_receipt_path": "documents/n8n-evaluation-receipt-v1.json",
