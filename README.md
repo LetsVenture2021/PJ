@@ -7,9 +7,14 @@ voice, a local browser client, and an optional Cloudflare Worker edge proxy.
 ## Documentation
 
 - [Normative document quality standard](docs/document-quality-standard.md)
+- [Architecture and technology-stack assessment (July 29, 2026)](docs/architecture-stack-assessment-2026-07-29.md)
+- [Market-competitive capability gaps](docs/market-competitive-capabilities-2026-07-29.md)
+  prioritizes the additional product capabilities PJ needs for parity and
+  differentiation across assistant, research, work-copilot, and agent markets.
 - [Product and technology report (July 28, 2026)](docs/product-technology-report-2026-07-28.md)
 - [Product vision: the governed personal intelligence layer](docs/product-vision.md)
 - [End-to-end architecture](docs/architecture.md)
+- [Current application workflow diagrams](docs/workflow-diagrams.md)
 - [Realtime protocol compatibility](docs/realtime-protocol.md)
 - [Incident response and recovery runbook](docs/runbook.md)
 - [GitHub security controls](docs/security-controls.md)
@@ -87,6 +92,9 @@ voice, a local browser client, and an optional Cloudflare Worker edge proxy.
 - Vector-store source ingestion/synchronization into DocOps, CodeOps, and the
   governed n8n capability corpus, including release receipts and fail-closed
   validation.
+- Privacy-preserving process mining over PJ's metadata-only JSONL logs, with
+  discovered workflow variants, transitions, failure and latency hotspots, and
+  prioritized optimization recommendations (`scripts/process_mining.py`).
 - A standalone stdio Hugging Face MCP server for bounded public Hub discovery
   and token-authenticated inference. See
   [`docs/huggingface-mcp-server.md`](docs/huggingface-mcp-server.md).
@@ -189,7 +197,7 @@ Do not commit secrets. Both `.env` and runtime files (`*.sqlite3`, `state.json`,
 - `config.json`: model, instructions, vector stores, prompt refinement, and
   built-in OpenAI tool toggles.
 - `mcp_servers.json`: MCP URLs, enablement, and approval policy. Header values
-  can reference `$NAME` or `${NAME}` environment variables. The checked-in
+  and the entire URL can reference `$NAME` or `${NAME}` environment variables. The checked-in
   `******` values are placeholders, not credentials.
 - `tool_policy.json`: local tools that require explicit approval.
 - `pj_instructions.txt`: assistant instructions.
@@ -200,6 +208,26 @@ Dependabot, secret scanning, and push protection.
 
 The checked-in `config.json` contains project-specific model and vector-store
 IDs; access to those resources is not provisioned by this repository.
+
+#### Optional SaaS MCP servers
+
+The MCP catalog includes disabled templates for Microsoft Outlook, Google
+Workspace, Zillow, Zoom, Adobe, n8n, and suggested business tools (Slack,
+Microsoft 365, Atlassian, Salesforce, HubSpot, and an automation hub such as
+Zapier or Pipedream). Twenty additional templates cover Dropbox, Box, DocuSign,
+Asana, monday.com, Trello, Airtable, Linear, GitLab, Sentry, Datadog, AWS, Azure,
+Google Cloud, Shopify, QuickBooks, Xero, ServiceNow, Workday, and Figma. Most SaaS
+MCP endpoints are tenant- or provider-specific, so PJ deliberately does not
+guess an endpoint or embed OAuth credentials.
+
+To configure one, obtain its HTTPS MCP endpoint from a trusted provider or your
+self-hosted deployment, put it in the matching environment variable documented
+in `mcp_servers.json`, and then change only that entry's `enabled` field to
+`true`. Keep `require_approval` set to `always` for tools that read private data,
+send messages, modify records, start paid jobs, or trigger workflows. Limit the
+OAuth scopes and provider-side tool allowlist to the minimum needed. An absent
+URL variable leaves the server unavailable rather than sending a placeholder to
+the Responses API.
 
 ### Structured logging and redaction
 
@@ -352,6 +380,30 @@ default stores queried by Full Power Text.
 Ingestion needs `OPENAI_API_KEY` and a configured vector store. Governed n8n
 ingestion additionally requires an independent evaluation receipt; inspect each
 script's `--help` before changing a corpus.
+
+### Process mining and workflow optimization
+
+PJ can discover the paths actually taken through its workflows without reading
+prompts, tool arguments, results, request bodies, or credentials:
+
+```bash
+python scripts/process_mining.py /path/to/pj.jsonl
+python scripts/process_mining.py /path/to/pj.jsonl --output process-report.json
+```
+
+The report groups metadata events into cases using request, upload, tool-call,
+or session correlation IDs. It summarizes variants, directly-follows
+transitions, activity failure rates, mean and p95 duration, incomplete cases,
+and exact-once replays. Recommendations prioritize reliability before latency:
+failure and incomplete-case hotspots are high priority, p95 latency hotspots
+are medium priority, and replay counts trigger a low-priority investigation of
+upstream retries without recommending removal of replay protection.
+
+Only fixed PJ lifecycle event names and numeric timing/status metadata are
+accepted. Unknown messages and payload-shaped fields are ignored, and reports
+contain aggregate counts rather than raw correlation IDs. See the
+[process-mining optimization loop](docs/workflow-diagrams.md#16-process-mining-optimization-loop)
+for how findings feed back into each feature workflow.
 
 ## Tests and quality checks
 

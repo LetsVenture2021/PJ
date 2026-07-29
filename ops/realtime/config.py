@@ -31,6 +31,11 @@ REALTIME_EXCLUDED_TOOL_NAMES = {
     "create_controlled_image",
     "register_vector_image",
     "delete_image_asset",
+    "send_mail",
+    "send_invitation",
+    "change_event",
+    "change_attendees",
+    "publish_commitment",
 }
 
 
