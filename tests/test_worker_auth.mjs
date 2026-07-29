@@ -910,7 +910,7 @@ test("browser module initializes with Full Power helpers in shared scope", async
   const moduleMatch = html.match(/<script type="module">([\s\S]*?)<\/script>/);
   assert.ok(moduleMatch, "browser module script must exist");
   const moduleSource = moduleMatch[1].replace(
-    /import\s*\{[\s\S]*?\}\s*from\s*"\/assets\/pj_web_utils\.js";/,
+    /import\s*\{[\s\S]*?\}\s*from\s*"\/assets\/pj_web_utils\.js[^"]*";/,
     `const CONTRACT_VERSION = "test";
      const PROTOCOL_VERSION = 1;
      const protocolMessage = (payload = {}) => ({ version: PROTOCOL_VERSION, ...payload });

@@ -626,6 +626,8 @@
   <audio id="pjAudio" autoplay></audio>
 
   <script type="module">
+    // The ?v= query busts stale cached copies of the module; bump it whenever
+    // pj_web_utils.js changes exports, or the import dies on cached clients.
     import {
       CONTRACT_VERSION,
       PROTOCOL_VERSION,
@@ -635,7 +637,7 @@
       shorten,
       parseErrorBody,
       fetchWithTimeout,
-    } from "/assets/pj_web_utils.js";
+    } from "/assets/pj_web_utils.js?v=2026-07-28.6";
 
     const localHostnames = new Set(["localhost", "127.0.0.1"]);
     const DEFAULT_API_BASE = localHostnames.has(window.location.hostname)
