@@ -238,6 +238,43 @@
       width: 100%;
     }
 
+    .codex-module {
+      display: flex;
+      flex-direction: column;
+      gap: 9px;
+      padding: 12px;
+      border: 1px solid rgba(108, 92, 231, .42);
+      border-radius: 10px;
+      background: linear-gradient(145deg, rgba(108, 92, 231, .14), rgba(11, 14, 18, .96));
+    }
+
+    .codex-module-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .codex-module-header strong { font-size: 13px; }
+    .codex-badge {
+      color: #c9c3ff;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .codex-module textarea {
+      width: 100%;
+      min-height: 84px;
+      resize: vertical;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #0b0e12;
+      color: var(--text);
+    }
+
     .chat {
       display: grid;
       grid-template-rows: auto 1fr auto;
@@ -563,8 +600,7 @@
       </div>
 
       <div class="mode-switch" aria-label="Assistant mode">
-        <button id="realtimeModeBtn" class="active" type="button">Fast Voice</button>
-        <button id="fullPowerVoiceModeBtn" type="button">Full Power Voice</button>
+        <button id="fullPowerVoiceModeBtn" class="active" type="button">Full Force Voice</button>
         <button id="fullPowerModeBtn" type="button">Full Power Text</button>
       </div>
 
@@ -579,9 +615,26 @@
       </div>
 
       <div id="modeNote" class="note">
-        Voice mode requires microphone permission. You can still send text
-        messages once the realtime session is connected.
+        Full Force Voice refines every completed thought, then uses PJ's full
+        Responses runtime for tools, research, artifacts, and governed actions.
       </div>
+
+      <section class="codex-module" aria-labelledby="codexTitle">
+        <div class="codex-module-header">
+          <strong id="codexTitle">Codex</strong>
+          <span class="codex-badge">Coding agent</span>
+        </div>
+        <label for="codexAction">Task mode</label>
+        <select id="codexAction">
+          <option value="analyze">Analyze safely</option>
+          <option value="delegate">Implement with approval</option>
+          <option value="artifact">Create an artifact</option>
+        </select>
+        <label for="codexPrompt">Coding task</label>
+        <textarea id="codexPrompt" placeholder="Review a repository, debug an issue, or describe what Codex should build."></textarea>
+        <button id="runCodexBtn" class="primary full-width-btn" type="button">Open in Codex</button>
+        <small class="sub">Codex runs through Full Power. Write access remains owner-approval gated.</small>
+      </section>
 
       <section class="capture-panel" aria-labelledby="captureTitle">
         <strong id="captureTitle">Visual context (read-only)</strong>
@@ -656,7 +709,7 @@
             <button class="suggestion" type="button" data-prompt="Help me plan a project with clear milestones and next steps."><strong>Plan a project</strong>Turn an idea into clear milestones and next steps</button>
             <button class="suggestion" type="button" data-prompt="Help me summarize and compare my documents."><strong>Work with documents</strong>Summarize, compare, or transform your files</button>
             <button class="suggestion" type="button" data-prompt="Help me create a polished brief from an idea."><strong>Create something</strong>Draft a presentation, image, or polished brief</button>
-            <button class="suggestion" type="button" data-prompt="I'd like to talk through an idea."><strong>Talk it through</strong>Use Fast Voice for a natural live conversation</button>
+            <button class="suggestion" type="button" data-prompt="I'd like to talk through an idea."><strong>Talk it through</strong>Use Full Force Voice for a natural, tool-enabled conversation</button>
           </div>
         </section>
       </div>
@@ -772,9 +825,11 @@
       refreshCapabilitiesBtn: document.getElementById("refreshCapabilitiesBtn"),
       capabilityStatus: document.getElementById("capabilityStatus"),
       toolSummary: document.getElementById("toolSummary"),
-      realtimeModeBtn: document.getElementById("realtimeModeBtn"),
       fullPowerVoiceModeBtn: document.getElementById("fullPowerVoiceModeBtn"),
       fullPowerModeBtn: document.getElementById("fullPowerModeBtn"),
+      codexAction: document.getElementById("codexAction"),
+      codexPrompt: document.getElementById("codexPrompt"),
+      runCodexBtn: document.getElementById("runCodexBtn"),
       modeNote: document.getElementById("modeNote"),
       fullPowerControls: document.getElementById("fullPowerControls"),
       sessionSelect: document.getElementById("sessionSelect"),
@@ -819,7 +874,7 @@
       activeStartRequestId: null,
       liveAnnounced: false,
       toolCatalog: null,
-      mode: MODE.REALTIME,
+      mode: MODE.FULL_POWER_VOICE,
       fullPowerSessionId: null,
       activeSessionId: null,
       fullPowerBusy: false,
@@ -1401,7 +1456,6 @@
         stopFullPowerSession({ announce: false, preserveSession: true });
       }
       state.mode = mode;
-      el.realtimeModeBtn.classList.toggle("active", mode === MODE.REALTIME);
       el.fullPowerVoiceModeBtn.classList.toggle(
         "active", mode === MODE.FULL_POWER_VOICE
       );
@@ -1414,22 +1468,22 @@
         ? "End Session"
         : "Close Conversation";
       el.modeNote.textContent = mode === MODE.REALTIME
-        ? "Fast Voice responds immediately through Realtime and stores finalized transcripts."
+        ? "Realtime voice is available as an internal compatibility mode."
         : mode === MODE.FULL_POWER_VOICE
-          ? "Full Power Voice refines each completed transcript before PJ responds and preserves the original wording in shared history."
+          ? "Full Force Voice refines every completed thought before using PJ's full Responses runtime, while preserving your original wording in shared history."
           : "Full Power Text uses PJ's terminal-equivalent Responses runtime: web and file search, MCP, local tools, citations, structured output, and shared history.";
       const idleText = mode === MODE.REALTIME
-        ? "Fast Voice idle"
+        ? "Realtime Voice idle"
         : mode === MODE.FULL_POWER_VOICE
-          ? "Full Power Voice idle"
+          ? "Full Force Voice idle"
           : "Full Power Text idle";
       setPhase(PHASE.IDLE, idleText);
       appendBubble(
         "system",
         mode === MODE.REALTIME
-          ? "Fast Voice selected."
+          ? "Realtime Voice selected."
           : mode === MODE.FULL_POWER_VOICE
-            ? "Full Power Voice selected."
+            ? "Full Force Voice selected."
             : "Full Power Text selected. Start or resume a conversation.",
       );
       refreshCurrentCapabilities({ forceRefresh: false });
@@ -1910,8 +1964,8 @@
         appendBubble(
           "system",
           state.mode === MODE.FULL_POWER_VOICE
-            ? "Starting Full Power Voice session..."
-            : "Starting Fast Voice session...",
+            ? "Starting Full Force Voice session..."
+            : "Starting Realtime Voice session...",
         );
         const health = await checkBackendHealth(apiBase, requestId);
         await refreshCapabilities(apiBase, requestId, { health, forceRefresh: false });
@@ -2671,6 +2725,35 @@
         }
       }
 
+      async function runCodexTask() {
+        const task = el.codexPrompt.value.trim();
+        if (!task || state.fullPowerBusy) {
+          if (!task) appendBubble("system", "Describe the coding task before opening Codex.");
+          return;
+        }
+        const action = el.codexAction.value;
+        const instructions = {
+          analyze: "Use codex_analyze in its read-only sandbox to analyze this coding task. Report findings, evidence, and recommended next steps:",
+          delegate: "Use run_codex_task to implement this coding task. Request owner approval before any gated execution, preserve the sandbox policy, and report changed files plus validation:",
+          artifact: "Use codex_generate_artifact to create the requested coding deliverable and return every resulting artifact:",
+        };
+        el.runCodexBtn.disabled = true;
+        try {
+          if (state.mode !== MODE.FULL_POWER) setMode(MODE.FULL_POWER);
+          if (state.phase === PHASE.IDLE) await startFullPowerSession();
+          if (state.phase !== PHASE.LIVE || !state.fullPowerSessionId) {
+            throw new Error("Full Power could not start for Codex.");
+          }
+          el.textInput.value = `${instructions[action] || instructions.analyze}\n\n${task}`;
+          await sendFullPowerMessage();
+          el.codexPrompt.value = "";
+        } catch (error) {
+          appendBubble("system", `Codex could not start: ${shorten(String(error), 260)}`);
+        } finally {
+          el.runCodexBtn.disabled = false;
+        }
+      }
+
       function startSelectedMode() {
         return state.mode === MODE.FULL_POWER ? startFullPowerSession() : startSession();
       }
@@ -3185,12 +3268,12 @@
         appendBubble("system", `Capability catalog refreshed: ${count} local tools loaded.`);
       }
     });
-    el.realtimeModeBtn.addEventListener("click", () => setMode(MODE.REALTIME));
     el.fullPowerVoiceModeBtn.addEventListener(
       "click",
       () => setMode(MODE.FULL_POWER_VOICE),
     );
     el.fullPowerModeBtn.addEventListener("click", () => setMode(MODE.FULL_POWER));
+    el.runCodexBtn.addEventListener("click", runCodexTask);
     el.refreshSessionsBtn.addEventListener("click", refreshFullPowerSessions);
     el.sessionSelect.addEventListener("change", () => {
       if (el.sessionSelect.value) resumeFullPowerSession(el.sessionSelect.value);
