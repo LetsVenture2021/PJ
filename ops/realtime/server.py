@@ -480,10 +480,12 @@ def _validate_upload_signature(path, extension, classification=None):
     if (
         classification is not None
         and classification.spec.handling == "extract"
+        and not classification.spec.magic
         and extension not in TEXT_UPLOAD_EXTENSIONS
     ):
-        # New extract-tier families (source code, notebooks, HTML) accept
-        # shebangs but must still be genuine text.
+        # Text-like extract families (source code, notebooks, HTML) accept
+        # shebangs but must still be genuine text. Binary-container extract
+        # families (spreadsheets, OOXML) declare magic bytes and are exempt.
         if b"\x00" in sample:
             raise UploadValidationError(
                 "invalid_text_content",

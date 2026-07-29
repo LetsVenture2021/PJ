@@ -360,3 +360,20 @@ class TestDocumentUploads(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_binary_container_documents_are_accepted_for_extraction(self):
+        import io as _io
+        import zipfile as _zipfile
+
+        buffer = _io.BytesIO()
+        with _zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("[Content_Types].xml", "<Types/>")
+            archive.writestr("word/document.xml", "<w:document/>")
+        response = self._upload(
+            "/upload/files",
+            [("job.docx", buffer.getvalue(), "application/octet-stream")],
+            ["job.docx"],
+        )
+        self.assertEqual(response.status_code, 201)
+        classification = response.get_json()["files"][0]["classification"]
+        self.assertEqual(classification["handling"], "extract")
