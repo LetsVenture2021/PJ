@@ -319,6 +319,12 @@ from ops.docs import container_artifacts as _container_artifacts  # noqa: E402
 TOOL_SCHEMAS.extend(_container_artifacts.CONTAINER_ARTIFACT_SCHEMAS)
 DISPATCH_TABLE.update(_container_artifacts.CONTAINER_ARTIFACT_DISPATCH)
 
+# --- Vision: analyze uploaded raster images ----------------------------------
+from ops.images import vision as _vision  # noqa: E402
+
+TOOL_SCHEMAS.extend(_vision.VISION_SCHEMAS)
+DISPATCH_TABLE.update(_vision.VISION_DISPATCH)
+
 # --- ChiefOps: executive operations toolkit ----------------------------------
 # Calendar, reminders, mail drafts, relationship memory, portfolio,
 # commitments, revenue pipeline, decision journal, risk register, web
