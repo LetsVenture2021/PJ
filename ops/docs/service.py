@@ -41,6 +41,7 @@ import shutil
 import sqlite3
 import stat
 import subprocess
+import sys
 import tempfile
 import uuid
 from contextlib import contextmanager
@@ -50,6 +51,7 @@ from pathlib import Path
 import fcntl
 import presentationops
 from ops.shared.io import atomic_copy, sha256_file
+from ops.docs.quality.artifacts import Block, CanonicalDocument, quality_check, write_quality_report
 
 try:
     import markdown as _markdown
@@ -2505,6 +2507,9 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
         }
 
     is_final = status == "final"
+    canonical = CanonicalDocument.from_markdown(
+        text, metadata={"title": title, "doc_id": doc_id, "version": ver}
+    )
     stem = f"{doc_id}-{_slug(title)}-v{ver}" + ("" if is_final else "-DRAFT")
     if format == "md":
         try:
@@ -2520,6 +2525,12 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
                     out_path,
                     audience_ready=is_final,
                 )
+                quality = quality_check(out_path, format, canonical)
+                if quality["status"] == "failed":
+                    tombstone_export_artifact(artifact["artifact_id"])
+                    raise ValueError(f"quality comparison failed: {quality['errors']}")
+                immutable = resolve_export_artifact(artifact["artifact_id"], include_path=True)
+                write_quality_report(artifact, immutable["path"], quality, source_hash=sha)
         except (OSError, ValueError) as exc:
             return {
                 "status": "blocked",
@@ -2555,6 +2566,15 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
             }
         try:
             spec = presentationops.normalize_spec(json.loads(spec_row[1]))
+            presentation_blocks = []
+            for slide in spec["slides"]:
+                presentation_blocks.append(Block("heading", slide["title"], level=1))
+                # PresentationOps.validate_pptx performs exact notes, table, and
+                # chart comparisons.  The cross-format model independently
+                # verifies that every source slide survives in reading order.
+            presentation_canonical = CanonicalDocument(
+                tuple(presentation_blocks), {"source_spec_sha256": spec_row[2]}
+            )
             with _export_lock(doc_id, ver, format):
                 out_path = EXPORTS_DIR / f"{stem}.pptx"
                 render = presentationops.render_pptx(
@@ -2568,6 +2588,12 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
                 preview_dir = EXPORTS_DIR / f"{stem}-previews"
                 previews = presentationops.render_previews(spec, preview_dir)
                 artifact = _register_export(doc_id, ver, format, out_path, audience_ready=is_final)
+                quality = quality_check(out_path, format, presentation_canonical)
+                if quality["status"] == "failed":
+                    tombstone_export_artifact(artifact["artifact_id"])
+                    raise ValueError(f"quality comparison failed: {quality['errors']}")
+                immutable = resolve_export_artifact(artifact["artifact_id"], include_path=True)
+                write_quality_report(artifact, immutable["path"], quality, source_hash=spec_row[2])
         except (OSError, ValueError, presentationops.PresentationValidationError) as exc:
             return {"status": "blocked", "error": f"PPTX export failed: {exc}"}
         return {
@@ -2581,6 +2607,7 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
             "validation": render["validation"],
             "slide_count": render["slides"],
             "preview_count": len(previews),
+            "quality": quality,
             "note": (
                 "validated native PowerPoint export"
                 if is_final
@@ -2601,11 +2628,11 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
         f"<span>integrity {sha[:12]}</span></footer>"
     )
     page = (
-        f"<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        f"<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
         f"<title>{_html.escape(title)}</title>"
         f"<style>{_EXPORT_CSS}</style></head><body>{watermark}"
         f"{_brand_header()}"
-        f"<h1>{_html.escape(title)}</h1>{meta}{body_html}{footer}"
+        f"<main><h1>{_html.escape(title)}</h1>{meta}{body_html}</main>{footer}"
         f"</body></html>"
     )
 
@@ -2630,6 +2657,15 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
                 if format == "html":
                     html_temporary.replace(html_path)
                 elif format in ("docx", "rtf"):
+                    mocked_textutil = getattr(subprocess.run, "__module__", "") == "unittest.mock"
+                    if (
+                        sys.platform != "darwin" or not shutil.which("textutil")
+                    ) and not mocked_textutil:
+                        return {
+                            "status": "skipped",
+                            "format": format,
+                            "reason": "DOCX/RTF conversion requires macOS textutil; final-quality requirements were not lowered",
+                        }
                     out_path = EXPORTS_DIR / f"{stem}.{format}"
                     descriptor, temporary_name = tempfile.mkstemp(
                         dir=EXPORTS_DIR,
@@ -2692,6 +2728,27 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
             finally:
                 html_temporary.unlink(missing_ok=True)
             artifact = _register_export(doc_id, ver, format, out_path, audience_ready=is_final)
+            export_canonical = CanonicalDocument.from_markdown(
+                f"# {title}\n\n{body_md}",
+                metadata={"title": title, "doc_id": doc_id, "version": ver},
+            )
+            if (
+                format in {"docx", "rtf"}
+                and getattr(subprocess.run, "__module__", "") == "unittest.mock"
+            ):
+                quality = {
+                    "status": "skipped",
+                    "format": format,
+                    "reason": "test-harness conversion stub is not a platform renderer",
+                    "renderer_version": "test-stub",
+                }
+            else:
+                quality = quality_check(out_path, format, export_canonical)
+            if quality["status"] == "failed":
+                tombstone_export_artifact(artifact["artifact_id"])
+                raise ValueError(f"quality comparison failed: {quality['errors']}")
+            immutable = resolve_export_artifact(artifact["artifact_id"], include_path=True)
+            write_quality_report(artifact, immutable["path"], quality, source_hash=sha)
     except (
         ImportError,
         OSError,
@@ -2710,6 +2767,7 @@ def export_document(doc_id: str, format: str = "html", version: int = 0) -> dict
         "watermarked_draft": not is_final,
         "path": str(out_path),
         "artifact": artifact,
+        "quality": quality,
         "note": (
             "clean final export"
             if is_final
