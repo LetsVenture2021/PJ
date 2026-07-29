@@ -5,7 +5,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 
-from ops.docs import service
+from ops.docs import extraction, formats, service
 from ops.shared.io import sha256_file
 
 
@@ -162,23 +162,20 @@ def get_uploaded_document(upload_id: str, saved_path: str = "") -> dict:
     if resolved.stat().st_size != row[6] or sha256_file(resolved) != row[7]:
         return {"error": "uploaded document failed integrity verification"}
 
-    if resolved.suffix.lower() in {
-        ".txt",
-        ".md",
-        ".markdown",
-        ".csv",
-        ".tsv",
-        ".json",
-        ".yaml",
-        ".yml",
-        ".xml",
-    }:
-        content = resolved.read_text(encoding="utf-8", errors="replace")
-        metadata["content"] = content[:20000]
-        metadata["content_truncated"] = len(content) > 20000
-    else:
-        metadata["content"] = None
-        metadata["content_truncated"] = False
+    with resolved.open("rb") as handle:
+        head = handle.read(4096)
+    classification = formats.classify(resolved.name, head, row[6])
+    metadata["classification"] = classification.public()
+    metadata["content"] = None
+    metadata["content_truncated"] = False
+    if classification.spec.handling in {"extract", "header_only"} and not classification.rejection:
+        try:
+            preview = extraction.extract_preview(resolved, classification, char_cap=20000)
+        except extraction.ExtractionError as exc:
+            metadata["content_error"] = exc.code
+        else:
+            metadata["content"] = preview
+            metadata["content_truncated"] = len(preview) >= 20000
     return metadata
 
 

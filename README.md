@@ -52,6 +52,13 @@ voice, a local browser client, and an optional Cloudflare Worker edge proxy.
   files and a **folder** icon uploads a directory tree via `/upload/files` and
   `/upload/folder`. Selection uploads immediately, and progress, completion,
   and errors are reported as system bubbles in the conversation.
+- Uploads accept broadly and parse narrowly (`ops/docs/formats.py`): every
+  accepted file is registered as an immutable artifact, but only an explicit
+  allowlist of text-like formats is ever parsed into sanitized Markdown
+  previews (`ops/docs/extraction.py`). ML weights are read header-only,
+  pickle-family checkpoints are never deserialized, executables and
+  credential-shaped filenames are refused, and multi-file batches skip
+  individually unacceptable files instead of failing wholesale.
 - A Cloudflare Worker proxies the same API surfaces, obtains Realtime sessions
   from OpenAI, validates Cloudflare Access identity, and bridges privileged
   tool/Responses calls to the private Flask runtime.
@@ -410,11 +417,19 @@ without it the Worker remains useful only for its direct Realtime path and
 reports degraded capability in `/health`.
 
 If the zone runs Super Bot Fight Mode or challenge-issuing security features,
-add a WAF custom skip rule for the bridge hostname's authenticated paths —
-`/execute-tool`, `/tool-schemas`, `/health`, `/responses/*`, and `/upload/*` —
-because Worker subrequests cannot answer browser challenges. A challenged
-bridge path fails silently: the client reports an upload or tool call in
-progress and nothing reaches the runtime.
+add a WAF custom skip rule for the authenticated API paths on both the apex
+and bridge hostnames — `/session`, `/token`, `/execute-tool`,
+`/tool-schemas`, `/health`, `/responses/*`, and `/upload/*` — because Worker
+subrequests and browser XHR cannot answer challenges. A challenged path fails
+silently: the client reports an upload or tool call in progress and nothing
+reaches the runtime.
+
+If the zone runs the OWASP Core Ruleset, also add a managed-phase skip
+exception for `/upload/*` on both hostnames: OWASP request-body scoring
+false-positives on uploaded source code and binaries. The upload path remains
+protected by Cloudflare Access, Worker identity checks, the bridge token, and
+the runtime's own signature validation, credential-name refusal, and scanner
+hook.
 
 `POST /webhook` is **not a supported or deployed API**. A legacy local-only
 Flask handler remains for reference, but it does not verify OpenAI webhook

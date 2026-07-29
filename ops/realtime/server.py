@@ -47,6 +47,7 @@ import chatlog
 import docops
 import promptops
 import skills
+from ops.docs import formats as upload_formats
 from ops.docs import uploads as document_uploads
 from pj_contract import CONTRACT_VERSION, PROTOCOL_VERSION
 from ops.shared.logging import (
@@ -432,16 +433,23 @@ def _sanitize_upload_path(raw_path, *, folder_mode):
 
 
 def _validate_upload_type(relative_path, content_type):
-    extension = Path(relative_path).suffix.lower()
-    allowed_types = ALLOWED_UPLOAD_TYPES.get(extension)
-    if not allowed_types:
+    """Accept broadly, parse narrowly: refuse only credential-shaped names here.
+
+    Formats outside the legacy allowlist are accepted and classified by
+    ops.docs.formats; their handling tier decides whether they are ever parsed.
+    The legacy document extensions keep their strict MIME pairing.
+    """
+    name = Path(relative_path).name
+    if upload_formats.rejected_secret_name(name):
         raise UploadValidationError(
-            "disallowed_file_type",
-            f"Files with extension '{extension or '(none)'}' are not allowed.",
+            "upload_rejected_probable_secret",
+            f"'{name}' looks like a credential file and was refused.",
             415,
         )
+    extension = Path(relative_path).suffix.lower()
     mime = str(content_type or "application/octet-stream").split(";", 1)[0].strip().lower()
-    if mime not in allowed_types and mime != "application/octet-stream":
+    allowed_types = ALLOWED_UPLOAD_TYPES.get(extension)
+    if allowed_types and mime not in allowed_types and mime != "application/octet-stream":
         raise UploadValidationError(
             "disallowed_content_type",
             f"Content type '{mime}' is not allowed for {extension} files.",
@@ -450,7 +458,7 @@ def _validate_upload_type(relative_path, content_type):
     return mime
 
 
-def _validate_upload_signature(path, extension):
+def _validate_upload_signature(path, extension, classification=None):
     with path.open("rb") as handle:
         sample = handle.read(4096)
     dangerous_signatures = (
@@ -463,6 +471,25 @@ def _validate_upload_signature(path, extension):
     )
     if any(sample.startswith(signature) for signature in dangerous_signatures):
         raise UploadValidationError("executable_content", "Executable content is not allowed.", 415)
+    if classification is not None and classification.rejection:
+        raise UploadValidationError(
+            classification.rejection,
+            "The file content does not match its declared format.",
+            415,
+        )
+    if (
+        classification is not None
+        and classification.spec.handling == "extract"
+        and extension not in TEXT_UPLOAD_EXTENSIONS
+    ):
+        # New extract-tier families (source code, notebooks, HTML) accept
+        # shebangs but must still be genuine text.
+        if b"\x00" in sample:
+            raise UploadValidationError(
+                "invalid_text_content",
+                "Text document contains binary content.",
+                415,
+            )
     if extension in TEXT_UPLOAD_EXTENSIONS:
         prefix = sample.lstrip().lower()
         if prefix.startswith(b"#!") or prefix.startswith(b"<?php"):
@@ -1295,6 +1322,10 @@ def _handle_document_upload(*, folder_mode):
     final_dir = upload_root / session_id / upload_id
     prepared = []
     seen_paths = set()
+    skipped = []
+    # Multi-file batches skip individually unacceptable files and continue;
+    # single-file uploads keep returning the file's own rejection directly.
+    multi_file = len(files) > 1
     try:
         for index, storage in enumerate(files):
             raw_path = paths[index] if paths else storage.filename
@@ -1307,7 +1338,13 @@ def _handle_document_upload(*, folder_mode):
                     relative_path,
                 )
             seen_paths.add(relative_path)
-            mime = _validate_upload_type(relative_path, storage.mimetype)
+            try:
+                mime = _validate_upload_type(relative_path, storage.mimetype)
+            except UploadValidationError as exc:
+                if not multi_file:
+                    raise
+                skipped.append({"path": relative_path, "code": exc.code, "message": exc.message})
+                continue
             prepared.append(
                 {
                     "storage": storage,
@@ -1326,42 +1363,71 @@ def _handle_document_upload(*, folder_mode):
             destination.parent.mkdir(parents=True, exist_ok=True)
             digest = hashlib.sha256()
             file_size = 0
-            with destination.open("xb") as target:
-                while True:
-                    chunk = item["storage"].stream.read(UPLOAD_CHUNK_BYTES)
-                    if not chunk:
-                        break
-                    file_size += len(chunk)
-                    total_size += len(chunk)
-                    if file_size > max_file_size:
-                        raise UploadValidationError(
-                            "file_too_large",
-                            f"'{item['name']}' exceeds the per-file size limit.",
-                            413,
-                        )
-                    if total_size > max_total_size:
-                        raise UploadValidationError(
-                            "upload_too_large",
-                            "The total upload exceeds the configured size limit.",
-                            413,
-                        )
-                    digest.update(chunk)
-                    target.write(chunk)
-                target.flush()
-                os.fsync(target.fileno())
-            destination.chmod(0o600)
-            if file_size == 0:
-                raise UploadValidationError("empty_upload_file", f"'{item['name']}' is empty.", 400)
-            _validate_upload_signature(destination, Path(item["relative_path"]).suffix.lower())
+            try:
+                with destination.open("xb") as target:
+                    while True:
+                        chunk = item["storage"].stream.read(UPLOAD_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        file_size += len(chunk)
+                        total_size += len(chunk)
+                        if file_size > max_file_size:
+                            raise UploadValidationError(
+                                "file_too_large",
+                                f"'{item['name']}' exceeds the per-file size limit.",
+                                413,
+                            )
+                        if total_size > max_total_size:
+                            raise UploadValidationError(
+                                "upload_too_large",
+                                "The total upload exceeds the configured size limit.",
+                                413,
+                            )
+                        digest.update(chunk)
+                        target.write(chunk)
+                    target.flush()
+                    os.fsync(target.fileno())
+                destination.chmod(0o600)
+                if file_size == 0:
+                    raise UploadValidationError(
+                        "empty_upload_file", f"'{item['name']}' is empty.", 400
+                    )
+                with destination.open("rb") as handle:
+                    head = handle.read(4096)
+                classification = upload_formats.classify(item["relative_path"], head, file_size)
+                _validate_upload_signature(
+                    destination,
+                    Path(item["relative_path"]).suffix.lower(),
+                    classification,
+                )
+            except UploadValidationError as exc:
+                # The whole-batch size ceiling stays fatal; anything else only
+                # drops this file when the batch has other files to keep.
+                if not multi_file or exc.code == "upload_too_large":
+                    raise
+                destination.unlink(missing_ok=True)
+                total_size -= file_size
+                skipped.append(
+                    {"path": item["relative_path"], "code": exc.code, "message": exc.message}
+                )
+                continue
             staged_item = {
                 "relative_path": item["relative_path"],
                 "name": item["name"],
                 "mime": item["mime"],
                 "size": file_size,
                 "sha256": digest.hexdigest(),
+                "classification": classification.public(),
             }
             _scan_uploaded_file(destination, staged_item)
             staged_items.append(staged_item)
+
+        if not staged_items:
+            raise UploadValidationError(
+                "no_acceptable_files",
+                "No files in the upload were acceptable.",
+                415,
+            )
 
         final_dir.parent.mkdir(parents=True, exist_ok=True)
         if final_dir.exists():
@@ -1385,6 +1451,13 @@ def _handle_document_upload(*, folder_mode):
         registered = document_uploads.register_uploaded_documents(
             upload_id, session_id, indexed_files
         )
+        classification_by_path = {
+            item["relative_path"]: item["classification"] for item in staged_items
+        }
+        for document in registered["documents"]:
+            relative = document["saved_path"].split(f"{upload_id}/", 1)[-1]
+            if relative in classification_by_path:
+                document["classification"] = classification_by_path[relative]
     except UploadValidationError as exc:
         shutil.rmtree(staging_dir, ignore_errors=True)
         shutil.rmtree(final_dir, ignore_errors=True)
@@ -1418,6 +1491,7 @@ def _handle_document_upload(*, folder_mode):
         session_id=session_id,
         upload_id=upload_id,
         file_count=registered["count"],
+        skipped_count=len(skipped),
         total_size=total_size,
         mode="folder" if folder_mode else "files",
     )
@@ -1430,6 +1504,7 @@ def _handle_document_upload(*, folder_mode):
             "count": registered["count"],
             "total_size": total_size,
             "files": registered["documents"],
+            "skipped": skipped,
         },
         status=201,
         req_id=req_id,

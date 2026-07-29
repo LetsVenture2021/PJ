@@ -99,16 +99,12 @@ class TestResponsesRuntime(unittest.TestCase):
             environ={"READY_TOKEN": "super-secret-value"},
         )
 
-        self.assertEqual(
-            manifest["local_functions"]["count"], len(skills.TOOL_SCHEMAS)
-        )
+        self.assertEqual(manifest["local_functions"]["count"], len(skills.TOOL_SCHEMAS))
         self.assertEqual(
             [server["status"] for server in manifest["mcp_servers"]],
             ["configured", "degraded", "disabled"],
         )
-        self.assertEqual(
-            manifest["native"]["computer_use"]["status"], "unavailable"
-        )
+        self.assertEqual(manifest["native"]["computer_use"]["status"], "unavailable")
         rendered = json.dumps(manifest)
         self.assertNotIn("super-secret-value", rendered)
         self.assertNotIn("READY_TOKEN", rendered)
@@ -121,34 +117,38 @@ class TestResponsesRuntime(unittest.TestCase):
             root = Path(directory)
             (root / "one.txt").write_text("One")
             (root / "two.txt").write_text("Two")
-            (root / "config.json").write_text(json.dumps({
-                "name": "PJ",
-                "model": "test-model",
-                "instruction_files": ["one.txt", "two.txt"],
-                "instructions_file": "one.txt",
-                "vector_store_ids": ["vs_one", "vs_two"],
-                "vector_store_id": "vs_one",
-            }))
+            (root / "config.json").write_text(
+                json.dumps(
+                    {
+                        "name": "PJ",
+                        "model": "test-model",
+                        "instruction_files": ["one.txt", "two.txt"],
+                        "instructions_file": "one.txt",
+                        "vector_store_ids": ["vs_one", "vs_two"],
+                        "vector_store_id": "vs_one",
+                    }
+                )
+            )
             cfg = responses_runtime.load_config(root)
             tools = responses_runtime.build_tools(cfg, mcp_servers=[])
 
         self.assertEqual(cfg["instructions"], "One\n\nTwo")
         self.assertEqual(cfg["instructions_source"], "one.txt")
-        file_search = next(
-            tool for tool in tools if tool["type"] == "file_search"
-        )
+        file_search = next(tool for tool in tools if tool["type"] == "file_search")
         self.assertEqual(file_search["vector_store_ids"], ["vs_one", "vs_two"])
 
     def test_tool_assembly_expands_mcp_secret_but_excludes_delegation(self):
         tools = responses_runtime.build_tools(
             self.cfg,
-            mcp_servers=[{
-                "label": "secure",
-                "url": "https://secure.test/mcp",
-                "enabled": True,
-                "require_approval": "never",
-                "headers": {"Authorization": "Bearer ${TOKEN}"},
-            }],
+            mcp_servers=[
+                {
+                    "label": "secure",
+                    "url": "https://secure.test/mcp",
+                    "enabled": True,
+                    "require_approval": "never",
+                    "headers": {"Authorization": "Bearer ${TOKEN}"},
+                }
+            ],
             environ={"TOKEN": "abc123"},
         )
         mcp = next(tool for tool in tools if tool["type"] == "mcp")
@@ -163,13 +163,9 @@ class TestResponsesRuntime(unittest.TestCase):
             "enabled": True,
             "require_approval": "always",
         }
-        tools = responses_runtime.build_tools(
-            self.cfg, mcp_servers=[server], environ={}
-        )
+        tools = responses_runtime.build_tools(self.cfg, mcp_servers=[server], environ={})
         self.assertTrue(any(tool.get("type") == "mcp" for tool in tools))
-        manifest = responses_runtime.capability_manifest(
-            self.cfg, mcp_servers=[server], environ={}
-        )
+        manifest = responses_runtime.capability_manifest(self.cfg, mcp_servers=[server], environ={})
         self.assertEqual(manifest["mcp_servers"][0]["status"], "configured")
         self.assertTrue(manifest["mcp_servers"][0]["runtime_enabled"])
         self.assertEqual(
@@ -181,54 +177,70 @@ class TestResponsesRuntime(unittest.TestCase):
         session = realtime_config.realtime_session_config()
         self.assertEqual(session["model"], realtime_config.REALTIME_MODEL)
         names = {tool["name"] for tool in session["tools"]}
-        self.assertTrue(
-            realtime_config.REALTIME_EXCLUDED_TOOL_NAMES.isdisjoint(names)
-        )
-        self.assertEqual(
-            session["tools"][-1]["name"], "delegate_advanced_task"
-        )
-        self.assertEqual(
-            realtime_server._function_tool_schemas(), session["tools"]
-        )
+        self.assertTrue(realtime_config.REALTIME_EXCLUDED_TOOL_NAMES.isdisjoint(names))
+        self.assertEqual(session["tools"][-1]["name"], "delegate_advanced_task")
+        self.assertEqual(realtime_server._function_tool_schemas(), session["tools"])
         with self.assertRaisesRegex(ValueError, "not available"):
             responses_runtime.dispatch_realtime_function(
                 "generate_image_asset",
                 {"prompt": "blocked", "idempotency_key": "blocked"},
             )
-        full_power = realtime_config.realtime_session_config(
-            voice_mode="full_power"
+        full_power = realtime_config.realtime_session_config(voice_mode="full_power")
+        self.assertTrue(session["audio"]["input"]["turn_detection"]["create_response"])
+        self.assertFalse(full_power["audio"]["input"]["turn_detection"]["create_response"])
+        self.assertTrue(full_power["audio"]["input"]["turn_detection"]["interrupt_response"])
+
+    def test_rejected_continuation_starts_a_fresh_thread(self):
+        client = FakeClient([final_stream("Recovered.", response_id="resp_recovered")])
+        original_create = client.responses.create
+        rejected = []
+
+        class ContinuationRejected(Exception):
+            status_code = 500
+
+        def flaky_create(**kwargs):
+            if kwargs.get("previous_response_id") and not rejected:
+                rejected.append(kwargs["previous_response_id"])
+                raise ContinuationRejected()
+            return original_create(**kwargs)
+
+        client.responses.create = flaky_create
+        orchestrator = responses_runtime.ResponsesOrchestrator(
+            client,
+            self.cfg,
+            dispatcher=lambda _name, _arguments: {},
         )
-        self.assertTrue(
-            session["audio"]["input"]["turn_detection"]["create_response"]
-        )
-        self.assertFalse(
-            full_power["audio"]["input"]["turn_detection"]["create_response"]
-        )
-        self.assertTrue(
-            full_power["audio"]["input"]["turn_detection"][
-                "interrupt_response"
-            ]
-        )
+        events = list(orchestrator.stream_turn("hello", previous_response_id="resp_poisoned"))
+
+        self.assertEqual(rejected, ["resp_poisoned"])
+        self.assertNotIn("previous_response_id", client.responses.calls[-1])
+        self.assertTrue(events)
 
     def test_document_tool_emits_artifact_before_public_result(self):
         function_response = obj(
             id="resp_document",
             output_text="",
-            output=[obj(
-                type="function_call",
-                name="draft_document",
-                call_id="call_document",
-                arguments=json.dumps({
-                    "template": "meeting_memo",
-                    "title": "Download",
-                    "sections_json": "{}",
-                }),
-            )],
+            output=[
+                obj(
+                    type="function_call",
+                    name="draft_document",
+                    call_id="call_document",
+                    arguments=json.dumps(
+                        {
+                            "template": "meeting_memo",
+                            "title": "Download",
+                            "sections_json": "{}",
+                        }
+                    ),
+                )
+            ],
         )
-        client = FakeClient([
-            [obj(type="response.completed", response=function_response)],
-            final_stream("Document ready.", response_id="resp_done"),
-        ])
+        client = FakeClient(
+            [
+                [obj(type="response.completed", response=function_response)],
+                final_stream("Document ready.", response_id="resp_done"),
+            ]
+        )
         artifact = {
             "artifact_id": "ART-" + ("a" * 32),
             "doc_id": "DOC-test",
@@ -263,40 +275,37 @@ class TestResponsesRuntime(unittest.TestCase):
             event_types.index("artifact.ready"),
             event_types.index("tool.result"),
         )
-        tool_result = next(
-            event for event in events if event["type"] == "tool.result"
-        )
+        tool_result = next(event for event in events if event["type"] == "tool.result")
         self.assertNotIn("path", tool_result["result"])
-        continuation_output = json.loads(
-            client.responses.calls[1]["input"][0]["output"]
-        )
+        continuation_output = json.loads(client.responses.calls[1]["input"][0]["output"])
         self.assertNotIn("path", continuation_output)
         self.assertEqual(events[-1]["artifacts"], [artifact])
 
     def test_path_redaction_preserves_repository_relative_paths(self):
-        result = responses_runtime.redact_server_paths({
-            "matches": [
-                {"path": "src/example.py", "line": 3},
-                {"path": "/private/project/secret.py", "line": 4},
-            ],
-            "output_path": "reports/result.json",
-            "source_path": r"C:\private\source.py",
-        })
+        result = responses_runtime.redact_server_paths(
+            {
+                "matches": [
+                    {"path": "src/example.py", "line": 3},
+                    {"path": "/private/project/secret.py", "line": 4},
+                ],
+                "output_path": "reports/result.json",
+                "source_path": r"C:\private\source.py",
+            }
+        )
         self.assertEqual(result["matches"][0]["path"], "src/example.py")
         self.assertNotIn("path", result["matches"][1])
         self.assertEqual(result["output_path"], "reports/result.json")
         self.assertNotIn("source_path", result)
-        embedded = responses_runtime.redact_server_paths({
-            "artifact_error": (
-                "copy failed: /Users/private/document.md; "
-                "see https://example.test/docs/path"
-            ),
-        })
+        embedded = responses_runtime.redact_server_paths(
+            {
+                "artifact_error": (
+                    "copy failed: /Users/private/document.md; see https://example.test/docs/path"
+                ),
+            }
+        )
         self.assertNotIn("/Users/private/document.md", embedded["artifact_error"])
         self.assertIn("[server path redacted]", embedded["artifact_error"])
-        self.assertIn(
-            "https://example.test/docs/path", embedded["artifact_error"]
-        )
+        self.assertIn("https://example.test/docs/path", embedded["artifact_error"])
         download_url = "/responses/artifacts/ART-" + ("c" * 32)
         self.assertEqual(
             responses_runtime.redact_server_paths(download_url),
@@ -311,16 +320,13 @@ class TestResponsesRuntime(unittest.TestCase):
                 return_value={
                     "path": "/Users/private/document.md",
                     "artifact": {
-                        "download_url":
-                            "/responses/artifacts/ART-" + ("d" * 32),
+                        "download_url": "/responses/artifacts/ART-" + ("d" * 32),
                     },
                 },
             ),
             patch("builtins.print"),
         ):
-            output = json.loads(
-                voice._run_tool_call("draft_document", "{}")
-            )
+            output = json.loads(voice._run_tool_call("draft_document", "{}"))
         self.assertNotIn("path", output)
         self.assertEqual(
             output["artifact"]["download_url"],
@@ -362,17 +368,19 @@ class TestResponsesRuntime(unittest.TestCase):
                 ],
             )
         )
-        client = FakeClient([
+        client = FakeClient(
             [
-                obj(
-                    type="response.function_call_arguments.delta",
-                    call_id="call_1",
-                    delta="{}",
-                ),
-                obj(type="response.completed", response=function_response),
-            ],
-            completed_stream,
-        ])
+                [
+                    obj(
+                        type="response.function_call_arguments.delta",
+                        call_id="call_1",
+                        delta="{}",
+                    ),
+                    obj(type="response.completed", response=function_response),
+                ],
+                completed_stream,
+            ]
+        )
         dispatched = []
 
         def dispatch(name, arguments):
@@ -386,52 +394,52 @@ class TestResponsesRuntime(unittest.TestCase):
         )
 
         self.assertEqual(dispatched, [("get_current_time", {})])
-        self.assertEqual(
-            client.responses.calls[0]["previous_response_id"], "resp_previous"
-        )
-        self.assertEqual(
-            client.responses.calls[1]["previous_response_id"], "resp_tool"
-        )
-        self.assertEqual(
-            client.responses.calls[0]["instructions"], "Test instructions"
-        )
-        self.assertEqual(
-            client.responses.calls[1]["instructions"], "Test instructions"
-        )
+        self.assertEqual(client.responses.calls[0]["previous_response_id"], "resp_previous")
+        self.assertEqual(client.responses.calls[1]["previous_response_id"], "resp_tool")
+        self.assertEqual(client.responses.calls[0]["instructions"], "Test instructions")
+        self.assertEqual(client.responses.calls[1]["instructions"], "Test instructions")
         self.assertIn("tool.call", [event["type"] for event in events])
         self.assertIn("tool.result", [event["type"] for event in events])
         self.assertIn("citation", [event["type"] for event in events])
         self.assertIn("source", [event["type"] for event in events])
         self.assertEqual(
-            len([
-                event for event in events
-                if event["type"] == "tool.call"
-                and event.get("call_id") == "call_1"
-            ]),
+            len(
+                [
+                    event
+                    for event in events
+                    if event["type"] == "tool.call" and event.get("call_id") == "call_1"
+                ]
+            ),
             1,
         )
         self.assertEqual(
-            len([
-                event for event in events
-                if event["type"] == "tool.result"
-                and event.get("call_id") == "call_1"
-            ]),
+            len(
+                [
+                    event
+                    for event in events
+                    if event["type"] == "tool.result" and event.get("call_id") == "call_1"
+                ]
+            ),
             1,
         )
         self.assertEqual(
-            len([
-                event for event in events
-                if event["type"] == "tool.call"
-                and event.get("call_id") == "file_call_1"
-            ]),
+            len(
+                [
+                    event
+                    for event in events
+                    if event["type"] == "tool.call" and event.get("call_id") == "file_call_1"
+                ]
+            ),
             1,
         )
         self.assertEqual(
-            len([
-                event for event in events
-                if event["type"] == "tool.result"
-                and event.get("call_id") == "file_call_1"
-            ]),
+            len(
+                [
+                    event
+                    for event in events
+                    if event["type"] == "tool.result" and event.get("call_id") == "file_call_1"
+                ]
+            ),
             1,
         )
         completion = events[-1]
@@ -447,9 +455,7 @@ class TestResponsesRuntime(unittest.TestCase):
     def test_structured_output_is_parsed(self):
         client = FakeClient([final_stream('{"answer":"ok"}')])
         events = list(
-            responses_runtime.ResponsesOrchestrator(
-                client, self.cfg
-            ).stream_turn(
+            responses_runtime.ResponsesOrchestrator(client, self.cfg).stream_turn(
                 "Answer",
                 text_format={
                     "type": "json_schema",
@@ -465,33 +471,37 @@ class TestResponsesRuntime(unittest.TestCase):
         final = obj(
             id="resp_native",
             output_text="Done.",
-            output=[obj(
-                type="mcp_call",
-                id="mcp_call_1",
-                server_label="github",
-                name="search_code",
-                status="completed",
-                output='{"matches":3}',
-            )],
+            output=[
+                obj(
+                    type="mcp_call",
+                    id="mcp_call_1",
+                    server_label="github",
+                    name="search_code",
+                    status="completed",
+                    output='{"matches":3}',
+                )
+            ],
         )
-        client = FakeClient([[
-            obj(
-                type="response.mcp_call.completed",
-                item_id="mcp_call_1",
-                server_label="github",
-                name="search_code",
-            ),
-            obj(type="response.completed", response=final),
-        ]])
+        client = FakeClient(
+            [
+                [
+                    obj(
+                        type="response.mcp_call.completed",
+                        item_id="mcp_call_1",
+                        server_label="github",
+                        name="search_code",
+                    ),
+                    obj(type="response.completed", response=final),
+                ]
+            ]
+        )
         events = list(
-            responses_runtime.ResponsesOrchestrator(
-                client, self.cfg
-            ).stream_turn("Search code")
+            responses_runtime.ResponsesOrchestrator(client, self.cfg).stream_turn("Search code")
         )
         results = [
-            event for event in events
-            if event["type"] == "tool.result"
-            and event.get("call_id") == "mcp_call_1"
+            event
+            for event in events
+            if event["type"] == "tool.result" and event.get("call_id") == "mcp_call_1"
         ]
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["output"], '{"matches":3}')
@@ -505,16 +515,10 @@ class TestResponsesRuntime(unittest.TestCase):
                 r"share: \\server\private\deck.pptx"
             ),
             "nested": ["open file:///Users/alice/private/source.md"],
-            "documentation": (
-                "see https://docs.n8n.io/integrations/builtin/core-nodes/"
-            ),
-            "download_url": (
-                "/responses/artifacts/"
-                "ART-0123456789abcdef0123456789abcdef"
-            ),
+            "documentation": ("see https://docs.n8n.io/integrations/builtin/core-nodes/"),
+            "download_url": ("/responses/artifacts/ART-0123456789abcdef0123456789abcdef"),
             "near_miss_download_url": (
-                "/responses/artifacts/"
-                "ART-0123456789abcdef0123456789abcdef/extra"
+                "/responses/artifacts/ART-0123456789abcdef0123456789abcdef/extra"
             ),
             "source_path": "relative/source.md",
             "output_path": r"C:\private\source.py",
@@ -548,14 +552,16 @@ class TestResponsesRuntime(unittest.TestCase):
         )
 
     def test_powerpoint_completion_is_blocked_after_one_repair(self):
-        client = FakeClient([
-            final_stream("Premature completion.", response_id="resp_first"),
-            final_stream("Still no file.", response_id="resp_second"),
-        ])
+        client = FakeClient(
+            [
+                final_stream("Premature completion.", response_id="resp_first"),
+                final_stream("Still no file.", response_id="resp_second"),
+            ]
+        )
         events = list(
-            responses_runtime.ResponsesOrchestrator(
-                client, self.cfg
-            ).stream_turn("Create a PowerPoint presentation")
+            responses_runtime.ResponsesOrchestrator(client, self.cfg).stream_turn(
+                "Create a PowerPoint presentation"
+            )
         )
 
         self.assertEqual(len(client.responses.calls), 2)
@@ -565,9 +571,7 @@ class TestResponsesRuntime(unittest.TestCase):
             events[-1]["deliverable"],
             {"status": "incomplete", "requested_format": "pptx"},
         )
-        self.assertTrue(any(
-            event["type"] == "deliverable.incomplete" for event in events
-        ))
+        self.assertTrue(any(event["type"] == "deliverable.incomplete" for event in events))
         rendered = json.dumps(events)
         self.assertNotIn("Premature completion", rendered)
         self.assertNotIn("Still no file", rendered)
@@ -584,36 +588,42 @@ class TestResponsesRuntime(unittest.TestCase):
                 docops.DOCS_DIR.mkdir()
                 docops.EXPORTS_DIR = docops.DOCS_DIR / "exports"
                 docops.EXPORTS_DIR.mkdir()
-                slides = [{
-                    "layout": "title",
-                    "title": "Validated PowerPoint",
-                    "subtitle": "Exact requested format",
-                }]
+                slides = [
+                    {
+                        "layout": "title",
+                        "title": "Validated PowerPoint",
+                        "subtitle": "Exact requested format",
+                    }
+                ]
                 drafted = docops.draft_presentation(
                     "Validated PowerPoint",
                     "Internal stakeholders",
                     json.dumps(slides),
                     finalize=True,
                 )
-                exported = docops.export_document(
-                    drafted["doc_id"], "pptx"
-                )
+                exported = docops.export_document(drafted["doc_id"], "pptx")
                 function_response = obj(
                     id="resp_export",
-                    output=[obj(
-                        type="function_call",
-                        name="export_document",
-                        call_id="call_export",
-                        arguments=json.dumps({
-                            "doc_id": drafted["doc_id"],
-                            "format": "pptx",
-                        }),
-                    )],
+                    output=[
+                        obj(
+                            type="function_call",
+                            name="export_document",
+                            call_id="call_export",
+                            arguments=json.dumps(
+                                {
+                                    "doc_id": drafted["doc_id"],
+                                    "format": "pptx",
+                                }
+                            ),
+                        )
+                    ],
                 )
-                client = FakeClient([
-                    [obj(type="response.completed", response=function_response)],
-                    final_stream("Presentation completed."),
-                ])
+                client = FakeClient(
+                    [
+                        [obj(type="response.completed", response=function_response)],
+                        final_stream("Presentation completed."),
+                    ]
+                )
                 events = list(
                     responses_runtime.ResponsesOrchestrator(
                         client,
@@ -626,15 +636,11 @@ class TestResponsesRuntime(unittest.TestCase):
                 docops.DOCS_DIR = old_docs
                 docops.EXPORTS_DIR = old_exports
 
-        artifact_events = [
-            event for event in events if event["type"] == "artifact.ready"
-        ]
+        artifact_events = [event for event in events if event["type"] == "artifact.ready"]
         self.assertEqual(len(artifact_events), 1)
         self.assertEqual(artifact_events[0]["format"], "pptx")
         self.assertNotIn("path", artifact_events[0])
-        provider_result = json.loads(
-            client.responses.calls[1]["input"][0]["output"]
-        )
+        provider_result = json.loads(client.responses.calls[1]["input"][0]["output"])
         self.assertNotIn("path", provider_result)
         self.assertEqual(
             events[-1]["deliverable"],
@@ -645,53 +651,47 @@ class TestResponsesRuntime(unittest.TestCase):
         response = obj(
             id="resp_mcp_pending",
             output_text="",
-            output=[obj(
-                type="mcp_approval_request",
-                id="mcp_provider_approval",
-                server_label="github",
-                name="create_issue",
-                arguments='{"title":"Test"}',
-            )],
+            output=[
+                obj(
+                    type="mcp_approval_request",
+                    id="mcp_provider_approval",
+                    server_label="github",
+                    name="create_issue",
+                    arguments='{"title":"Test"}',
+                )
+            ],
         )
-        client = FakeClient([[
-            obj(type="response.completed", response=response)
-        ]])
+        client = FakeClient([[obj(type="response.completed", response=response)]])
         events = list(
-            responses_runtime.ResponsesOrchestrator(
-                client, self.cfg
-            ).stream_turn("Create an issue")
+            responses_runtime.ResponsesOrchestrator(client, self.cfg).stream_turn("Create an issue")
         )
         approval = events[-1]
         self.assertEqual(approval["type"], "approval.required")
         self.assertEqual(approval["approval_kind"], "mcp")
         self.assertEqual(approval["arguments"], {"title": "Test"})
         self.assertEqual(approval["_response_id"], "resp_mcp_pending")
-        self.assertEqual(
-            approval["_provider_item_id"], "mcp_provider_approval"
-        )
+        self.assertEqual(approval["_provider_item_id"], "mcp_provider_approval")
 
     def test_local_policy_approval_pauses_before_dispatch(self):
         response = obj(
             id="resp_local_pending",
             output_text="",
-            output=[obj(
-                type="function_call",
-                call_id="call_approved",
-                name="approve_codeops_task",
-                arguments='{"task_id":"task","approval_evidence":"owner"}',
-            )],
+            output=[
+                obj(
+                    type="function_call",
+                    call_id="call_approved",
+                    name="approve_codeops_task",
+                    arguments='{"task_id":"task","approval_evidence":"owner"}',
+                )
+            ],
         )
-        client = FakeClient([[
-            obj(type="response.completed", response=response)
-        ]])
+        client = FakeClient([[obj(type="response.completed", response=response)]])
         dispatched = []
         events = list(
             responses_runtime.ResponsesOrchestrator(
                 client,
                 self.cfg,
-                dispatcher=lambda name, arguments: dispatched.append(
-                    (name, arguments)
-                ),
+                dispatcher=lambda name, arguments: dispatched.append((name, arguments)),
             ).stream_turn("Approve it")
         )
         self.assertEqual(events[-1]["type"], "approval.required")
@@ -704,19 +704,19 @@ class TestResponsesRuntime(unittest.TestCase):
             title="Evidence",
             url="https://example.test/evidence",
         )
-        client = FakeClient([
-            final_stream(
-                "A detailed delegated answer.",
-                annotations=[citation],
-            )
-        ])
+        client = FakeClient(
+            [
+                final_stream(
+                    "A detailed delegated answer.",
+                    annotations=[citation],
+                )
+            ]
+        )
         result = responses_runtime.delegate_advanced_task(
             "Research this", client=client, cfg=self.cfg
         )
         self.assertEqual(result["summary"], "A detailed delegated answer.")
-        self.assertEqual(
-            result["details"]["citations"][0]["title"], "Evidence"
-        )
+        self.assertEqual(result["details"]["citations"][0]["title"], "Evidence")
 
     def test_advanced_delegation_rejects_recursion(self):
         token = responses_runtime._delegation_active.set(True)
@@ -793,11 +793,13 @@ class TestResponsesRoutes(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def _create_powerpoint_artifact(self):
-        slides = [{
-            "layout": "title",
-            "title": "Web PowerPoint",
-            "subtitle": "Authenticated artifact delivery",
-        }]
+        slides = [
+            {
+                "layout": "title",
+                "title": "Web PowerPoint",
+                "subtitle": "Authenticated artifact delivery",
+            }
+        ]
         drafted = docops.draft_presentation(
             "Web PowerPoint",
             "Internal stakeholders",
@@ -809,9 +811,7 @@ class TestResponsesRoutes(unittest.TestCase):
     def test_routes_require_bridge_auth(self):
         response = self.client.get("/responses/capabilities")
         self.assertEqual(response.status_code, 401)
-        self.assertEqual(
-            response.get_json()["error"]["code"], "bridge_auth_required"
-        )
+        self.assertEqual(response.get_json()["error"]["code"], "bridge_auth_required")
 
     def test_prompt_perfecting_route_is_authenticated_and_typed(self):
         response = self.client.post(
@@ -1199,8 +1199,7 @@ class TestResponsesRoutes(unittest.TestCase):
             headers=self.auth,
         )
         detail = resumed.get_json()["session"]
-        self.assertEqual([item["role"] for item in detail["history"]],
-                         ["user", "assistant"])
+        self.assertEqual([item["role"] for item in detail["history"]], ["user", "assistant"])
         self.assertNotIn("last_response_id", detail)
 
         search = self.client.get(
@@ -1222,17 +1221,17 @@ class TestResponsesRoutes(unittest.TestCase):
         pending_response = obj(
             id="resp_mcp_pending",
             output_text="",
-            output=[obj(
-                type="mcp_approval_request",
-                id="mcp_provider_approval",
-                server_label="github",
-                name="create_issue",
-                arguments='{"title":"Owner approved"}',
-            )],
+            output=[
+                obj(
+                    type="mcp_approval_request",
+                    id="mcp_provider_approval",
+                    server_label="github",
+                    name="create_issue",
+                    arguments='{"title":"Owner approved"}',
+                )
+            ],
         )
-        first_client = FakeClient([[
-            obj(type="response.completed", response=pending_response)
-        ]])
+        first_client = FakeClient([[obj(type="response.completed", response=pending_response)]])
         with patch.object(
             realtime_server,
             "OPENAI_CLIENT_FACTORY",
@@ -1249,10 +1248,7 @@ class TestResponsesRoutes(unittest.TestCase):
             for line in turn.get_data(as_text=True).splitlines()
             if line.startswith("data: ")
         ]
-        approval = next(
-            event for event in events
-            if event["type"] == "approval.required"
-        )
+        approval = next(event for event in events if event["type"] == "approval.required")
         self.assertNotIn("resp_mcp_pending", turn.get_data(as_text=True))
         self.assertNotIn("mcp_provider_approval", turn.get_data(as_text=True))
         self.assertGreaterEqual(len(approval["approval_id"]), 32)
@@ -1268,19 +1264,14 @@ class TestResponsesRoutes(unittest.TestCase):
             "session_approval_pending",
         )
 
-        continuation_client = FakeClient([
-            final_stream("The approved MCP action completed.")
-        ])
+        continuation_client = FakeClient([final_stream("The approved MCP action completed.")])
         with patch.object(
             realtime_server,
             "OPENAI_CLIENT_FACTORY",
             return_value=continuation_client,
         ):
             resolved = self.client.post(
-                (
-                    f"/responses/sessions/{session['id']}/approvals/"
-                    f"{approval['approval_id']}"
-                ),
+                (f"/responses/sessions/{session['id']}/approvals/{approval['approval_id']}"),
                 json={"approve": True},
                 headers=self.auth,
                 buffered=True,
@@ -1291,11 +1282,16 @@ class TestResponsesRoutes(unittest.TestCase):
         self.assertIn("event: completion", resolved_body)
         call = continuation_client.responses.calls[0]
         self.assertEqual(call["previous_response_id"], "resp_mcp_pending")
-        self.assertEqual(call["input"], [{
-            "type": "mcp_approval_response",
-            "approval_request_id": "mcp_provider_approval",
-            "approve": True,
-        }])
+        self.assertEqual(
+            call["input"],
+            [
+                {
+                    "type": "mcp_approval_response",
+                    "approval_request_id": "mcp_provider_approval",
+                    "approve": True,
+                }
+            ],
+        )
 
         detail = chatlog.session_detail(session["id"])
         self.assertEqual(detail["pending_approvals"], [])
@@ -1309,20 +1305,20 @@ class TestResponsesRoutes(unittest.TestCase):
         pending_response = obj(
             id="resp_pptx_approval",
             output_text="",
-            output=[obj(
-                type="mcp_approval_request",
-                id="mcp_pptx_approval",
-                server_label="github",
-                name="search_repository",
-                arguments='{"query":"PJ evidence"}',
-            )],
+            output=[
+                obj(
+                    type="mcp_approval_request",
+                    id="mcp_pptx_approval",
+                    server_label="github",
+                    name="search_repository",
+                    arguments='{"query":"PJ evidence"}',
+                )
+            ],
         )
         with patch.object(
             realtime_server,
             "OPENAI_CLIENT_FACTORY",
-            return_value=FakeClient([[
-                obj(type="response.completed", response=pending_response)
-            ]]),
+            return_value=FakeClient([[obj(type="response.completed", response=pending_response)]]),
         ):
             response = self.client.post(
                 f"/responses/sessions/{session['id']}/turns",
@@ -1333,20 +1329,15 @@ class TestResponsesRoutes(unittest.TestCase):
         approval = next(
             json.loads(line.removeprefix("data: "))
             for line in response.get_data(as_text=True).splitlines()
-            if line.startswith("data: ")
-            and '"type": "approval.required"' in line
+            if line.startswith("data: ") and '"type": "approval.required"' in line
         )
-        pending = chatlog.get_pending_approval(
-            session["id"], approval["approval_id"]
-        )
+        pending = chatlog.get_pending_approval(session["id"], approval["approval_id"])
         self.assertEqual(pending["deliverable_format"], "pptx")
 
     def test_ready_artifact_persists_across_approval_resume(self):
         session = chatlog.new_session(channel="web")
         artifact = self._create_powerpoint_artifact()["artifact"]
-        self.assertTrue(
-            chatlog.link_session_artifact(session["id"], artifact["artifact_id"])
-        )
+        self.assertTrue(chatlog.link_session_artifact(session["id"], artifact["artifact_id"]))
         turn_token = chatlog.claim_session_turn(session["id"])
         pending = chatlog.pause_session_turn_for_approval(
             session,
@@ -1359,25 +1350,18 @@ class TestResponsesRoutes(unittest.TestCase):
             arguments={"query": "PJ evidence"},
             deliverable_format="pptx",
             artifact_ids=[artifact["artifact_id"]],
-            artifact_hashes={
-                artifact["artifact_id"]: artifact["sha256"]
-            },
+            artifact_hashes={artifact["artifact_id"]: artifact["sha256"]},
         )
         self.assertEqual(pending["artifact_ids"], [artifact["artifact_id"]])
 
-        continuation_client = FakeClient([
-            final_stream("The presentation and evidence are ready.")
-        ])
+        continuation_client = FakeClient([final_stream("The presentation and evidence are ready.")])
         with patch.object(
             realtime_server,
             "OPENAI_CLIENT_FACTORY",
             return_value=continuation_client,
         ):
             resolved = self.client.post(
-                (
-                    f"/responses/sessions/{session['id']}/approvals/"
-                    f"{pending['approval_id']}"
-                ),
+                (f"/responses/sessions/{session['id']}/approvals/{pending['approval_id']}"),
                 json={"approve": True},
                 headers=self.auth,
                 buffered=True,
@@ -1389,13 +1373,9 @@ class TestResponsesRoutes(unittest.TestCase):
             for line in resolved.get_data(as_text=True).splitlines()
             if line.startswith("data: ")
         ]
-        completion = next(
-            event for event in events if event["type"] == "completion"
-        )
+        completion = next(event for event in events if event["type"] == "completion")
         self.assertEqual(completion["deliverable"]["status"], "ready")
-        self.assertEqual(
-            completion["artifacts"][0]["artifact_id"], artifact["artifact_id"]
-        )
+        self.assertEqual(completion["artifacts"][0]["artifact_id"], artifact["artifact_id"])
         self.assertEqual(len(continuation_client.responses.calls), 1)
 
     def test_approved_local_action_can_complete_deliverable(self):
@@ -1412,9 +1392,7 @@ class TestResponsesRoutes(unittest.TestCase):
             arguments={"doc_id": exported["doc_id"], "format": "pptx"},
             deliverable_format="pptx",
         )
-        continuation_client = FakeClient([
-            final_stream("The approved PowerPoint is ready.")
-        ])
+        continuation_client = FakeClient([final_stream("The approved PowerPoint is ready.")])
         with (
             patch.object(
                 realtime_server,
@@ -1428,10 +1406,7 @@ class TestResponsesRoutes(unittest.TestCase):
             ),
         ):
             resolved = self.client.post(
-                (
-                    f"/responses/sessions/{session['id']}/approvals/"
-                    f"{pending['approval_id']}"
-                ),
+                (f"/responses/sessions/{session['id']}/approvals/{pending['approval_id']}"),
                 json={"approve": True},
                 headers=self.auth,
                 buffered=True,
@@ -1446,9 +1421,7 @@ class TestResponsesRoutes(unittest.TestCase):
             for line in body.splitlines()
             if line.startswith("data: ")
         ]
-        completion = next(
-            event for event in events if event["type"] == "completion"
-        )
+        completion = next(event for event in events if event["type"] == "completion")
         self.assertEqual(completion["deliverable"]["status"], "ready")
         self.assertEqual(len(continuation_client.responses.calls), 1)
 
@@ -1471,10 +1444,7 @@ class TestResponsesRoutes(unittest.TestCase):
         )
 
         failed = self.client.post(
-            (
-                f"/responses/sessions/{session['id']}/approvals/"
-                f"{pending['approval_id']}"
-            ),
+            (f"/responses/sessions/{session['id']}/approvals/{pending['approval_id']}"),
             json={"approve": True},
             headers=self.auth,
         )
@@ -1483,9 +1453,7 @@ class TestResponsesRoutes(unittest.TestCase):
             failed.get_json()["error"]["code"],
             "approval_artifact_validation_failed",
         )
-        retryable = chatlog.get_pending_approval(
-            session["id"], pending["approval_id"]
-        )
+        retryable = chatlog.get_pending_approval(session["id"], pending["approval_id"])
         self.assertIsNotNone(retryable)
         self.assertEqual(retryable["status"], "pending")
 
@@ -1501,15 +1469,17 @@ class TestResponsesRoutes(unittest.TestCase):
             tool_name="approve_codeops_task",
             arguments={"task_id": "task-123"},
         )
-        failed_client = FakeClient([[
-            obj(
-                type="response.failed",
-                error=obj(message="temporary provider failure"),
-            )
-        ]])
-        successful_client = FakeClient([
-            final_stream("The approved action is complete.")
-        ])
+        failed_client = FakeClient(
+            [
+                [
+                    obj(
+                        type="response.failed",
+                        error=obj(message="temporary provider failure"),
+                    )
+                ]
+            ]
+        )
+        successful_client = FakeClient([final_stream("The approved action is complete.")])
 
         with patch.object(
             realtime_server.skills,
@@ -1522,10 +1492,7 @@ class TestResponsesRoutes(unittest.TestCase):
                 return_value=failed_client,
             ):
                 failed = self.client.post(
-                    (
-                        f"/responses/sessions/{session['id']}/approvals/"
-                        f"{pending['approval_id']}"
-                    ),
+                    (f"/responses/sessions/{session['id']}/approvals/{pending['approval_id']}"),
                     json={"approve": True},
                     headers=self.auth,
                     buffered=True,
@@ -1533,17 +1500,12 @@ class TestResponsesRoutes(unittest.TestCase):
 
             self.assertEqual(failed.status_code, 200)
             self.assertIn("responses_turn_failed", failed.get_data(as_text=True))
-            retryable = chatlog.get_pending_approval(
-                session["id"], pending["approval_id"]
-            )
+            retryable = chatlog.get_pending_approval(session["id"], pending["approval_id"])
             self.assertEqual(retryable["status"], "executing_approved")
             self.assertTrue(retryable["execution_result_recorded"])
 
             changed_decision = self.client.post(
-                (
-                    f"/responses/sessions/{session['id']}/approvals/"
-                    f"{pending['approval_id']}"
-                ),
+                (f"/responses/sessions/{session['id']}/approvals/{pending['approval_id']}"),
                 json={"approve": False},
                 headers=self.auth,
             )
@@ -1555,10 +1517,7 @@ class TestResponsesRoutes(unittest.TestCase):
                 return_value=successful_client,
             ):
                 completed = self.client.post(
-                    (
-                        f"/responses/sessions/{session['id']}/approvals/"
-                        f"{pending['approval_id']}"
-                    ),
+                    (f"/responses/sessions/{session['id']}/approvals/{pending['approval_id']}"),
                     json={"approve": True},
                     headers=self.auth,
                     buffered=True,
@@ -1568,11 +1527,7 @@ class TestResponsesRoutes(unittest.TestCase):
         self.assertIn("event: approval.resolved", completed.get_data(as_text=True))
         self.assertIn("event: completion", completed.get_data(as_text=True))
         self.assertEqual(dispatch.call_count, 1)
-        self.assertIsNone(
-            chatlog.get_pending_approval(
-                session["id"], pending["approval_id"]
-            )
-        )
+        self.assertIsNone(chatlog.get_pending_approval(session["id"], pending["approval_id"]))
 
     def test_reserved_approved_effect_is_never_replayed_after_crash_gap(self):
         session = chatlog.new_session(channel="web")
@@ -1586,9 +1541,7 @@ class TestResponsesRoutes(unittest.TestCase):
             tool_name="approve_codeops_task",
             arguments={"task_id": "task-crash-gap"},
         )
-        chatlog.begin_pending_approval_execution(
-            session["id"], pending["approval_id"], True
-        )
+        chatlog.begin_pending_approval_execution(session["id"], pending["approval_id"], True)
         reservation = chatlog.reserve_tool_execution(
             session["id"],
             f"approval:{pending['approval_id']}",
@@ -1600,10 +1553,7 @@ class TestResponsesRoutes(unittest.TestCase):
 
         with patch.object(realtime_server.skills, "dispatch") as dispatch:
             response = self.client.post(
-                (
-                    f"/responses/sessions/{session['id']}/approvals/"
-                    f"{pending['approval_id']}"
-                ),
+                (f"/responses/sessions/{session['id']}/approvals/{pending['approval_id']}"),
                 json={"approve": True},
                 headers=self.auth,
             )
@@ -1614,15 +1564,10 @@ class TestResponsesRoutes(unittest.TestCase):
             "approval_execution_outcome_unknown",
         )
         dispatch.assert_not_called()
-        self.assertIsNone(
-            chatlog.get_pending_approval(
-                session["id"], pending["approval_id"]
-            )
-        )
+        self.assertIsNone(chatlog.get_pending_approval(session["id"], pending["approval_id"]))
         with chatlog._db() as conn:
             execution_status = conn.execute(
-                "SELECT status FROM chat_tool_executions "
-                "WHERE session_id=? AND execution_key=?",
+                "SELECT status FROM chat_tool_executions WHERE session_id=? AND execution_key=?",
                 (
                     session["id"],
                     f"approval:{pending['approval_id']}",
@@ -1649,45 +1594,51 @@ class TestResponsesRoutes(unittest.TestCase):
         )
         follow_on_response = obj(
             id="resp_follow_on_round",
-            output=[obj(
-                type="function_call",
-                name="get_current_time",
-                call_id="follow_on_call",
-                arguments="{}",
-            )],
+            output=[
+                obj(
+                    type="function_call",
+                    name="get_current_time",
+                    call_id="follow_on_call",
+                    arguments="{}",
+                )
+            ],
         )
-        failed_client = FakeClient([
+        failed_client = FakeClient(
             [
-                obj(
-                    type="response.created",
-                    response=obj(id="resp_follow_on_round"),
-                ),
-                obj(type="response.completed", response=follow_on_response),
-            ],
+                [
+                    obj(
+                        type="response.created",
+                        response=obj(id="resp_follow_on_round"),
+                    ),
+                    obj(type="response.completed", response=follow_on_response),
+                ],
+                [
+                    obj(
+                        type="response.created",
+                        response=obj(id="resp_follow_on_final"),
+                    ),
+                    obj(
+                        type="response.failed",
+                        error=obj(message="temporary provider failure"),
+                    ),
+                ],
+            ]
+        )
+        successful_client = FakeClient(
             [
-                obj(
-                    type="response.created",
-                    response=obj(id="resp_follow_on_final"),
+                [
+                    obj(
+                        type="response.created",
+                        response=obj(id="resp_follow_on_round"),
+                    ),
+                    obj(type="response.completed", response=follow_on_response),
+                ],
+                final_stream(
+                    "The approved action is complete.",
+                    response_id="resp_follow_on_final",
                 ),
-                obj(
-                    type="response.failed",
-                    error=obj(message="temporary provider failure"),
-                ),
-            ],
-        ])
-        successful_client = FakeClient([
-            [
-                obj(
-                    type="response.created",
-                    response=obj(id="resp_follow_on_round"),
-                ),
-                obj(type="response.completed", response=follow_on_response),
-            ],
-            final_stream(
-                "The approved action is complete.",
-                response_id="resp_follow_on_final",
-            ),
-        ])
+            ]
+        )
 
         def dispatch(name, arguments, *, approval_granted=False):
             if name == "approve_codeops_task":
@@ -1706,10 +1657,7 @@ class TestResponsesRoutes(unittest.TestCase):
                 return_value=failed_client,
             ):
                 first = self.client.post(
-                    (
-                        f"/responses/sessions/{session['id']}/approvals/"
-                        f"{pending['approval_id']}"
-                    ),
+                    (f"/responses/sessions/{session['id']}/approvals/{pending['approval_id']}"),
                     json={"approve": True},
                     headers=self.auth,
                     buffered=True,
@@ -1722,10 +1670,7 @@ class TestResponsesRoutes(unittest.TestCase):
                 return_value=successful_client,
             ):
                 second = self.client.post(
-                    (
-                        f"/responses/sessions/{session['id']}/approvals/"
-                        f"{pending['approval_id']}"
-                    ),
+                    (f"/responses/sessions/{session['id']}/approvals/{pending['approval_id']}"),
                     json={"approve": True},
                     headers=self.auth,
                     buffered=True,
@@ -1734,10 +1679,7 @@ class TestResponsesRoutes(unittest.TestCase):
         self.assertIn("event: completion", second.get_data(as_text=True))
         self.assertEqual(dispatch_mock.call_count, 2)
         self.assertEqual(
-            [
-                call["extra_headers"]["Idempotency-Key"]
-                for call in failed_client.responses.calls
-            ],
+            [call["extra_headers"]["Idempotency-Key"] for call in failed_client.responses.calls],
             [
                 call["extra_headers"]["Idempotency-Key"]
                 for call in successful_client.responses.calls
@@ -1757,26 +1699,31 @@ class TestResponsesRoutes(unittest.TestCase):
             server_label="github",
             arguments={"query": "evidence"},
         )
-        first_client = FakeClient([[
-            obj(type="response.created", response=obj(id="resp_stable")),
-            obj(
-                type="response.failed",
-                error=obj(message="temporary provider failure"),
-            ),
-        ]])
-        conflicting_client = FakeClient([[
-            obj(type="response.created", response=obj(id="resp_conflict")),
-        ]])
+        first_client = FakeClient(
+            [
+                [
+                    obj(type="response.created", response=obj(id="resp_stable")),
+                    obj(
+                        type="response.failed",
+                        error=obj(message="temporary provider failure"),
+                    ),
+                ]
+            ]
+        )
+        conflicting_client = FakeClient(
+            [
+                [
+                    obj(type="response.created", response=obj(id="resp_conflict")),
+                ]
+            ]
+        )
         with patch.object(
             realtime_server,
             "OPENAI_CLIENT_FACTORY",
             return_value=first_client,
         ):
             first = self.client.post(
-                (
-                    f"/responses/sessions/{session['id']}/approvals/"
-                    f"{pending['approval_id']}"
-                ),
+                (f"/responses/sessions/{session['id']}/approvals/{pending['approval_id']}"),
                 json={"approve": True},
                 headers=self.auth,
                 buffered=True,
@@ -1789,10 +1736,7 @@ class TestResponsesRoutes(unittest.TestCase):
             return_value=conflicting_client,
         ):
             second = self.client.post(
-                (
-                    f"/responses/sessions/{session['id']}/approvals/"
-                    f"{pending['approval_id']}"
-                ),
+                (f"/responses/sessions/{session['id']}/approvals/{pending['approval_id']}"),
                 json={"approve": True},
                 headers=self.auth,
                 buffered=True,
@@ -1803,33 +1747,26 @@ class TestResponsesRoutes(unittest.TestCase):
             first_client.responses.calls[0]["extra_headers"]["Idempotency-Key"],
             conflicting_client.responses.calls[0]["extra_headers"]["Idempotency-Key"],
         )
-        self.assertIsNone(
-            chatlog.get_pending_approval(
-                session["id"], pending["approval_id"]
-            )
-        )
+        self.assertIsNone(chatlog.get_pending_approval(session["id"], pending["approval_id"]))
 
     def test_local_approval_executes_only_after_trusted_resolution(self):
         session = chatlog.new_session(channel="web")
         pending_response = obj(
             id="resp_local_pending",
             output_text="",
-            output=[obj(
-                type="function_call",
-                call_id="call_local_approval",
-                name="approve_codeops_task",
-                arguments=(
-                    '{"task_id":"task-123",'
-                    '"approval_evidence":"owner click"}'
-                ),
-            )],
+            output=[
+                obj(
+                    type="function_call",
+                    call_id="call_local_approval",
+                    name="approve_codeops_task",
+                    arguments=('{"task_id":"task-123","approval_evidence":"owner click"}'),
+                )
+            ],
         )
         with patch.object(
             realtime_server,
             "OPENAI_CLIENT_FACTORY",
-            return_value=FakeClient([[
-                obj(type="response.completed", response=pending_response)
-            ]]),
+            return_value=FakeClient([[obj(type="response.completed", response=pending_response)]]),
         ):
             turn = self.client.post(
                 f"/responses/sessions/{session['id']}/turns",
@@ -1840,13 +1777,12 @@ class TestResponsesRoutes(unittest.TestCase):
         approval = next(
             json.loads(line.removeprefix("data: "))
             for line in turn.get_data(as_text=True).splitlines()
-            if line.startswith("data: ")
-            and '"type": "approval.required"' in line
+            if line.startswith("data: ") and '"type": "approval.required"' in line
         )
 
-        continuation_client = FakeClient([
-            final_stream("The owner-approved local action completed.")
-        ])
+        continuation_client = FakeClient(
+            [final_stream("The owner-approved local action completed.")]
+        )
         with (
             patch.object(
                 realtime_server,
@@ -1860,10 +1796,7 @@ class TestResponsesRoutes(unittest.TestCase):
             ) as dispatch,
         ):
             resolved = self.client.post(
-                (
-                    f"/responses/sessions/{session['id']}/approvals/"
-                    f"{approval['approval_id']}"
-                ),
+                (f"/responses/sessions/{session['id']}/approvals/{approval['approval_id']}"),
                 json={"approve": True},
                 headers=self.auth,
                 buffered=True,
@@ -1895,9 +1828,7 @@ class TestResponsesRoutes(unittest.TestCase):
             headers=self.auth,
         )
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(
-            response.get_json()["error"]["code"], "invalid_request_body"
-        )
+        self.assertEqual(response.get_json()["error"]["code"], "invalid_request_body")
 
     def test_concurrent_turn_for_same_session_is_rejected(self):
         session = chatlog.new_session(channel="web")
@@ -1944,14 +1875,10 @@ class TestResponsesRoutes(unittest.TestCase):
             )
         body = response.get_data(as_text=True)
         self.assertIn('"structured_output": {"answer": "ok"}', body)
-        self.assertEqual(
-            fake_client.responses.calls[0]["text"]["format"]["name"], "answer"
-        )
+        self.assertEqual(fake_client.responses.calls[0]["text"]["format"]["name"], "answer")
 
     def test_capability_contract_reports_direct_function_count(self):
-        response = self.client.get(
-            "/responses/capabilities", headers=self.auth
-        )
+        response = self.client.get("/responses/capabilities", headers=self.auth)
         self.assertEqual(response.status_code, 200)
         capabilities = response.get_json()["capabilities"]
         self.assertEqual(
@@ -1964,21 +1891,15 @@ class TestResponsesRoutes(unittest.TestCase):
         session = chatlog.new_session(channel="web")
         exported = self._create_powerpoint_artifact()
         artifact = exported["artifact"]
-        self.assertTrue(
-            chatlog.link_session_artifact(session["id"], artifact["artifact_id"])
-        )
+        self.assertTrue(chatlog.link_session_artifact(session["id"], artifact["artifact_id"]))
 
         unauthenticated = self.client.get(artifact["download_url"])
         self.assertEqual(unauthenticated.status_code, 401)
-        downloaded = self.client.get(
-            artifact["download_url"], headers=self.auth
-        )
+        downloaded = self.client.get(artifact["download_url"], headers=self.auth)
         self.assertEqual(downloaded.status_code, 200)
         self.assertEqual(downloaded.mimetype, artifact["mime_type"])
         self.assertIn("attachment;", downloaded.headers["Content-Disposition"])
-        self.assertEqual(
-            downloaded.headers["ETag"], f'"sha256-{artifact["sha256"]}"'
-        )
+        self.assertEqual(downloaded.headers["ETag"], f'"sha256-{artifact["sha256"]}"')
         self.assertEqual(downloaded.headers["Cache-Control"], "private, no-store")
         downloaded.close()
 
@@ -1986,8 +1907,7 @@ class TestResponsesRoutes(unittest.TestCase):
             f"/responses/sessions/{session['id']}/artifacts",
             headers=self.auth,
         )
-        self.assertEqual(listed.get_json()["artifacts"][0]["artifact_id"],
-                         artifact["artifact_id"])
+        self.assertEqual(listed.get_json()["artifacts"][0]["artifact_id"], artifact["artifact_id"])
         resumed = self.client.post(
             f"/responses/sessions/{session['id']}/resume",
             json={},
@@ -1997,16 +1917,10 @@ class TestResponsesRoutes(unittest.TestCase):
             resumed.get_json()["session"]["artifacts"][0]["sha256"],
             artifact["sha256"],
         )
-        self.assertNotIn(
-            str(self.temp_path), json.dumps(resumed.get_json())
-        )
+        self.assertNotIn(str(self.temp_path), json.dumps(resumed.get_json()))
 
-        snapshot_artifact, snapshot = docops.open_export_artifact_snapshot(
-            artifact["artifact_id"]
-        )
-        registered = docops.resolve_export_artifact(
-            artifact["artifact_id"], include_path=True
-        )
+        snapshot_artifact, snapshot = docops.open_export_artifact_snapshot(artifact["artifact_id"])
+        registered = docops.resolve_export_artifact(artifact["artifact_id"], include_path=True)
         original_bytes = snapshot.read()
         Path(registered["path"]).write_bytes(b"replacement")
         snapshot.seek(0)
@@ -2016,36 +1930,32 @@ class TestResponsesRoutes(unittest.TestCase):
 
         blocked = self.client.get(artifact["download_url"], headers=self.auth)
         self.assertEqual(blocked.status_code, 409)
-        self.assertEqual(
-            blocked.get_json()["error"]["code"], "artifact_unavailable"
-        )
+        self.assertEqual(blocked.get_json()["error"]["code"], "artifact_unavailable")
 
     def test_every_document_format_is_downloadable_from_chat(self):
         session = chatlog.new_session(channel="web")
         drafted = docops.draft_document(
             "status_report",
             "Downloadable Formats",
-            json.dumps({
-                "Period": "Q3",
-                "Highlights": "Universal downloads",
-                "Metrics": "Five formats",
-                "Blockers": "None",
-                "Next Period Plan": "Release",
-            }),
+            json.dumps(
+                {
+                    "Period": "Q3",
+                    "Highlights": "Universal downloads",
+                    "Metrics": "Five formats",
+                    "Blockers": "None",
+                    "Next Period Plan": "Release",
+                }
+            ),
             finalize=True,
         )
         artifacts = [drafted["artifact"]]
 
         def convert(command, **_kwargs):
             output = Path(command[5])
-            output.write_bytes(
-                Path(command[3]).read_bytes() + command[2].encode()
-            )
+            output.write_bytes(Path(command[3]).read_bytes() + command[2].encode())
             return docops.subprocess.CompletedProcess(command, 0, "", "")
 
-        artifacts.append(
-            docops.export_document(drafted["doc_id"], "html")["artifact"]
-        )
+        artifacts.append(docops.export_document(drafted["doc_id"], "html")["artifact"])
         with patch.object(docops.subprocess, "run", side_effect=convert):
             artifacts.extend(
                 docops.export_document(drafted["doc_id"], format_name)["artifact"]
@@ -2056,30 +1966,16 @@ class TestResponsesRoutes(unittest.TestCase):
         expected_mime = {
             "md": "text/markdown",
             "html": "text/html",
-            "docx": (
-                "application/vnd.openxmlformats-officedocument."
-                "wordprocessingml.document"
-            ),
+            "docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
             "rtf": "application/rtf",
-            "pptx": (
-                "application/vnd.openxmlformats-officedocument."
-                "presentationml.presentation"
-            ),
+            "pptx": ("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
         }
         self.assertEqual({item["format"] for item in artifacts}, set(expected_mime))
         for artifact in artifacts:
-            self.assertTrue(
-                chatlog.link_session_artifact(
-                    session["id"], artifact["artifact_id"]
-                )
-            )
-            downloaded = self.client.get(
-                artifact["download_url"], headers=self.auth
-            )
+            self.assertTrue(chatlog.link_session_artifact(session["id"], artifact["artifact_id"]))
+            downloaded = self.client.get(artifact["download_url"], headers=self.auth)
             self.assertEqual(downloaded.status_code, 200)
-            self.assertEqual(
-                downloaded.mimetype, expected_mime[artifact["format"]]
-            )
+            self.assertEqual(downloaded.mimetype, expected_mime[artifact["format"]])
             self.assertEqual(
                 hashlib.sha256(downloaded.data).hexdigest(),
                 artifact["sha256"],
@@ -2097,20 +1993,26 @@ class TestResponsesRoutes(unittest.TestCase):
         exported = self._create_powerpoint_artifact()
         function_response = obj(
             id="resp_export",
-            output=[obj(
-                type="function_call",
-                name="export_document",
-                call_id="call_export",
-                arguments=json.dumps({
-                    "doc_id": exported["doc_id"],
-                    "format": "pptx",
-                }),
-            )],
+            output=[
+                obj(
+                    type="function_call",
+                    name="export_document",
+                    call_id="call_export",
+                    arguments=json.dumps(
+                        {
+                            "doc_id": exported["doc_id"],
+                            "format": "pptx",
+                        }
+                    ),
+                )
+            ],
         )
-        fake_client = FakeClient([
-            [obj(type="response.completed", response=function_response)],
-            final_stream("The native PowerPoint is ready."),
-        ])
+        fake_client = FakeClient(
+            [
+                [obj(type="response.completed", response=function_response)],
+                final_stream("The native PowerPoint is ready."),
+            ]
+        )
         with (
             patch.object(
                 realtime_server,
@@ -2159,9 +2061,7 @@ class TestRequestedDeliverableFormat(unittest.TestCase):
         )
         for message in informational_messages:
             with self.subTest(message=message):
-                self.assertIsNone(
-                    responses_runtime.requested_deliverable_format(message)
-                )
+                self.assertIsNone(responses_runtime.requested_deliverable_format(message))
 
     def test_genuine_creation_requests_still_enforce_artifacts(self):
         creation_messages = {
