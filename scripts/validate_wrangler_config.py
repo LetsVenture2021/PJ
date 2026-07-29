@@ -16,6 +16,7 @@ REQUIRED_ROUTES = {
     "pj-assistant.ai/session",
     "pj-assistant.ai/token",
     "pj-assistant.ai/tool-schemas",
+    "pj-assistant.ai/upload/*",
 }
 REQUIRED_VARS = {
     "CF_ACCESS_AUD",

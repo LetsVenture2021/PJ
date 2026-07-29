@@ -10,6 +10,7 @@ The legacy local-only POST /webhook SIP handler is unsupported and must not be
 exposed publicly because webhook signatures are not verified.
 """
 
+import codecs
 import hashlib
 import hmac
 import ipaddress
@@ -18,7 +19,11 @@ import logging
 import os
 import re
 import secrets
+import shutil
+import sqlite3
+import zipfile
 from pathlib import Path
+from pathlib import PurePosixPath
 from time import perf_counter
 
 import requests
@@ -36,11 +41,13 @@ from flask_cors import CORS
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 from openai import OpenAI
+from werkzeug.exceptions import RequestEntityTooLarge
 
 import chatlog
 import docops
 import promptops
 import skills
+from ops.docs import uploads as document_uploads
 from pj_contract import CONTRACT_VERSION, PROTOCOL_VERSION
 from ops.shared.logging import (
     bind_log_context,
@@ -76,6 +83,44 @@ ARTIFACT_ID_PATTERN = re.compile(r"^ART-[a-f0-9]{32}$")
 SCHEMA_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 ARTIFACT_ID_PATTERN = re.compile(r"^ART-[a-f0-9]{32}$")
 OPENAI_CLIENT_FACTORY = OpenAI
+DEFAULT_MAX_UPLOAD_FILE_BYTES = 25 * 1024 * 1024
+DEFAULT_MAX_UPLOAD_TOTAL_BYTES = 100 * 1024 * 1024
+UPLOAD_MULTIPART_OVERHEAD_BYTES = 1024 * 1024
+UPLOAD_CHUNK_BYTES = 1024 * 1024
+UPLOAD_ID_PATTERN = re.compile(r"^UPL-[a-f0-9]{32}$")
+ALLOWED_UPLOAD_TYPES = {
+    ".csv": {"text/csv", "application/vnd.ms-excel"},
+    ".doc": {"application/msword"},
+    ".docx": {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"},
+    ".json": {"application/json", "text/json"},
+    ".md": {"text/markdown", "text/plain"},
+    ".markdown": {"text/markdown", "text/plain"},
+    ".odp": {"application/vnd.oasis.opendocument.presentation"},
+    ".ods": {"application/vnd.oasis.opendocument.spreadsheet"},
+    ".odt": {"application/vnd.oasis.opendocument.text"},
+    ".pdf": {"application/pdf"},
+    ".ppt": {"application/vnd.ms-powerpoint"},
+    ".pptx": {"application/vnd.openxmlformats-officedocument.presentationml.presentation"},
+    ".rtf": {"application/rtf", "text/rtf"},
+    ".tsv": {"text/tab-separated-values", "text/plain"},
+    ".txt": {"text/plain"},
+    ".xls": {"application/vnd.ms-excel"},
+    ".xlsx": {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+    ".xml": {"application/xml", "text/xml"},
+    ".yaml": {"application/yaml", "text/yaml", "text/plain"},
+    ".yml": {"application/yaml", "text/yaml", "text/plain"},
+}
+TEXT_UPLOAD_EXTENSIONS = {
+    ".csv",
+    ".json",
+    ".md",
+    ".markdown",
+    ".tsv",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
 
 configure_logging()
 _LOGGER = get_logger("realtime.server")
@@ -89,18 +134,30 @@ app = Flask(__name__, static_folder=str(BASE_DIR / "assets"), static_url_path="/
 app.secret_key = os.getenv("PJ_LOCAL_WEB_SESSION_SECRET") or secrets.token_hex(32)
 app.config.update(
     LOCAL_WEB_OWNER_SESSION_ENABLED=(os.getenv("PJ_LOCAL_WEB_OWNER_SESSION_ENABLED") == "1"),
+    MAX_UPLOAD_FILE_BYTES=DEFAULT_MAX_UPLOAD_FILE_BYTES,
+    MAX_UPLOAD_TOTAL_BYTES=DEFAULT_MAX_UPLOAD_TOTAL_BYTES,
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_NAME="pj_local_web_session",
     SESSION_COOKIE_SAMESITE="Strict",
 )
+app.config.setdefault("UPLOAD_SCANNER", None)
 CORS(app)  # allow local browser origins when running on localhost
 
 
 @app.before_request
 def _start_request_logging():
     req_id = _request_id()
+    if request.path in {"/upload/files", "/upload/folder"}:
+        request.max_content_length = (
+            int(app.config["MAX_UPLOAD_TOTAL_BYTES"]) + UPLOAD_MULTIPART_OVERHEAD_BYTES
+        )
     route_values = request.view_args or {}
-    session_id = route_values.get("session_id") or request.args.get("session_id") or ""
+    session_id = (
+        route_values.get("session_id")
+        or request.args.get("session_id")
+        or request.headers.get("x-pj-session-id")
+        or ""
+    )
     if not session_id and request.is_json:
         payload = request.get_json(silent=True)
         if isinstance(payload, dict):
@@ -138,6 +195,33 @@ def _finish_request_logging(response):
 @app.teardown_request
 def _clear_request_logging(_error=None):
     clear_log_context()
+
+
+@app.errorhandler(RequestEntityTooLarge)
+def _handle_request_too_large(_error):
+    if request.path in {"/upload/files", "/upload/folder"}:
+        session_id = request.headers.get("x-pj-session-id")
+        if not SESSION_ID_PATTERN.fullmatch(str(session_id or "")):
+            session_id = None
+        _upload_audit(
+            "upload.rejected",
+            req_id=_request_id(),
+            session_id=session_id,
+            upload_id=None,
+            error_code="upload_too_large",
+        )
+        return _error_response(
+            "upload_too_large",
+            "The total upload exceeds the configured size limit.",
+            413,
+            _request_id(),
+        )
+    return _error_response(
+        "request_too_large",
+        "The request exceeds the configured size limit.",
+        413,
+        _request_id(),
+    )
 
 
 def _tool_policy_sha256():
@@ -216,6 +300,8 @@ def _uses_pj_protocol():
         "/token",
         "/execute-tool",
         "/tool-schemas",
+        "/upload/files",
+        "/upload/folder",
     } or request.path.startswith("/responses/")
 
 
@@ -301,6 +387,223 @@ def _check_bridge_auth(req_id, *, required=False):
         401,
         req_id,
     )
+
+
+class UploadValidationError(ValueError):
+    def __init__(self, code, message, status, detail=None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.status = status
+        self.detail = detail
+
+
+def _sanitize_upload_path(raw_path, *, folder_mode):
+    if not isinstance(raw_path, str):
+        raise UploadValidationError("unsafe_upload_path", "Upload paths must be strings.", 400)
+    value = raw_path.strip()
+    if (
+        not value
+        or "\x00" in value
+        or "\\" in value
+        or value.startswith("/")
+        or re.match(r"^[A-Za-z]:", value)
+    ):
+        raise UploadValidationError(
+            "unsafe_upload_path", "Upload path is absolute or malformed.", 400
+        )
+    parts = value.split("/")
+    if (
+        any(part in {"", ".", ".."} for part in parts)
+        or any(len(part.encode("utf-8")) > 255 for part in parts)
+        or any(re.search(r'[\x00-\x1f<>:"|?*]', part) for part in parts)
+    ):
+        raise UploadValidationError(
+            "unsafe_upload_path", "Upload path contains an unsafe component.", 400
+        )
+    if not folder_mode and len(parts) != 1:
+        raise UploadValidationError(
+            "unsafe_upload_path", "File uploads cannot include directory paths.", 400
+        )
+    normalized = PurePosixPath(*parts).as_posix()
+    if len(normalized.encode("utf-8")) > 1024:
+        raise UploadValidationError("unsafe_upload_path", "Upload path is too long.", 400)
+    return normalized
+
+
+def _validate_upload_type(relative_path, content_type):
+    extension = Path(relative_path).suffix.lower()
+    allowed_types = ALLOWED_UPLOAD_TYPES.get(extension)
+    if not allowed_types:
+        raise UploadValidationError(
+            "disallowed_file_type",
+            f"Files with extension '{extension or '(none)'}' are not allowed.",
+            415,
+        )
+    mime = str(content_type or "application/octet-stream").split(";", 1)[0].strip().lower()
+    if mime not in allowed_types and mime != "application/octet-stream":
+        raise UploadValidationError(
+            "disallowed_content_type",
+            f"Content type '{mime}' is not allowed for {extension} files.",
+            415,
+        )
+    return mime
+
+
+def _validate_upload_signature(path, extension):
+    with path.open("rb") as handle:
+        sample = handle.read(4096)
+    dangerous_signatures = (
+        b"MZ",
+        b"\x7fELF",
+        b"\xfe\xed\xfa\xce",
+        b"\xfe\xed\xfa\xcf",
+        b"\xce\xfa\xed\xfe",
+        b"\xcf\xfa\xed\xfe",
+    )
+    if any(sample.startswith(signature) for signature in dangerous_signatures):
+        raise UploadValidationError("executable_content", "Executable content is not allowed.", 415)
+    if extension in TEXT_UPLOAD_EXTENSIONS:
+        prefix = sample.lstrip().lower()
+        if prefix.startswith(b"#!") or prefix.startswith(b"<?php"):
+            raise UploadValidationError("script_content", "Script content is not allowed.", 415)
+        decoder = codecs.getincrementaldecoder("utf-8")()
+        try:
+            with path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(UPLOAD_CHUNK_BYTES), b""):
+                    if b"\x00" in chunk:
+                        raise UploadValidationError(
+                            "invalid_text_content",
+                            "Text document contains binary content.",
+                            415,
+                        )
+                    decoder.decode(chunk, final=False)
+            decoder.decode(b"", final=True)
+        except UnicodeDecodeError as exc:
+            raise UploadValidationError(
+                "invalid_text_content", "Text documents must use UTF-8 encoding.", 415
+            ) from exc
+        if extension == ".json":
+            try:
+                json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise UploadValidationError(
+                    "invalid_document_content",
+                    "JSON uploads must contain valid JSON.",
+                    415,
+                ) from exc
+        return
+
+    sample_lower = sample.lower()
+    if extension == ".pdf" and not sample.startswith(b"%PDF-"):
+        raise UploadValidationError(
+            "invalid_document_content", "The file does not contain a valid PDF header.", 415
+        )
+    if extension == ".rtf" and not sample_lower.startswith(b"{\\rtf"):
+        raise UploadValidationError(
+            "invalid_document_content", "The file does not contain a valid RTF header.", 415
+        )
+    if extension in {".doc", ".xls", ".ppt"} and not sample.startswith(
+        b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+    ):
+        raise UploadValidationError(
+            "invalid_document_content",
+            "The file does not contain a valid legacy Office container.",
+            415,
+        )
+    if extension in {".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp"}:
+        try:
+            with zipfile.ZipFile(path) as archive:
+                names = archive.namelist()
+                if len(names) > 10000:
+                    raise UploadValidationError(
+                        "invalid_document_content",
+                        "The document container contains too many entries.",
+                        415,
+                    )
+                name_set = set(names)
+                expected_prefix = {
+                    ".docx": "word/",
+                    ".xlsx": "xl/",
+                    ".pptx": "ppt/",
+                }.get(extension)
+                if expected_prefix and (
+                    "[Content_Types].xml" not in name_set
+                    or not any(name.startswith(expected_prefix) for name in names)
+                ):
+                    raise UploadValidationError(
+                        "invalid_document_content",
+                        "The file does not match its Office document extension.",
+                        415,
+                    )
+                expected_mime = {
+                    ".odt": "application/vnd.oasis.opendocument.text",
+                    ".ods": "application/vnd.oasis.opendocument.spreadsheet",
+                    ".odp": "application/vnd.oasis.opendocument.presentation",
+                }.get(extension)
+                if expected_mime:
+                    mime_info = archive.getinfo("mimetype")
+                    if mime_info.file_size > 256:
+                        raise UploadValidationError(
+                            "invalid_document_content",
+                            "The OpenDocument MIME entry is invalid.",
+                            415,
+                        )
+                    actual_mime = archive.read(mime_info).decode("ascii")
+                    if actual_mime != expected_mime:
+                        raise UploadValidationError(
+                            "invalid_document_content",
+                            "The file does not match its OpenDocument extension.",
+                            415,
+                        )
+        except (KeyError, UnicodeDecodeError, zipfile.BadZipFile) as exc:
+            raise UploadValidationError(
+                "invalid_document_content",
+                "The file does not contain a valid document container.",
+                415,
+            ) from exc
+
+
+def _scan_uploaded_file(path, metadata):
+    scanner = app.config.get("UPLOAD_SCANNER")
+    if scanner is None:
+        return
+    if not callable(scanner):
+        raise RuntimeError("UPLOAD_SCANNER must be callable")
+    try:
+        result = scanner(path, dict(metadata))
+    except Exception as exc:
+        raise RuntimeError("upload scanner failed") from exc
+    if result is False or (isinstance(result, dict) and result.get("ok") is False):
+        detail = result.get("detail") if isinstance(result, dict) else None
+        raise UploadValidationError(
+            "upload_scan_rejected", "The upload was rejected by the content scanner.", 422, detail
+        )
+
+
+def _upload_audit(event, *, req_id, session_id, upload_id, **extra):
+    _LOGGER.info(
+        event,
+        extra={
+            "request_id": req_id,
+            "session_id": session_id,
+            "upload_id": upload_id,
+            **extra,
+        },
+    )
+
+
+def _upload_rejection(
+    code, message, status, req_id, *, session_id=None, upload_id=None, detail=None
+):
+    _upload_audit(
+        "upload.rejected",
+        req_id=req_id,
+        session_id=session_id,
+        upload_id=upload_id,
+        error_code=code,
+    )
+    return _error_response(code, message, status, req_id, detail=detail)
 
 
 def _function_tool_schemas():
@@ -692,6 +995,8 @@ def health():
                 "/responses/sessions/<id>/realtime-messages",
                 "/responses/sessions/<id>/approvals/<id>",
                 "/responses/artifacts/<artifact-id>",
+                "/upload/files",
+                "/upload/folder",
                 "/health",
             ],
         },
@@ -906,6 +1211,239 @@ def list_responses_session_artifacts(session_id):
         {"ok": True, "count": len(artifacts), "artifacts": artifacts},
         req_id=req_id,
     )
+
+
+def _handle_document_upload(*, folder_mode):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        audit_session_id = request.headers.get("x-pj-session-id")
+        if not SESSION_ID_PATTERN.fullmatch(str(audit_session_id or "")):
+            audit_session_id = None
+        _upload_audit(
+            "upload.rejected",
+            req_id=req_id,
+            session_id=audit_session_id,
+            upload_id=None,
+            error_code="upload_auth_failed",
+        )
+        return auth_error
+
+    max_file_size = int(app.config["MAX_UPLOAD_FILE_BYTES"])
+    max_total_size = int(app.config["MAX_UPLOAD_TOTAL_BYTES"])
+    if max_file_size <= 0 or max_total_size <= 0:
+        return _upload_rejection(
+            "invalid_upload_configuration",
+            "Upload size limits are not configured correctly.",
+            500,
+            req_id,
+        )
+    if (
+        request.content_length is not None
+        and request.content_length > max_total_size + UPLOAD_MULTIPART_OVERHEAD_BYTES
+    ):
+        return _upload_rejection(
+            "upload_too_large",
+            "The total upload exceeds the configured size limit.",
+            413,
+            req_id,
+            session_id=request.headers.get("x-pj-session-id"),
+        )
+
+    session_id = str(request.form.get("session_id") or "").strip()
+    if not session_id:
+        session_id = f"upload_{secrets.token_hex(12)}"
+    if not SESSION_ID_PATTERN.fullmatch(session_id):
+        return _upload_rejection(
+            "invalid_upload_session",
+            "session_id must contain 8-128 letters, numbers, underscores, or hyphens.",
+            400,
+            req_id,
+        )
+    bind_log_context(session_id=session_id)
+
+    files = request.files.getlist("files")
+    paths = request.form.getlist("paths")
+    if not files:
+        return _upload_rejection(
+            "missing_upload_files",
+            "At least one file is required.",
+            400,
+            req_id,
+            session_id=session_id,
+        )
+    if folder_mode and len(paths) != len(files):
+        return _upload_rejection(
+            "missing_folder_paths",
+            "Folder uploads require one relative path for every file.",
+            400,
+            req_id,
+            session_id=session_id,
+        )
+    if paths and len(paths) != len(files):
+        return _upload_rejection(
+            "invalid_upload_paths",
+            "The number of upload paths must match the number of files.",
+            400,
+            req_id,
+            session_id=session_id,
+        )
+
+    upload_id = f"UPL-{secrets.token_hex(16)}"
+    upload_root = document_uploads.UPLOADS_DIR
+    staging_dir = upload_root / ".staging" / upload_id
+    final_dir = upload_root / session_id / upload_id
+    prepared = []
+    seen_paths = set()
+    try:
+        for index, storage in enumerate(files):
+            raw_path = paths[index] if paths else storage.filename
+            relative_path = _sanitize_upload_path(raw_path, folder_mode=folder_mode)
+            if relative_path in seen_paths:
+                raise UploadValidationError(
+                    "duplicate_upload_path",
+                    "Each file in an upload must have a unique path.",
+                    400,
+                    relative_path,
+                )
+            seen_paths.add(relative_path)
+            mime = _validate_upload_type(relative_path, storage.mimetype)
+            prepared.append(
+                {
+                    "storage": storage,
+                    "relative_path": relative_path,
+                    "name": PurePosixPath(relative_path).name,
+                    "mime": mime,
+                }
+            )
+
+        upload_root.mkdir(parents=True, exist_ok=True)
+        staging_dir.mkdir(parents=True)
+        total_size = 0
+        staged_items = []
+        for item in prepared:
+            destination = staging_dir.joinpath(*PurePosixPath(item["relative_path"]).parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            digest = hashlib.sha256()
+            file_size = 0
+            with destination.open("xb") as target:
+                while True:
+                    chunk = item["storage"].stream.read(UPLOAD_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    file_size += len(chunk)
+                    total_size += len(chunk)
+                    if file_size > max_file_size:
+                        raise UploadValidationError(
+                            "file_too_large",
+                            f"'{item['name']}' exceeds the per-file size limit.",
+                            413,
+                        )
+                    if total_size > max_total_size:
+                        raise UploadValidationError(
+                            "upload_too_large",
+                            "The total upload exceeds the configured size limit.",
+                            413,
+                        )
+                    digest.update(chunk)
+                    target.write(chunk)
+                target.flush()
+                os.fsync(target.fileno())
+            destination.chmod(0o600)
+            if file_size == 0:
+                raise UploadValidationError("empty_upload_file", f"'{item['name']}' is empty.", 400)
+            _validate_upload_signature(destination, Path(item["relative_path"]).suffix.lower())
+            staged_item = {
+                "relative_path": item["relative_path"],
+                "name": item["name"],
+                "mime": item["mime"],
+                "size": file_size,
+                "sha256": digest.hexdigest(),
+            }
+            _scan_uploaded_file(destination, staged_item)
+            staged_items.append(staged_item)
+
+        final_dir.parent.mkdir(parents=True, exist_ok=True)
+        if final_dir.exists():
+            raise RuntimeError("generated upload destination already exists")
+        staging_dir.replace(final_dir)
+        indexed_files = []
+        for item in staged_items:
+            saved_path = (
+                PurePosixPath("uploads")
+                / session_id
+                / upload_id
+                / PurePosixPath(item["relative_path"])
+            ).as_posix()
+            indexed_files.append(
+                {
+                    **item,
+                    "saved_path": saved_path,
+                    "path": final_dir.joinpath(*PurePosixPath(item["relative_path"]).parts),
+                }
+            )
+        registered = document_uploads.register_uploaded_documents(
+            upload_id, session_id, indexed_files
+        )
+    except UploadValidationError as exc:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        shutil.rmtree(final_dir, ignore_errors=True)
+        return _upload_rejection(
+            exc.code,
+            exc.message,
+            exc.status,
+            req_id,
+            session_id=session_id,
+            upload_id=upload_id,
+            detail=exc.detail,
+        )
+    except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        shutil.rmtree(final_dir, ignore_errors=True)
+        _LOGGER.exception(
+            "upload.failed",
+            extra={"session_id": session_id, "upload_id": upload_id},
+        )
+        return _error_response(
+            "upload_failed",
+            "The upload could not be persisted and registered.",
+            500,
+            req_id,
+            detail=exc,
+        )
+
+    _upload_audit(
+        "upload.accepted",
+        req_id=req_id,
+        session_id=session_id,
+        upload_id=upload_id,
+        file_count=registered["count"],
+        total_size=total_size,
+        mode="folder" if folder_mode else "files",
+    )
+    return _json_response(
+        {
+            "ok": True,
+            "upload_id": upload_id,
+            "session_id": session_id,
+            "mode": "folder" if folder_mode else "files",
+            "count": registered["count"],
+            "total_size": total_size,
+            "files": registered["documents"],
+        },
+        status=201,
+        req_id=req_id,
+    )
+
+
+@app.route("/upload/files", methods=["POST"])
+def upload_files():
+    return _handle_document_upload(folder_mode=False)
+
+
+@app.route("/upload/folder", methods=["POST"])
+def upload_folder():
+    return _handle_document_upload(folder_mode=True)
 
 
 @app.route(

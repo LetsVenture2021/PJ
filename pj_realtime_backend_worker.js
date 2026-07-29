@@ -11,6 +11,7 @@ const REALTIME_CALL_TIMEOUT_MS = 30000;
 const REALTIME_TOKEN_TIMEOUT_MS = 12000;
 const ACCESS_CLOCK_SKEW_SECONDS = 60;
 const MAX_RESPONSES_REQUEST_BYTES = 262144;
+const DEFAULT_MAX_UPLOAD_PROXY_BYTES = 100 * 1024 * 1024;
 const REALTIME_EXCLUDED_TOOL_NAMES = new Set([
   "approve_codeops_task",
   "create_skill",
@@ -102,7 +103,7 @@ function corsHeaders(corsOrigin) {
     "access-control-allow-origin": corsOrigin,
     "access-control-allow-methods": "GET,POST,OPTIONS",
     "access-control-allow-headers":
-      "content-type,authorization,x-pj-client-request-id,x-pj-contract-version,x-pj-protocol-version",
+      "content-type,authorization,x-pj-client-request-id,x-pj-contract-version,x-pj-protocol-version,x-pj-session-id",
     "access-control-expose-headers":
       "x-request-id,x-pj-contract-version,x-pj-protocol-version,content-disposition,content-length,etag",
   };
@@ -817,6 +818,130 @@ async function handleResponsesProxy(request, env, corsOrigin, requestId, fetchIm
       errorPayload(
         "responses_bridge_unreachable",
         "The Full Power runtime request failed before completion.",
+        requestId,
+        trimDetail(exc),
+      ),
+      502,
+      corsOrigin,
+      requestId,
+    );
+  }
+}
+
+async function handleUploadProxy(request, env, corsOrigin, requestId, fetchImpl = fetch) {
+  const inboundUrl = new URL(request.url);
+  if (
+    request.method !== "POST" ||
+    !["/upload/files", "/upload/folder"].includes(inboundUrl.pathname)
+  ) {
+    return jsonResponse(
+      errorPayload("not_found", "Not found.", requestId),
+      404,
+      corsOrigin,
+      requestId,
+    );
+  }
+  if (!(env.PJ_TOOL_BRIDGE_TOKEN || "").trim()) {
+    return jsonResponse(
+      errorPayload(
+        "bridge_auth_not_configured",
+        "The private runtime credential is not configured.",
+        requestId,
+      ),
+      503,
+      corsOrigin,
+      requestId,
+    );
+  }
+  const bridgeBase = deriveResponsesBridgeBaseUrl(env);
+  if (!bridgeBase) {
+    return jsonResponse(
+      errorPayload(
+        "upload_bridge_not_configured",
+        "The upload runtime bridge is not configured.",
+        requestId,
+      ),
+      503,
+      corsOrigin,
+      requestId,
+    );
+  }
+
+  const contentType = request.headers.get("content-type") || "";
+  if (!/^multipart\/form-data;\s*boundary=/i.test(contentType)) {
+    return jsonResponse(
+      errorPayload("invalid_upload_content_type", "Expected multipart form data.", requestId),
+      415,
+      corsOrigin,
+      requestId,
+    );
+  }
+  const contentLength = Number(request.headers.get("content-length"));
+  const maxBytes = asPositiveInt(env.PJ_MAX_UPLOAD_BYTES, DEFAULT_MAX_UPLOAD_PROXY_BYTES);
+  if (!Number.isSafeInteger(contentLength) || contentLength <= 0) {
+    logEvent(requestId, "upload.rejected", { code: "upload_length_required" });
+    return jsonResponse(
+      errorPayload(
+        "upload_length_required",
+        "Uploads require a valid Content-Length header.",
+        requestId,
+      ),
+      411,
+      corsOrigin,
+      requestId,
+    );
+  }
+  if (contentLength > maxBytes) {
+    logEvent(requestId, "upload.rejected", {
+      code: "upload_too_large",
+      content_length: contentLength,
+    });
+    return jsonResponse(
+      errorPayload("upload_too_large", `Upload exceeds ${maxBytes} bytes.`, requestId),
+      413,
+      corsOrigin,
+      requestId,
+    );
+  }
+
+  const target = new URL(bridgeBase);
+  target.pathname = `${target.pathname.replace(/\/+$/, "")}${inboundUrl.pathname}`;
+  if (isLoopTarget(target.toString(), request.url)) {
+    return jsonResponse(
+      errorPayload("bridge_loop_detected", "The upload runtime bridge would recurse.", requestId),
+      500,
+      corsOrigin,
+      requestId,
+    );
+  }
+
+  const headers = {
+    ...bridgeHeaders(env, requestId),
+    "content-type": contentType,
+  };
+  const sessionId = request.headers.get("x-pj-session-id") || "";
+  if (/^[A-Za-z0-9_-]{8,128}$/.test(sessionId)) {
+    headers["x-pj-session-id"] = sessionId;
+  }
+  try {
+    const bridgeResponse = await fetchImpl(target.toString(), {
+      method: "POST",
+      headers,
+      body: request.body,
+    });
+    logEvent(requestId, "upload.bridge_complete", {
+      path: inboundUrl.pathname,
+      status: bridgeResponse.status,
+    });
+    return new Response(bridgeResponse.body, {
+      status: bridgeResponse.status,
+      headers: responseHeaders(corsOrigin, requestId, "application/json"),
+    });
+  } catch (exc) {
+    return jsonResponse(
+      errorPayload(
+        "upload_bridge_unreachable",
+        "The upload runtime request failed before completion.",
         requestId,
         trimDetail(exc),
       ),
@@ -1575,6 +1700,7 @@ export {
   fetchTextWithTimeout,
   handleSession,
   handleResponsesProxy,
+  handleUploadProxy,
   isPublicRoute,
   isResponsesRoute,
   responseHeaders,
@@ -1695,6 +1821,8 @@ export default {
             "/responses/sessions/<id>/artifacts",
             "/responses/sessions/<id>/approvals/<id>",
             "/responses/artifacts/<artifact-id>",
+            "/upload/files",
+            "/upload/folder",
             "/health",
           ],
         },
@@ -1745,6 +1873,10 @@ export default {
 
     if (url.pathname.startsWith("/responses/")) {
       return handleResponsesProxy(request, env, corsOrigin, requestId);
+    }
+
+    if (url.pathname === "/upload/files" || url.pathname === "/upload/folder") {
+      return handleUploadProxy(request, env, corsOrigin, requestId);
     }
 
     return jsonResponse(
