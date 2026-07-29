@@ -656,6 +656,33 @@ function deriveResponsesBridgeBaseUrl(env) {
 }
 
 function isResponsesRoute(method, pathname) {
+  if ((method === "GET" || method === "POST") && pathname === "/projects") {
+    return true;
+  }
+  if (method === "POST" && pathname === "/projects/import") {
+    return true;
+  }
+  if (
+    ["GET", "PATCH", "DELETE"].includes(method) &&
+    /^\/projects\/[a-f0-9-]{36}$/.test(pathname)
+  ) {
+    return true;
+  }
+  if (
+    ["GET", "POST"].includes(method) &&
+    /^\/projects\/[a-f0-9-]{36}\/(conversations|sources|artifacts|goals)$/.test(pathname)
+  ) {
+    return true;
+  }
+  if (
+    method === "POST" &&
+    /^\/projects\/[a-f0-9-]{36}\/(archive|restore|export)$/.test(pathname)
+  ) {
+    return true;
+  }
+  if (method === "DELETE" && /^\/projects\/conversations\/[A-Za-z0-9_-]{8,128}$/.test(pathname)) {
+    return true;
+  }
   if (method === "GET" && pathname === "/responses/capabilities") {
     return true;
   }
@@ -746,6 +773,8 @@ async function handleResponsesProxy(request, env, corsOrigin, requestId, fetchIm
 
   const isStreamingTurn = /\/turns$/.test(inboundUrl.pathname);
   const isArtifactDownload = /^\/responses\/artifacts\/ART-[a-f0-9]{32}$/.test(inboundUrl.pathname);
+  const isProjectExport = /\/projects\/[a-f0-9-]{36}\/export$/.test(inboundUrl.pathname);
+  const isProjectImport = inboundUrl.pathname === "/projects/import";
   const headers = {
     ...bridgeHeaders(env, requestId),
     accept: isStreamingTurn
@@ -754,10 +783,16 @@ async function handleResponsesProxy(request, env, corsOrigin, requestId, fetchIm
         ? "application/octet-stream"
         : "application/json",
   };
+  const ownerId = request.headers.get("x-pj-owner-id");
+  if (ownerId) headers["x-pj-owner-id"] = ownerId.slice(0, 200);
   let body;
-  if (request.method === "POST") {
-    body = await request.text();
-    if (new TextEncoder().encode(body).byteLength > MAX_RESPONSES_REQUEST_BYTES) {
+  if (["POST", "PATCH"].includes(request.method)) {
+    body = isProjectImport ? await request.arrayBuffer() : await request.text();
+    const byteLength = typeof body === "string" ? new TextEncoder().encode(body).byteLength : body.byteLength;
+    const requestLimit = isProjectImport
+      ? asPositiveInt(env.PJ_MAX_UPLOAD_BYTES, DEFAULT_MAX_UPLOAD_PROXY_BYTES)
+      : MAX_RESPONSES_REQUEST_BYTES;
+    if (byteLength > requestLimit) {
       return jsonResponse(
         errorPayload(
           "request_too_large",
@@ -769,6 +804,7 @@ async function handleResponsesProxy(request, env, corsOrigin, requestId, fetchIm
         requestId,
       );
     }
+    if (isProjectImport) headers["content-type"] = request.headers.get("content-type") || "";
   }
 
   try {
@@ -784,14 +820,14 @@ async function handleResponsesProxy(request, env, corsOrigin, requestId, fetchIm
     const isJson = upstreamContentType.includes("application/json");
     const contentType = isEventStream
       ? "text/event-stream"
-      : isArtifactDownload && !isJson
+      : (isArtifactDownload || isProjectExport) && !isJson
         ? upstreamContentType.split(";")[0].trim()
         : "application/json";
     const responseHeaderSet = responseHeaders(corsOrigin, requestId, contentType);
     if (isEventStream) {
       responseHeaderSet["x-accel-buffering"] = "no";
     }
-    if (isArtifactDownload && !isJson) {
+    if ((isArtifactDownload || isProjectExport) && !isJson) {
       const safeDisposition = safeAttachmentDisposition(
         bridgeResponse.headers.get("content-disposition") || "",
       );
@@ -1896,7 +1932,7 @@ export default {
       return handleExecuteTool(request, env, corsOrigin, requestId);
     }
 
-    if (url.pathname.startsWith("/responses/")) {
+    if (url.pathname.startsWith("/responses/") || url.pathname.startsWith("/projects")) {
       return handleResponsesProxy(request, env, corsOrigin, requestId);
     }
 

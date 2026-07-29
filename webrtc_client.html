@@ -479,6 +479,25 @@
         messages once the realtime session is connected.
       </div>
 
+      <details open>
+        <summary>Projects</summary>
+        <div class="field">
+          <label for="projectSelect">Current retrieval scope</label>
+          <select id="projectSelect"><option value="">Unassigned (legacy conversation)</option></select>
+        </div>
+        <div id="projectScope" class="note">Scope: current project (none selected)</div>
+        <div class="search-row">
+          <input id="projectName" type="text" maxlength="120" placeholder="New project name">
+          <button id="createProjectBtn" class="muted-btn" type="button">Create</button>
+        </div>
+        <div class="button-row">
+          <button id="moveConversationBtn" class="muted-btn" type="button">Move conversation here</button>
+          <button id="removeConversationBtn" class="muted-btn" type="button">Remove from project</button>
+        </div>
+        <details><summary>Sources</summary><div id="projectSources" class="note">No project selected.</div></details>
+        <details><summary>Artifacts</summary><div id="projectArtifacts" class="note">No project selected.</div></details>
+      </details>
+
       <div id="fullPowerControls" class="full-power-controls hidden">
         <div class="field">
           <label for="sessionSelect">Conversation history</label>
@@ -619,6 +638,14 @@
       composerFolderBtn: document.getElementById("composerFolderBtn"),
       filePicker: document.getElementById("filePicker"),
       folderPicker: document.getElementById("folderPicker"),
+      projectSelect: document.getElementById("projectSelect"),
+      projectScope: document.getElementById("projectScope"),
+      projectName: document.getElementById("projectName"),
+      createProjectBtn: document.getElementById("createProjectBtn"),
+      moveConversationBtn: document.getElementById("moveConversationBtn"),
+      removeConversationBtn: document.getElementById("removeConversationBtn"),
+      projectSources: document.getElementById("projectSources"),
+      projectArtifacts: document.getElementById("projectArtifacts"),
     };
 
     const state = {
@@ -2813,6 +2840,55 @@
     el.sessionSelect.addEventListener("change", () => {
       if (el.sessionSelect.value) resumeFullPowerSession(el.sessionSelect.value);
     });
+
+    async function loadProjectPanel() {
+      const selected = el.projectSelect.value;
+      const parsed = await fetchJson(`${apiBase()}/projects`, { credentials: "same-origin" });
+      el.projectSelect.replaceChildren(new Option("Unassigned (legacy conversation)", ""));
+      for (const project of parsed.projects || []) {
+        el.projectSelect.add(new Option(project.name, project.id, false, project.id === selected));
+      }
+      await refreshProjectScope();
+    }
+
+    async function refreshProjectScope() {
+      const projectId = el.projectSelect.value;
+      el.projectScope.textContent = projectId
+        ? `Scope: current project · ${el.projectSelect.selectedOptions[0].textContent}`
+        : "Scope: current project (none selected; retrieval is isolated)";
+      if (!projectId) {
+        el.projectSources.textContent = "No project selected.";
+        el.projectArtifacts.textContent = "No project selected.";
+        return;
+      }
+      for (const [kind, target] of [["sources", el.projectSources], ["artifacts", el.projectArtifacts]]) {
+        const data = await fetchJson(`${apiBase()}/projects/${encodeURIComponent(projectId)}/${kind}`, { credentials: "same-origin" });
+        const items = data[kind] || [];
+        target.textContent = items.length ? items.map((item) => item.label || item.artifact_id || item.source_id).join(" · ") : `No linked ${kind}.`;
+      }
+    }
+
+    el.projectSelect.addEventListener("change", () => refreshProjectScope().catch((error) => setStatus(String(error), true)));
+    el.createProjectBtn.addEventListener("click", async () => {
+      const name = el.projectName.value.trim();
+      if (!name) return;
+      const data = await fetchJson(`${apiBase()}/projects`, { method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"}, body: JSON.stringify({name}) });
+      el.projectName.value = "";
+      await loadProjectPanel();
+      el.projectSelect.value = data.project.id;
+      await refreshProjectScope();
+    });
+    el.moveConversationBtn.addEventListener("click", async () => {
+      if (!el.projectSelect.value || !state.activeSessionId) return;
+      await fetchJson(`${apiBase()}/projects/${encodeURIComponent(el.projectSelect.value)}/conversations`, { method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"}, body: JSON.stringify({conversation_id: state.activeSessionId, conversation_type: state.mode === MODE.REALTIME ? "realtime" : "responses"}) });
+      setStatus("Conversation moved into current project.");
+    });
+    el.removeConversationBtn.addEventListener("click", async () => {
+      if (!state.activeSessionId) return;
+      await fetchJson(`${apiBase()}/projects/conversations/${encodeURIComponent(state.activeSessionId)}`, { method: "DELETE", credentials: "same-origin" });
+      setStatus("Conversation is unassigned.");
+    });
+    loadProjectPanel().catch(() => { el.projectScope.textContent = "Project navigation unavailable."; });
     el.searchHistoryBtn.addEventListener("click", async () => {
       const query = el.historySearch.value.trim();
       if (!query) return;
