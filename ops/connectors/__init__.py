@@ -5,10 +5,10 @@ from .builtins import builtin_manifests
 from .registry import ConnectorRegistry
 
 __all__ = [
-  "Connector",
-  "ConnectorError",
-  "ConnectorRecord",
-  "ConnectorRegistry",
-  "DraftExecutor",
-  "builtin_manifests",
+    "Connector",
+    "ConnectorError",
+    "ConnectorRecord",
+    "ConnectorRegistry",
+    "DraftExecutor",
+    "builtin_manifests",
 ]
