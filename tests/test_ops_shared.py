@@ -131,13 +131,17 @@ class OpsSharedTestCase(unittest.TestCase):
         self.assertEqual(delays, [0.25])
 
     def test_non_retryable_response_fails_immediately(self):
+        failed = _Response(400, "bad request")
+
         with self.assertRaisesRegex(RuntimeError, "HTTP 400"):
             get_with_retry(
-                _HttpProvider([_Response(400, "bad request")]),
+                _HttpProvider([failed]),
                 "https://provider.example/resource",
                 policy=RetryPolicy(attempts=4),
                 sleep=lambda _delay: self.fail("must not retry"),
             )
+
+        self.assertTrue(failed.closed)
 
     def test_prompting_accepts_provider_interface(self):
         class Provider:
