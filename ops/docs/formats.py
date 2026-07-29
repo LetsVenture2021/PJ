@@ -33,6 +33,7 @@ class Family(str, Enum):
     NOTEBOOK = "notebook"
     MARKUP = "markup"
     SPREADSHEET = "spreadsheet"
+    OFFICE_ODF = "office_odf"
     VECTOR = "vector"
     RASTER = "raster"
     PDF = "pdf"
@@ -141,12 +142,21 @@ SPECS: tuple[FormatSpec, ...] = (
     ),
     FormatSpec(
         Family.OFFICE,
-        frozenset({".docx", ".pptx", ".odt", ".ods", ".odp"}),
+        frozenset({".docx", ".pptx"}),
+        "extract",
+        40 * MB,
+        magic=(b"PK\x03\x04",),
+        strict_magic=True,
+        label="Office document",
+    ),
+    FormatSpec(
+        Family.OFFICE_ODF,
+        frozenset({".odt", ".ods", ".odp"}),
         "register_only",
         0,
         magic=(b"PK\x03\x04",),
         strict_magic=True,
-        label="Office document",
+        label="OpenDocument",
     ),
     FormatSpec(
         Family.LEGACY_OFFICE,

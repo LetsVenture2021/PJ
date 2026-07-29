@@ -160,3 +160,53 @@ class TestCodexArtifacts(unittest.TestCase):
             finally:
                 docops._DB_PATH = old_db
                 document_uploads.UPLOADS_DIR = old_dir
+
+
+class TestOfficeExtraction(unittest.TestCase):
+    def test_docx_and_pptx_text_extraction(self):
+        import tempfile
+        import zipfile
+
+        from ops.docs.extraction import extract_preview
+        from ops.docs.formats import classify
+
+        ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+        doc_xml = f"<w:document {ns}><w:body><w:p><w:r><w:t>Quarterly outlook strong</w:t></w:r></w:p></w:body></w:document>"
+        pns = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"'
+        slide_xml = f'<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" {pns}><p:cSld><a:t>Roadmap slide title</a:t></p:cSld></p:sld>'
+
+        with tempfile.TemporaryDirectory() as temp:
+            docx = Path(temp) / "memo.docx"
+            with zipfile.ZipFile(docx, "w") as archive:
+                archive.writestr("[Content_Types].xml", "<Types/>")
+                archive.writestr("word/document.xml", doc_xml)
+            classification = classify("memo.docx", docx.read_bytes()[:8], docx.stat().st_size)
+            self.assertEqual(classification.spec.handling, "extract")
+            self.assertIn("Quarterly outlook strong", extract_preview(docx, classification))
+
+            pptx = Path(temp) / "deck.pptx"
+            with zipfile.ZipFile(pptx, "w") as archive:
+                archive.writestr("[Content_Types].xml", "<Types/>")
+                archive.writestr("ppt/slides/slide1.xml", slide_xml)
+            classification = classify("deck.pptx", pptx.read_bytes()[:8], pptx.stat().st_size)
+            self.assertIn("Roadmap slide title", extract_preview(pptx, classification))
+
+    def test_spreadsheet_formulas_are_listed(self):
+        import tempfile
+
+        from openpyxl import Workbook
+
+        from ops.docs.extraction import extract_preview
+        from ops.docs.formats import classify
+
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "calc.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet["A1"] = 10
+            sheet["A2"] = "=A1*2"
+            workbook.save(path)
+            classification = classify("calc.xlsx", path.read_bytes()[:8], path.stat().st_size)
+            preview = extract_preview(path, classification)
+            self.assertIn("Formulas", preview)
+            self.assertIn("=A1*2", preview)

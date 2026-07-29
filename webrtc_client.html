@@ -759,17 +759,42 @@
         : `${count} document${count === 1 ? "" : "s"}`;
       const statusBubble = appendBubble("system", `Uploading ${label}...`);
 
-      const form = new FormData();
-      form.append("session_id", uploadSessionId());
+      // Large selections are split into batches so no single request exceeds
+      // the edge's request-size ceiling; oversized single files are skipped
+      // with a reason instead of sinking the whole upload.
+      const BATCH_BYTES = 80 * 1024 * 1024;
+      const BATCH_FILES = 400;
+      const localOversize = [];
+      const batches = [[]];
+      let batchBytes = 0;
       for (const item of state.uploadItems) {
-        form.append("files", item.file, item.file.name);
-        form.append("paths", item.path);
+        if (item.file.size > BATCH_BYTES) {
+          localOversize.push(item.path);
+          continue;
+        }
+        const current = batches[batches.length - 1];
+        if (current.length >= BATCH_FILES || batchBytes + item.file.size > BATCH_BYTES) {
+          batches.push([item]);
+          batchBytes = item.file.size;
+        } else {
+          current.push(item);
+          batchBytes += item.file.size;
+        }
       }
-      const requestId = createRequestId();
+      const batchList = batches.filter((batch) => batch.length);
+      const buildForm = (items) => {
+        const form = new FormData();
+        form.append("session_id", uploadSessionId());
+        for (const item of items) {
+          form.append("files", item.file, item.file.name);
+          form.append("paths", item.path);
+        }
+        return form;
+      };
       const endpoint = state.uploadMode === "folder" ? "/upload/folder" : "/upload/files";
 
-      try {
-        const parsed = await new Promise((resolve, reject) => {
+      const uploadOneBatch = (form, batchNote) => new Promise((resolve, reject) => {
+          const requestId = createRequestId();
           const xhr = new XMLHttpRequest();
           xhr.open("POST", `${apiBase()}${endpoint}`);
           xhr.withCredentials = true;
@@ -799,7 +824,7 @@
             lastActivity = performance.now();
             if (event.lengthComputable) {
               const pct = Math.round((event.loaded / event.total) * 100);
-              statusBubble.textContent = `Uploading ${label}... ${pct}%`;
+              statusBubble.textContent = `Uploading ${label}...${batchNote} ${pct}%`;
             }
           });
           xhr.addEventListener("load", () => {
@@ -842,17 +867,25 @@
           xhr.send(form);
         });
 
-        const totalBytes = (parsed.files || []).reduce(
-          (sum, file) => sum + (file.size || 0),
-          0,
-        );
-        const skippedFiles = (parsed.skipped || []).length + localSkips.length;
+      try {
+        let totalCount = 0;
+        let totalBytesAll = 0;
+        const skippedAll = [];
+        for (let index = 0; index < batchList.length; index += 1) {
+          const note = batchList.length > 1 ? ` (batch ${index + 1}/${batchList.length})` : "";
+          const parsed = await uploadOneBatch(buildForm(batchList[index]), note);
+          totalCount += parsed.count || 0;
+          totalBytesAll += (parsed.files || []).reduce((sum, file) => sum + (file.size || 0), 0);
+          skippedAll.push(...(parsed.skipped || []));
+        }
+
+        const skippedFiles = skippedAll.length + localSkips.length + localOversize.length;
         statusBubble.textContent =
-          `Uploaded ${parsed.count} document${parsed.count === 1 ? "" : "s"} ` +
-          `(${formatBytes(totalBytes)}) to DocOps.` +
+          `Uploaded ${totalCount} document${totalCount === 1 ? "" : "s"} ` +
+          `(${formatBytes(totalBytesAll)}) to DocOps.` +
           (skippedFiles
             ? ` Skipped ${skippedFiles} file${skippedFiles === 1 ? "" : "s"}` +
-              ` (${(parsed.skipped || [])[0]?.code || "credential_like_filename"}).`
+              ` (${skippedAll[0]?.code || (localOversize.length ? "file_too_large" : "credential_like_filename")}).`
             : "");
         state.uploadLocalSkips = [];
       } catch (error) {

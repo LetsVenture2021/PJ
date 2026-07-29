@@ -113,6 +113,7 @@ def extract_preview(path: Path, classification: Classification, char_cap: int = 
         Family.NOTEBOOK: _notebook,
         Family.MARKUP: _html,
         Family.SPREADSHEET: _spreadsheet,
+        Family.OFFICE: _office,
         Family.VECTOR: _svg,
     }.get(family, _plain_text)
     return extractor(path, char_cap)
@@ -227,7 +228,61 @@ def _spreadsheet(path: Path, char_cap: int) -> str:
     if len(workbook.sheetnames) > 5:
         parts.append(f"({len(workbook.sheetnames) - 5} more sheet(s) not shown)")
     workbook.close()
+    try:
+        formula_book = load_workbook(path, read_only=True, data_only=False)
+        formula_lines = []
+        for sheet_name in formula_book.sheetnames[:5]:
+            for row in formula_book[sheet_name].iter_rows():
+                for cell in row:
+                    value = cell.value
+                    if isinstance(value, str) and value.startswith("="):
+                        formula_lines.append(f"- {sheet_name}!{cell.coordinate}: `{value}`")
+                        if len(formula_lines) >= 200:
+                            break
+                if len(formula_lines) >= 200:
+                    break
+            if len(formula_lines) >= 200:
+                break
+        formula_book.close()
+        if formula_lines:
+            parts.append("### Formulas (up to 200)")
+            parts.extend(formula_lines)
+    except Exception:
+        pass
     return redact("\n".join(parts))[:char_cap]
+
+
+def _office(path: Path, char_cap: int) -> str:
+    """Extract text from OOXML containers via stdlib zip+XML; nothing executes."""
+    import zipfile
+
+    suffix = path.suffix.lower()
+    texts = []
+    try:
+        with zipfile.ZipFile(path) as archive:
+            if suffix == ".docx":
+                members = ["word/document.xml"]
+            else:
+                members = sorted(
+                    name
+                    for name in archive.namelist()
+                    if name.startswith("ppt/slides/slide") and name.endswith(".xml")
+                )[:30]
+            for member in members:
+                root = ElementTree.fromstring(archive.read(member))
+                runs = [node.text for node in root.iter() if node.tag.endswith("}t") and node.text]
+                if runs:
+                    label = member.rsplit("/", 1)[-1].replace(".xml", "")
+                    texts.append((label, " ".join(runs)))
+    except (zipfile.BadZipFile, ElementTree.ParseError, KeyError) as exc:
+        raise ExtractionError("extraction_invalid_office") from exc
+    kind = "Word document" if suffix == ".docx" else "Presentation"
+    parts = [f"**{kind}** `{path.name}` - text extracted; embedded objects and macros untouched.\n"]
+    for label, body in texts:
+        if suffix == ".pptx":
+            parts.append(f"### {label}")
+        parts.append(body)
+    return redact("\n\n".join(parts))[:char_cap]
 
 
 def _notebook(path: Path, char_cap: int) -> str:
