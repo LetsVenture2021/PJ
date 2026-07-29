@@ -9,6 +9,7 @@ EXPECTED_ROUTES=(
   "/tool-schemas"
   "/execute-tool"
   "/responses/*"
+  "/upload/*"
 )
 
 REQUIRED_VARS=(

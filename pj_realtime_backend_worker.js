@@ -876,32 +876,37 @@ async function handleUploadProxy(request, env, corsOrigin, requestId, fetchImpl 
       requestId,
     );
   }
-  const contentLength = Number(request.headers.get("content-length"));
+  const contentLengthHeader = request.headers.get("content-length");
   const maxBytes = asPositiveInt(env.PJ_MAX_UPLOAD_BYTES, DEFAULT_MAX_UPLOAD_PROXY_BYTES);
-  if (!Number.isSafeInteger(contentLength) || contentLength <= 0) {
-    logEvent(requestId, "upload.rejected", { code: "upload_length_required" });
-    return jsonResponse(
-      errorPayload(
-        "upload_length_required",
-        "Uploads require a valid Content-Length header.",
+  // Browsers may omit Content-Length for FormData; the runtime still enforces
+  // multipart, total, and per-file limits while streaming every upload.
+  if (contentLengthHeader !== null) {
+    const contentLength = Number(contentLengthHeader);
+    if (!Number.isSafeInteger(contentLength) || contentLength <= 0) {
+      logEvent(requestId, "upload.rejected", { code: "invalid_upload_length" });
+      return jsonResponse(
+        errorPayload(
+          "invalid_upload_length",
+          "The upload Content-Length header is invalid.",
+          requestId,
+        ),
+        400,
+        corsOrigin,
         requestId,
-      ),
-      411,
-      corsOrigin,
-      requestId,
-    );
-  }
-  if (contentLength > maxBytes) {
-    logEvent(requestId, "upload.rejected", {
-      code: "upload_too_large",
-      content_length: contentLength,
-    });
-    return jsonResponse(
-      errorPayload("upload_too_large", `Upload exceeds ${maxBytes} bytes.`, requestId),
-      413,
-      corsOrigin,
-      requestId,
-    );
+      );
+    }
+    if (contentLength > maxBytes) {
+      logEvent(requestId, "upload.rejected", {
+        code: "upload_too_large",
+        content_length: contentLength,
+      });
+      return jsonResponse(
+        errorPayload("upload_too_large", `Upload exceeds ${maxBytes} bytes.`, requestId),
+        413,
+        corsOrigin,
+        requestId,
+      );
+    }
   }
 
   const target = new URL(bridgeBase);

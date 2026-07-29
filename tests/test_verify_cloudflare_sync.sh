@@ -18,6 +18,7 @@ routes = [
   { pattern = "example.com/tool-schemas", zone_name = "example.com" },
   { pattern = "example.com/execute-tool", zone_name = "example.com" },
   { pattern = "example.com/responses/*", zone_name = "example.com" },
+  { pattern = "example.com/upload/*", zone_name = "example.com" },
 ]
 
 [vars]
