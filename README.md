@@ -387,9 +387,15 @@ It deploys API routes only; it does **not** deploy `webrtc_client.html` or
    ```bash
    python scripts/validate_wrangler_config.py wrangler.toml.example
    node --test tests/test_worker_auth.mjs
+   ./scripts/verify_cloudflare_sync.sh wrangler.toml
    wrangler deploy
    curl https://YOUR_DOMAIN/health
    ```
+
+   The sync validator checks the expected API routes and required `[vars]`
+   bindings in the manifest, confirms required remote secret names through
+   Wrangler without reading their values, and prints the Cloudflare Access
+   application/policy checks that must be confirmed in Zero Trust.
 
 Only `GET /health` and CORS preflight are public. `/session`, `/token`,
 `/tool-schemas`, `/execute-tool`, and `/responses/*` require a valid Cloudflare

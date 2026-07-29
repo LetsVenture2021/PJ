@@ -10,7 +10,8 @@
   "scripts": {
     "format:check": "prettier --check pj_realtime_backend_worker.js tests/test_worker_auth.mjs",
     "lint": "eslint pj_realtime_backend_worker.js tests/test_worker_auth.mjs",
-    "test": "node --test tests/test_worker_auth.mjs"
+    "test": "node --test tests/test_worker_auth.mjs && npm run test:deployment",
+    "test:deployment": "bash tests/test_verify_cloudflare_sync.sh"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
