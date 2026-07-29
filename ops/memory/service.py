@@ -80,8 +80,19 @@ class MemoryService:
         return self.store.update(memory_id, pinned=int(bool(pinned)))
 
     def expire(self, memory_id, when=None):
-        return self.store.update(memory_id, expires_at=when or utc_now())
-
+        if when is None:
+            expires_at = utc_now()
+        else:
+            if not isinstance(when, str):
+                raise ValueError("expires_at must be an ISO-8601 string")
+            try:
+                parsed = datetime.fromisoformat(when.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError("expires_at must be an ISO-8601 datetime") from exc
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            expires_at = parsed.astimezone(timezone.utc).isoformat()
+        return self.store.update(memory_id, expires_at=expires_at)
     def forget(self, memory_id):
         return self.store.delete(memory_id)
 
