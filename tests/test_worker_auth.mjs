@@ -20,6 +20,23 @@ const webUtilsModule = await import(
   `data:text/javascript;base64,${Buffer.from(webUtilsSource).toString("base64")}`
 );
 
+test("browser visual capture is permissioned, bounded, revocable, and ephemeral by default", () => {
+  assert.match(webClientSource, /getUserMedia\(/);
+  assert.match(webClientSource, /getDisplayMedia\(/);
+  assert.match(webClientSource, /NotAllowedError/);
+  assert.match(webClientSource, /addEventListener\("ended"/);
+  assert.match(webClientSource, /intervalMs: 2000/);
+  assert.match(webClientSource, /width: 1280, height: 720/);
+  assert.match(webClientSource, /bytes: 8_000_000, durationMs: 120_000/);
+  assert.match(webClientSource, /visualTaskActive\.checked/);
+  assert.match(
+    webClientSource,
+    /retention: el\.retainCapture\.checked \? "retain" : "ephemeral"/,
+  );
+  assert.match(webClientSource, /captureOverlay\.replaceChildren\(\)/);
+  assert.doesNotMatch(webClientSource, /captureOverlay\.innerHTML/);
+});
+
 const {
   bridgeHeaders,
   buildCollaborationConfig,
