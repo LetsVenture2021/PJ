@@ -187,13 +187,14 @@ test("prompt perfecting is an authenticated Full Power bridge route", () => {
 
 test("upload proxy forwards bounded multipart bodies with allowlisted headers", async () => {
   let captured = null;
-  const body = "--boundary\r\ncontent\r\n--boundary--\r\n";
+  const body = new FormData();
+  body.append("session_id", "session_upload_123");
+  body.append("paths", "project/brief.txt");
+  body.append("files", new Blob(["content"], { type: "text/plain" }), "brief.txt");
   const response = await handleUploadProxy(
     new Request("https://pj-assistant.ai/upload/folder", {
       method: "POST",
       headers: {
-        "content-type": "multipart/form-data; boundary=boundary",
-        "content-length": String(Buffer.byteLength(body)),
         "x-pj-session-id": "session_upload_123",
       },
       body,
@@ -215,6 +216,7 @@ test("upload proxy forwards bounded multipart bodies with allowlisted headers", 
   );
 
   assert.equal(captured.url, "https://tools.pj-assistant.ai/upload/folder");
+  assert.equal(captured.options.body instanceof ReadableStream, true);
   assert.equal(
     captured.options.headers.authorization,
     bridgeHeaders({ PJ_TOOL_BRIDGE_TOKEN: "bridge-secret" }, "request-upload").authorization,
@@ -225,23 +227,27 @@ test("upload proxy forwards bounded multipart bodies with allowlisted headers", 
   assert.equal((await response.json()).count, 1);
 });
 
-test("upload proxy rejects missing or oversized content lengths", async () => {
+test("upload proxy rejects invalid or oversized declared content lengths", async () => {
   const proxyEnv = {
     PJ_TOOL_BRIDGE_URL: "https://tools.pj-assistant.ai/execute-tool",
     PJ_TOOL_BRIDGE_TOKEN: "bridge-secret",
     PJ_MAX_UPLOAD_BYTES: "10",
   };
-  const missing = await handleUploadProxy(
+  const invalid = await handleUploadProxy(
     new Request("https://pj-assistant.ai/upload/files", {
       method: "POST",
-      headers: { "content-type": "multipart/form-data; boundary=boundary" },
+      headers: {
+        "content-type": "multipart/form-data; boundary=boundary",
+        "content-length": "invalid",
+      },
       body: "body",
     }),
     proxyEnv,
     "https://pj-assistant.ai",
-    "request-upload-missing",
+    "request-upload-invalid",
   );
-  assert.equal(missing.status, 411);
+  assert.equal(invalid.status, 400);
+  assert.equal((await invalid.json()).error.code, "invalid_upload_length");
 
   const oversized = await handleUploadProxy(
     new Request("https://pj-assistant.ai/upload/files", {
