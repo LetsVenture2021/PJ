@@ -69,8 +69,10 @@ ARTIFACTS_DIR.mkdir(exist_ok=True)
 # Markers that block finalization (unresolved facts / legal checks).
 BLOCKING_MARKERS = ["[TBD", "[VERIFY CURRENT]", "{{", "TODO:"]
 
-# Starter templates installed on first run.
-_SEED_TEMPLATES = {
+# Starter templates installed on first run.  The governed definitions live in
+# ``ops/docs/templates/manifest-v1.json``; keeping the original templates here
+# preserves compatibility for installations which predate the manifest.
+_LEGACY_SEED_TEMPLATES = {
     "executive_brief": {
         "description": "Decision-ready executive brief",
         "sections": [
@@ -127,6 +129,37 @@ _SEED_TEMPLATES = {
         "optional_sections": [],
     },
 }
+
+
+_TEMPLATE_MANIFEST_PATH = Path(__file__).with_name("templates") / "manifest-v1.json"
+
+
+def _load_seed_templates() -> dict:
+    """Load the checked-in, versioned template registry.
+
+    The SQLite representation intentionally remains the small runtime shape
+    used by existing callers.  Governance metadata (section rationale,
+    requirement level, and conditional rules) remains losslessly available in
+    the manifest rather than being squeezed into legacy columns.
+    """
+    manifest = json.loads(_TEMPLATE_MANIFEST_PATH.read_text(encoding="utf-8"))
+    templates = {}
+    for template in manifest["templates"]:
+        sections = template["sections"]
+        templates[template["id"]] = {
+            "description": template["description"],
+            "version": int(template["version"]),
+            "sections": [
+                section["name"] for section in sections if section["requirement"] == "required"
+            ],
+            "optional_sections": [
+                section["name"] for section in sections if section["requirement"] != "required"
+            ],
+        }
+    return {**_LEGACY_SEED_TEMPLATES, **templates}
+
+
+_SEED_TEMPLATES = _load_seed_templates()
 
 
 def _normalize_alias_key(value: str) -> str:
