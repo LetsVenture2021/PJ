@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pj.local/schemas/documents/document-metadata-v1.json",
+  "title": "PJ document metadata",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["document_id", "path", "class", "owner", "audience", "classification", "status", "sha256"],
+  "properties": {
+    "document_id": {"type": "string", "pattern": "^[A-Z]+-[A-Za-z0-9._-]+$"},
+    "path": {"type": "string", "pattern": "^(docs|documents)/"},
+    "class": {"enum": ["business", "operational", "technical", "audit", "corpus", "evidence"]},
+    "owner": {"type": "string", "minLength": 1},
+    "audience": {"type": "string", "minLength": 1},
+    "classification": {"enum": ["public", "internal", "restricted"]},
+    "status": {"enum": ["draft", "in_review", "approved", "superseded", "retired"]},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "review_interval_days": {"type": "integer", "minimum": 1},
+    "source_of_truth": {"type": "boolean"}
+  }
+}
