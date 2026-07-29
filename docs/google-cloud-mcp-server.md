@@ -24,13 +24,17 @@ account only the read roles needed for the enabled tools, typically Project
 Viewer (`roles/browser`) and Cloud Run Viewer (`roles/run.viewer`), scoped as
 narrowly as possible.
 
-For local development, authenticate with the Google Cloud CLI and export its
-short-lived token without writing it to a repository file:
+For local development, authenticate with the Google Cloud CLI and provide the
+short-lived token through the process environment without writing it to a
+repository file:
 
 ```bash
-export GOOGLE_CLOUD_ACCESS_TOKEN="$(gcloud auth application-default print-access-token)"
 python google_cloud_mcp_server.py
 ```
+
+Before starting the server, set `GOOGLE_CLOUD_ACCESS_TOKEN` in the shell from
+`gcloud auth application-default print-access-token`. Do not write the token to
+a repository file or include it in checked-in examples.
 
 Do not use a long-lived service-account key. The token is read only from the
 process environment and is never accepted as MCP tool input or included in a
@@ -64,7 +68,6 @@ entry so the attached service account is used.
       "command": "python",
       "args": ["/absolute/path/to/PJ/google_cloud_mcp_server.py"],
       "env": {
-        "GOOGLE_CLOUD_ACCESS_TOKEN": "${GOOGLE_CLOUD_ACCESS_TOKEN}",
         "PJ_CONFIG__GOOGLE_CLOUD__PROJECT": "\"my-project-id\""
       }
     }
@@ -72,8 +75,9 @@ entry so the attached service account is used.
 }
 ```
 
-If the MCP client does not interpolate variables, start it from a shell where
-the token is already exported. Never paste a token into checked-in JSON.
+For local development, start the MCP client from a shell where
+`GOOGLE_CLOUD_ACCESS_TOKEN` is already set. Never paste a token into checked-in
+JSON.
 
 PJ's `mcp_servers.json` also retains a disabled remote HTTP template. Use that
 template only after placing this stdio implementation behind an authenticated,
