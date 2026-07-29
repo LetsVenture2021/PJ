@@ -50,6 +50,11 @@ from pathlib import Path
 import fcntl
 import presentationops
 from ops.shared.io import atomic_copy, sha256_file
+from ops.docs.quality import (
+    VALIDATOR_VERSION as QUALITY_VALIDATOR_VERSION,
+    QualityProfile,
+    validate_document as _validate_quality_text,
+)
 
 try:
     import markdown as _markdown
@@ -233,6 +238,27 @@ def _db():
             finalized_at TEXT,
             PRIMARY KEY (doc_id, version)
         )""")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(docops_documents)")}
+        for name in ("quality_report_digest", "quality_validator_version"):
+            if name not in columns:
+                conn.execute(f"ALTER TABLE docops_documents ADD COLUMN {name} TEXT")
+        conn.execute("""CREATE TABLE IF NOT EXISTS docops_quality_reports (
+            report_digest TEXT PRIMARY KEY,
+            doc_id TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            source_hash TEXT NOT NULL,
+            profile_name TEXT NOT NULL,
+            profile_digest TEXT NOT NULL,
+            template_version INTEGER NOT NULL,
+            validator_version TEXT NOT NULL,
+            dependencies_digest TEXT NOT NULL,
+            passing INTEGER NOT NULL,
+            report_json TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )""")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_docops_quality_latest ON docops_quality_reports(doc_id, version, created_at)"
+        )
         conn.execute("""CREATE TABLE IF NOT EXISTS docops_template_aliases (
             alias_key TEXT PRIMARY KEY,
             alias_raw TEXT NOT NULL,
@@ -311,6 +337,22 @@ def _now():
 
 def _hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _quality_profile(value, required_sections=()) -> QualityProfile:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            value = {"name": value}
+    data = dict(value or {}) if isinstance(value, dict) else value
+    if isinstance(data, dict) and required_sections and "required_sections" not in data:
+        data["required_sections"] = list(required_sections)
+    return QualityProfile.from_value(data)
+
+
+def _profile_digest(profile: QualityProfile) -> str:
+    return _hash(json.dumps(profile.digest_payload(), sort_keys=True, separators=(",", ":")))
 
 
 def _slug(text: str) -> str:
@@ -1411,12 +1453,120 @@ def get_presentation_spec(doc_id: str, version: int = 0) -> dict:
     }
 
 
-def finalize_document(doc_id: str) -> dict:
+def validate_document(
+    doc_id: str,
+    version: int = 0,
+    profile_json: str = "",
+    approval_record_json: str = "",
+) -> dict:
+    """Validate and persist a quality decision for an exact governed source."""
+    try:
+        profile_value = json.loads(profile_json) if profile_json else None
+        approval = json.loads(approval_record_json) if approval_record_json else None
+    except json.JSONDecodeError:
+        return {"error": "profile_json and approval_record_json must contain valid JSON"}
+    with _db() as conn:
+        rows = conn.execute(
+            "SELECT version, path, sha256, template, template_version FROM docops_documents WHERE doc_id=? ORDER BY version",
+            (doc_id,),
+        ).fetchall()
+        if not rows:
+            return {"error": f"unknown doc_id '{doc_id}'"}
+        row = next((item for item in rows if item[0] == version), None) if version else rows[-1]
+        if row is None:
+            return {"error": f"version {version} not found"}
+        ver, path, stored_hash, template, template_version = row
+        source = Path(path)
+        if not source.is_file():
+            return {"error": f"file missing: {path}"}
+        text = source.read_text()
+        if _hash(text) != stored_hash:
+            return {"status": "blocked", "reason": "source hash integrity mismatch"}
+        template_row = conn.execute(
+            "SELECT sections FROM docops_templates WHERE name=?", (template,)
+        ).fetchone()
+        required = json.loads(template_row[0]) if template_row else ()
+        profile = _quality_profile(profile_value, required)
+        dependencies_digest = _hash(json.dumps(profile.source_dependencies, sort_keys=True))
+        report = _validate_quality_text(
+            text,
+            profile,
+            {
+                "artifact_type": "presentation" if template == "slide_presentation" else "markdown",
+                "approval_record": approval,
+                "source_dependencies": profile.source_dependencies,
+            },
+        )
+        result = report.to_dict()
+        conn.execute(
+            "INSERT OR REPLACE INTO docops_quality_reports (report_digest, doc_id, version, source_hash, profile_name, profile_digest, template_version, validator_version, dependencies_digest, passing, report_json, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                report.report_digest,
+                doc_id,
+                ver,
+                report.source_hash,
+                profile.name,
+                _profile_digest(profile),
+                template_version,
+                report.validator_version,
+                dependencies_digest,
+                int(report.passing),
+                json.dumps(result, default=str),
+                report.created_at,
+            ),
+        )
+    result.update({"doc_id": doc_id, "version": ver})
+    return result
+
+
+def validate_library(profile_json: str = "") -> dict:
+    """Validate the latest version of every registered document."""
+    with _db() as conn:
+        doc_ids = [
+            row[0]
+            for row in conn.execute("SELECT DISTINCT doc_id FROM docops_documents ORDER BY doc_id")
+        ]
+    reports = [validate_document(doc_id, profile_json=profile_json) for doc_id in doc_ids]
+    return {
+        "documents": len(reports),
+        "passing": sum(bool(r.get("passing")) for r in reports),
+        "reports": reports,
+    }
+
+
+def get_quality_report(doc_id: str, version: int = 0, profile: str = "") -> dict:
+    """Return the latest persisted report without re-running validation."""
+    with _db() as conn:
+        params: list = [doc_id]
+        where = "doc_id=?"
+        if version:
+            where += " AND version=?"
+            params.append(version)
+        if profile:
+            where += " AND profile_name=?"
+            params.append(profile)
+        row = conn.execute(
+            f"SELECT report_json FROM docops_quality_reports WHERE {where} ORDER BY created_at DESC LIMIT 1",
+            params,
+        ).fetchone()
+    return json.loads(row[0]) if row else {"error": "no quality report found"}
+
+
+def finalize_document(doc_id: str, profile_json: str = "", approval_record_json: str = "") -> dict:
     """Review gate: mark the latest version FINAL and seal its hash.
 
     Blocks if unresolved [TBD]/[VERIFY CURRENT]/{{placeholder}}/TODO
     markers remain, or if the file was modified outside DocOps.
     """
+    quality = validate_document(
+        doc_id, profile_json=profile_json, approval_record_json=approval_record_json
+    )
+    if not quality.get("passing"):
+        return {
+            "status": "blocked",
+            "reason": "a recent passing quality report is required for the exact source and profile",
+            "quality_report": quality,
+        }
     with _db() as conn:
         row = conn.execute(
             "SELECT version, path, sha256, status FROM docops_documents "
@@ -1436,6 +1586,24 @@ def finalize_document(doc_id: str) -> dict:
                 "reason": (
                     "file was modified outside DocOps; use revise_document to issue a new version"
                 ),
+            }
+        report_row = conn.execute(
+            "SELECT report_digest, source_hash, validator_version, created_at "
+            "FROM docops_quality_reports WHERE report_digest=? AND doc_id=? "
+            "AND version=? AND passing=1",
+            (quality["report_digest"], doc_id, version),
+        ).fetchone()
+        if not report_row or report_row[1] != sha or report_row[2] != QUALITY_VALIDATOR_VERSION:
+            return {
+                "status": "blocked",
+                "reason": "quality report does not match source hash, profile, or validator version",
+            }
+        profile = _quality_profile(json.loads(profile_json) if profile_json else None)
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(report_row[3])
+        if age.total_seconds() > profile.max_report_age_seconds:
+            return {
+                "status": "blocked",
+                "reason": "quality report is stale; revalidation is required",
             }
         spec_row = conn.execute(
             "SELECT spec_json, spec_sha256 "
@@ -1485,8 +1653,9 @@ def finalize_document(doc_id: str) -> dict:
             new_sha = _hash(content)
             conn.execute(
                 "UPDATE docops_documents SET status='final', sha256=?, "
-                "finalized_at=? WHERE doc_id=? AND version=?",
-                (new_sha, _now(), doc_id, version),
+                "finalized_at=?, quality_report_digest=?, quality_validator_version=? "
+                "WHERE doc_id=? AND version=?",
+                (new_sha, _now(), report_row[0], report_row[2], doc_id, version),
             )
             result = {
                 "doc_id": doc_id,
@@ -2890,6 +3059,51 @@ DOCOPS_SCHEMAS = [
     },
     {
         "type": "function",
+        "name": "validate_document",
+        "description": "Run all pure quality controls and persist the report for an exact source hash and profile.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "doc_id": {"type": "string"},
+                "version": {"type": "integer"},
+                "profile_json": {
+                    "type": "string",
+                    "description": "Optional JSON QualityProfile configuration",
+                },
+                "approval_record_json": {
+                    "type": "string",
+                    "description": "Explicit approval record JSON required for high-impact profiles",
+                },
+            },
+            "required": ["doc_id"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "validate_library",
+        "description": "Validate the latest source for every document in the governed library.",
+        "parameters": {
+            "type": "object",
+            "properties": {"profile_json": {"type": "string"}},
+            "required": [],
+        },
+    },
+    {
+        "type": "function",
+        "name": "get_quality_report",
+        "description": "Retrieve the latest persisted quality report without revalidation.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "doc_id": {"type": "string"},
+                "version": {"type": "integer"},
+                "profile": {"type": "string"},
+            },
+            "required": ["doc_id"],
+        },
+    },
+    {
+        "type": "function",
         "name": "finalize_document",
         "description": (
             "Review gate: seal the latest version as FINAL. Blocks "
@@ -2899,7 +3113,11 @@ DOCOPS_SCHEMAS = [
         ),
         "parameters": {
             "type": "object",
-            "properties": {"doc_id": {"type": "string"}},
+            "properties": {
+                "doc_id": {"type": "string"},
+                "profile_json": {"type": "string"},
+                "approval_record_json": {"type": "string"},
+            },
             "required": ["doc_id"],
         },
     },
@@ -2985,6 +3203,9 @@ DOCOPS_DISPATCH = {
     "draft_presentation": draft_presentation,
     "revise_presentation": revise_presentation,
     "get_presentation_spec": get_presentation_spec,
+    "validate_document": validate_document,
+    "validate_library": validate_library,
+    "get_quality_report": get_quality_report,
     "finalize_document": finalize_document,
     "export_document": export_document,
     "list_export_artifacts": list_export_artifacts,

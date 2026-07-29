@@ -10,13 +10,17 @@ from .service import (
     finalize_document,
     get_document,
     get_presentation_spec,
+    get_quality_report,
     list_doc_templates,
     list_documents,
     list_export_artifacts,
     resolve_export_artifact,
     revise_document,
     revise_presentation,
+    validate_document,
+    validate_library,
 )
+from .quality import ControlResult, QualityFinding, QualityProfile, QualityReport, Severity
 
 __all__ = [
     "DOCOPS_DISPATCH",
@@ -28,10 +32,18 @@ __all__ = [
     "finalize_document",
     "get_document",
     "get_presentation_spec",
+    "get_quality_report",
     "list_doc_templates",
     "list_documents",
     "list_export_artifacts",
     "resolve_export_artifact",
     "revise_document",
     "revise_presentation",
+    "validate_document",
+    "validate_library",
+    "ControlResult",
+    "QualityFinding",
+    "QualityProfile",
+    "QualityReport",
+    "Severity",
 ]
