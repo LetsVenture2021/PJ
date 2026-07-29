@@ -65,7 +65,40 @@ const {
   validateAccessIdentity,
   validateProtocolRequest,
 } = workerModule;
-const { parseErrorBody } = webUtilsModule;
+const { fetchWithTimeout: browserFetchWithTimeout, parseErrorBody } = webUtilsModule;
+
+test("browser fetch timeout preserves caller cancellation", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (_url, options) =>
+    new Promise((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+    });
+  try {
+    const caller = new AbortController();
+    const request = browserFetchWithTimeout("https://example.invalid", { signal: caller.signal });
+    const reason = new DOMException("View closed", "AbortError");
+    caller.abort(reason);
+    await assert.rejects(request, (error) => error === reason);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("browser fetch timeout aborts stalled requests with a typed reason", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (_url, options) =>
+    new Promise((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+    });
+  try {
+    await assert.rejects(
+      browserFetchWithTimeout("https://example.invalid", {}, 1),
+      (error) => error?.name === "TimeoutError",
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
 
 const TEAM_DOMAIN = "pj-owner-tests.cloudflareaccess.com";
 const ISSUER = `https://${TEAM_DOMAIN}`;
