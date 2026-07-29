@@ -227,6 +227,29 @@ test("upload proxy forwards bounded multipart bodies with allowlisted headers", 
   assert.equal((await response.json()).count, 1);
 });
 
+test("upload proxy maps a non-JSON bridge body to upload_edge_challenged", async () => {
+  const body = new FormData();
+  body.append("files", new Blob(["content"], { type: "text/plain" }), "brief.txt");
+  const response = await handleUploadProxy(
+    new Request("https://pj-assistant.ai/upload/files", { method: "POST", body }),
+    {
+      PJ_TOOL_BRIDGE_URL: "https://tools.pj-assistant.ai/execute-tool",
+      PJ_TOOL_BRIDGE_TOKEN: "bridge-secret",
+    },
+    "https://pj-assistant.ai",
+    "request-upload-challenged",
+    async () =>
+      new Response("<!DOCTYPE html><html><title>Just a moment...</title></html>", {
+        status: 403,
+        headers: { "content-type": "text/html; charset=UTF-8" },
+      }),
+  );
+
+  assert.equal(response.status, 502);
+  const payload = await response.json();
+  assert.equal(payload.error.code, "upload_edge_challenged");
+});
+
 test("upload proxy rejects invalid or oversized declared content lengths", async () => {
   const proxyEnv = {
     PJ_TOOL_BRIDGE_URL: "https://tools.pj-assistant.ai/execute-tool",

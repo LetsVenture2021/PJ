@@ -680,6 +680,18 @@
       return headers;
     }
 
+    function formatBytes(bytes) {
+      if (!Number.isFinite(bytes) || bytes < 0) return "0 B";
+      const units = ["B", "KB", "MB", "GB"];
+      let value = bytes;
+      let unit = 0;
+      while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit += 1;
+      }
+      return `${unit === 0 ? value : value.toFixed(1)} ${units[unit]}`;
+    }
+
     function setUploadBusy(busy) {
       state.uploadBusy = busy;
       el.composerFilesBtn.disabled = busy;
@@ -731,13 +743,39 @@
             xhr.setRequestHeader(name, value);
           }
           xhr.setRequestHeader("x-pj-session-id", uploadSessionId());
+
+          // Watchdog: an upload with no activity for 30s becomes a terminal
+          // error instead of a bubble that spins until the 120s timeout.
+          let lastActivity = performance.now();
+          const watchdog = setInterval(() => {
+            if (performance.now() - lastActivity > 30000) {
+              clearInterval(watchdog);
+              xhr.abort();
+              reject(new Error(
+                "Upload stalled for 30 seconds without progress (upload_no_terminal_state).",
+              ));
+            }
+          }, 5000);
+          const settle = (fn) => (value) => { clearInterval(watchdog); fn(value); };
+          const settleResolve = settle(resolve);
+          const settleReject = settle(reject);
+
           xhr.upload.addEventListener("progress", (event) => {
+            lastActivity = performance.now();
             if (event.lengthComputable) {
               const pct = Math.round((event.loaded / event.total) * 100);
               statusBubble.textContent = `Uploading ${label}... ${pct}%`;
             }
           });
           xhr.addEventListener("load", () => {
+            const responseType = (xhr.getResponseHeader("content-type") || "").toLowerCase();
+            if (responseType.includes("text/html") || /^\s*</.test(xhr.responseText || "")) {
+              settleReject(new Error(
+                "Upload blocked before reaching PJ (upload_edge_challenged): the edge " +
+                "returned an HTML challenge page. Verify the WAF skip rule covers /upload/*.",
+              ));
+              return;
+            }
             let payload;
             try {
               payload = xhr.responseText ? JSON.parse(xhr.responseText) : {};
@@ -746,18 +784,24 @@
                 payload,
               );
             } catch (_) {
-              reject(new Error("Upload response was not valid PJ JSON."));
+              settleReject(new Error("Upload response was not valid PJ JSON."));
               return;
             }
             if (xhr.status < 200 || xhr.status >= 300) {
               const detail = parseErrorBody(xhr.responseText);
-              reject(new Error(`Upload failed (${xhr.status})${detail ? `: ${detail}` : ""}`));
+              settleReject(
+                new Error(`Upload failed (${xhr.status})${detail ? `: ${detail}` : ""}`),
+              );
               return;
             }
-            resolve(payload);
+            settleResolve(payload);
           });
-          xhr.addEventListener("error", () => reject(new Error("Upload network request failed.")));
-          xhr.addEventListener("timeout", () => reject(new Error("Upload request timed out.")));
+          xhr.addEventListener("error", () => settleReject(new Error(
+            "Upload network request failed (upload_bridge_unreachable).",
+          )));
+          xhr.addEventListener("timeout", () => settleReject(new Error(
+            "Upload request timed out (upload_no_terminal_state).",
+          )));
           xhr.send(form);
         });
 

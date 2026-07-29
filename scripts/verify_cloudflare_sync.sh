@@ -26,6 +26,18 @@ REQUIRED_SECRETS=(
   "PJ_TOOL_BRIDGE_TOKEN"
 )
 
+# Paths the zone's WAF custom skip rule must exempt from challenge products on
+# the bridge hostname. Worker subrequests cannot answer bot challenges, so a
+# missing path fails silently: the client reports work in progress and nothing
+# reaches the runtime.
+EXPECTED_WAF_SKIP_PATHS=(
+  "/execute-tool"
+  "/tool-schemas"
+  "/health"
+  "/responses/"
+  "/upload/"
+)
+
 usage() {
   cat <<'EOF'
 Usage: scripts/verify_cloudflare_sync.sh [wrangler-config]
@@ -59,6 +71,60 @@ pass() {
 fail() {
   printf 'FAIL: %s\n' "$1" >&2
   error_count=$((error_count + 1))
+}
+
+print_waf_checklist() {
+  cat <<'EOF'
+
+WAF challenge-skip checklist (manual):
+  [ ] A custom WAF skip rule covers the bridge hostname's authenticated paths:
+      /execute-tool, /tool-schemas, /health, /responses/*, and /upload/*.
+  [ ] The rule skips the challenge-issuing products in use (for example Super
+      Bot Fight Mode) so Worker subrequests are never challenged.
+
+Set CLOUDFLARE_API_TOKEN and PJ_CLOUDFLARE_ZONE_ID to check the deployed rule
+automatically.
+EOF
+}
+
+check_waf_skip_rule() {
+  if [[ -z "${CLOUDFLARE_API_TOKEN:-}" || -z "${PJ_CLOUDFLARE_ZONE_ID:-}" ]]; then
+    print_waf_checklist
+    return
+  fi
+  local api="https://api.cloudflare.com/client/v4/zones/${PJ_CLOUDFLARE_ZONE_ID}/rulesets"
+  local ruleset_id
+  ruleset_id="$(
+    curl -sf -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api" |
+      python3 -c '
+import json, sys
+for ruleset in json.load(sys.stdin).get("result") or []:
+    if ruleset.get("phase") == "http_request_firewall_custom":
+        print(ruleset["id"])
+        break
+' 2>/dev/null
+  )" || true
+  if [[ -z "$ruleset_id" ]]; then
+    fail "Could not read the zone's custom WAF ruleset with CLOUDFLARE_API_TOKEN"
+    return
+  fi
+  local expressions
+  expressions="$(
+    curl -sf -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" "$api/$ruleset_id" |
+      python3 -c '
+import json, sys
+for rule in (json.load(sys.stdin).get("result") or {}).get("rules") or []:
+    if rule.get("action") == "skip" and rule.get("enabled"):
+        print(rule.get("expression", ""))
+' 2>/dev/null
+  )" || true
+  for waf_path in "${EXPECTED_WAF_SKIP_PATHS[@]}"; do
+    if printf '%s' "$expressions" | grep -Fq -- "$waf_path"; then
+      pass "WAF skip rule covers bridge path: $waf_path"
+    else
+      fail "WAF skip rule is missing bridge path: $waf_path"
+    fi
+  done
 }
 
 print_access_checklist() {
@@ -186,6 +252,7 @@ if [[ "$wrangler_available" == true ]]; then
   fi
 fi
 
+check_waf_skip_rule
 print_access_checklist
 
 if (( error_count > 0 )); then

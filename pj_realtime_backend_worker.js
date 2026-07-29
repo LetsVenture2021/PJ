@@ -934,6 +934,26 @@ async function handleUploadProxy(request, env, corsOrigin, requestId, fetchImpl 
       headers,
       body: request.body,
     });
+    const bridgeContentType = (bridgeResponse.headers.get("content-type") || "").toLowerCase();
+    if (!bridgeContentType.includes("application/json")) {
+      // A non-JSON bridge body is an edge security interstitial (for example a
+      // bot challenge the Worker cannot answer), not a runtime response.
+      logEvent(requestId, "upload.rejected", {
+        code: "upload_edge_challenged",
+        status: bridgeResponse.status,
+      });
+      return jsonResponse(
+        errorPayload(
+          "upload_edge_challenged",
+          "The upload bridge returned a non-JSON response, most likely an edge " +
+            "security challenge. Verify the WAF skip rule covers /upload/*.",
+          requestId,
+        ),
+        502,
+        corsOrigin,
+        requestId,
+      );
+    }
     logEvent(requestId, "upload.bridge_complete", {
       path: inboundUrl.pathname,
       status: bridgeResponse.status,
