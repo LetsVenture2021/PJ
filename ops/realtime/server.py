@@ -63,6 +63,7 @@ from ops.shared.logging import (
     set_log_context,
 )
 from ops.realtime.payload_validation import (
+    MAX_MESSAGE_LENGTH,
     RealtimePayloadValidationError,
     validate_inbound_payload,
     validate_outbound_event,
@@ -88,7 +89,6 @@ from responses_runtime import (
 BASE_DIR = Path(__file__).resolve().parents[2]
 MAX_ERROR_DETAIL_LENGTH = 320
 MAX_SESSION_TITLE_LENGTH = 120
-MAX_MESSAGE_LENGTH = 20000
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 ARTIFACT_ID_PATTERN = re.compile(r"^ART-[a-f0-9]{32}$")
 SCHEMA_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
@@ -2019,6 +2019,64 @@ def artifact_preview(session_id, artifact_id):
             ARTIFACT_FACADE.preview(artifact_id, project_id=None, session_id=session_id),
             req_id=req_id,
         )
+    except ArtifactError as exc:
+        return _error_response(exc.code, str(exc), 409, req_id)
+
+
+@app.route("/responses/sessions/<session_id>/artifacts/<artifact_id>/restore", methods=["POST"])
+def artifact_restore(session_id, artifact_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    _artifact, error = _facade_access(artifact_id, session_id, req_id)
+    if error:
+        return error
+    try:
+        restored = ARTIFACT_FACADE.restore(artifact_id, project_id=None, session_id=session_id)
+        chatlog.link_session_artifact(session_id, restored.artifact_id)
+        path = ARTIFACT_FACADE.verified_path(
+            restored.artifact_id, project_id=None, session_id=session_id
+        )
+        public_artifact = restored.as_dict() | {
+            "filename": path.name,
+            "format": path.suffix.removeprefix(".") or "bin",
+            "mime_type": restored.media_type,
+            "byte_size": path.stat().st_size,
+            "sha256": restored.content_hash,
+            "download_url": (
+                f"/responses/sessions/{session_id}/artifacts/{restored.artifact_id}/download"
+            ),
+        }
+        return _json_response({"artifact": public_artifact}, 201, req_id)
+    except ArtifactError as exc:
+        return _error_response(exc.code, str(exc), 409, req_id)
+
+
+@app.route("/responses/sessions/<session_id>/artifacts/compare", methods=["POST"])
+def artifact_compare(session_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    payload, error = _validated_json(
+        req_id,
+        allowed={"left_artifact_id", "right_artifact_id"},
+        required={"left_artifact_id", "right_artifact_id"},
+    )
+    if error:
+        return error
+    left_id = payload["left_artifact_id"]
+    right_id = payload["right_artifact_id"]
+    for artifact_id in (left_id, right_id):
+        _artifact, access_error = _facade_access(artifact_id, session_id, req_id)
+        if access_error:
+            return access_error
+    try:
+        comparison = ARTIFACT_FACADE.compare(
+            left_id, right_id, project_id=None, session_id=session_id
+        )
+        return _json_response({"comparison": comparison}, req_id=req_id)
     except ArtifactError as exc:
         return _error_response(exc.code, str(exc), 409, req_id)
 
