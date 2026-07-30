@@ -2033,7 +2033,7 @@
             type: "message",
             role: item.role,
             content: [{
-              type: item.role === "assistant" ? "output_text" : "input_text",
+              type: item.role === "assistant" ? "text" : "input_text",
               text: item.content,
             }],
           },
@@ -2485,17 +2485,25 @@
         let metadata = {};
         if (state.mode === MODE.FULL_POWER_VOICE) {
           setStatus("Refining prompt...", "live");
-          const perfected = await perfectPrompt(
-            message, "full_power_voice"
-          );
-          submitted = perfected.refined_prompt;
-          metadata = {
-            prompt_perfecting_version: perfected.version,
-            refined_prompt: perfected.refined_prompt.slice(0, 4000),
-            refined_prompt_truncated: perfected.refined_prompt.length > 4000,
-            refined_sha256: perfected.refined_sha256,
-            changed: perfected.changed,
-          };
+          try {
+            const perfected = await perfectPrompt(
+              message, "full_power_voice"
+            );
+            submitted = perfected.refined_prompt;
+            metadata = {
+              prompt_perfecting_version: perfected.version,
+              refined_prompt: perfected.refined_prompt.slice(0, 4000),
+              refined_prompt_truncated: perfected.refined_prompt.length > 4000,
+              refined_sha256: perfected.refined_sha256,
+              changed: perfected.changed,
+            };
+          } catch (perfectError) {
+            metadata = { prompt_perfecting_fallback: true };
+            appendBubble(
+              "system",
+              `Refinement unavailable; sending your original words: ${shorten(String(perfectError), 200)}`,
+            );
+          }
         }
         await persistRealtimeMessage({
           externalId,
@@ -3281,16 +3289,28 @@
       try {
         if (state.mode === MODE.FULL_POWER_VOICE) {
           setStatus("Refining transcript...", "live");
-          const perfected = await perfectPrompt(
-            transcript, "full_power_voice"
-          );
-          metadata = {
-            prompt_perfecting_version: perfected.version,
-            refined_prompt: perfected.refined_prompt.slice(0, 4000),
-            refined_prompt_truncated: perfected.refined_prompt.length > 4000,
-            refined_sha256: perfected.refined_sha256,
-            changed: perfected.changed,
-          };
+          let refinedText = null;
+          try {
+            const perfected = await perfectPrompt(
+              transcript, "full_power_voice"
+            );
+            metadata = {
+              prompt_perfecting_version: perfected.version,
+              refined_prompt: perfected.refined_prompt.slice(0, 4000),
+              refined_prompt_truncated: perfected.refined_prompt.length > 4000,
+              refined_sha256: perfected.refined_sha256,
+              changed: perfected.changed,
+            };
+            if (perfected.changed) {
+              refinedText = perfected.refined_prompt;
+            }
+          } catch (perfectError) {
+            metadata = { prompt_perfecting_fallback: true };
+            appendBubble(
+              "system",
+              `Refinement unavailable; responding to your original words: ${shorten(String(perfectError), 200)}`,
+            );
+          }
           await persistRealtimeMessage({
             externalId,
             role: "user",
@@ -3301,21 +3321,23 @@
           if (!state.dataChannel || state.dataChannel.readyState !== "open") {
             throw new Error("Realtime channel closed before transcript replacement.");
           }
-          sendRealtimeEvent({
-            type: "conversation.item.delete",
-            item_id: externalId,
-          });
-          sendRealtimeEvent({
-            type: "conversation.item.create",
-            item: {
-              type: "message",
-              role: "user",
-              content: [{
-                type: "input_text",
-                text: perfected.refined_prompt,
-              }],
-            },
-          });
+          if (refinedText !== null) {
+            sendRealtimeEvent({
+              type: "conversation.item.delete",
+              item_id: externalId,
+            });
+            sendRealtimeEvent({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{
+                  type: "input_text",
+                  text: refinedText,
+                }],
+              },
+            });
+          }
           requestResponse();
           setStatus("Live", "live");
           return;

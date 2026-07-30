@@ -148,6 +148,85 @@ class TestPromptOps(unittest.TestCase):
                 surface="cli",
             )
 
+    def test_optional_mode_repairs_missing_identifier_literals(self):
+        client = FakeClient({
+            "refined_prompt": "Deploy the release and review the runbook.",
+            "intent_summary": "Deploy a release.",
+            "constraints_preserved": [],
+        })
+        result = promptops.perfect_prompt(
+            client,
+            self.cfg,
+            "Deploy DOC-42 and review ART-79db2ae2433de6028bdcef155036f411.",
+            surface="full_power",
+            required=False,
+        )
+        self.assertIn("DOC-42", result["refined_prompt"])
+        self.assertIn(
+            "ART-79db2ae2433de6028bdcef155036f411", result["refined_prompt"]
+        )
+
+    def test_optional_mode_falls_back_when_semantic_literals_change(self):
+        client = FakeClient({
+            "refined_prompt": (
+                "Deploy DOC-42 on 2026-08-02 using 4 workers and review "
+                "https://example.test/runbook."
+            ),
+            "intent_summary": "Deploy a specific release.",
+            "constraints_preserved": [],
+        })
+        original = (
+            "Deploy DOC-42 on 2026-08-01 using 4 workers and review "
+            "https://example.test/runbook."
+        )
+        result = promptops.perfect_prompt(
+            client, self.cfg, original, surface="full_power", required=False
+        )
+        self.assertEqual(result["refined_prompt"], original)
+        self.assertFalse(result["changed"])
+
+    def test_optional_mode_skips_oversized_prompts_instead_of_failing(self):
+        cfg = {
+            **self.cfg,
+            "prompt_perfecting": {
+                **self.cfg["prompt_perfecting"],
+                "max_input_chars": 200,
+            },
+        }
+        original = "Summarize this. " + ("detail " * 60)
+        result = promptops.perfect_prompt(
+            FakeClient({}), cfg, original, surface="full_power", required=False
+        )
+        self.assertEqual(result["refined_prompt"], original.strip())
+        self.assertFalse(result["changed"])
+
+    def test_required_mode_still_rejects_oversized_prompts(self):
+        cfg = {
+            **self.cfg,
+            "prompt_perfecting": {
+                **self.cfg["prompt_perfecting"],
+                "max_input_chars": 200,
+            },
+        }
+        with self.assertRaises(promptops.PromptPerfectingError) as raised:
+            promptops.perfect_prompt(
+                FakeClient({}),
+                cfg,
+                "Summarize this. " + ("detail " * 60),
+                surface="full_power",
+            )
+        self.assertEqual(raised.exception.code, "prompt_too_large")
+
+    def test_fallback_result_returns_normalized_original(self):
+        result = promptops.fallback_result(
+            "  Keep DOC-42 intact.\r\n", "full_power", "Provider unavailable."
+        )
+        self.assertEqual(result["refined_prompt"], "Keep DOC-42 intact.")
+        self.assertFalse(result["changed"])
+        self.assertEqual(result["surface"], "full_power")
+        self.assertEqual(result["intent_summary"], "Provider unavailable.")
+        self.assertEqual(result["original_sha256"], result["refined_sha256"])
+
     def test_unexpected_programming_errors_are_not_masked_as_provider_errors(self):
         client = FakeClient({})
         client.responses.create = lambda **kwargs: (_ for _ in ()).throw(
