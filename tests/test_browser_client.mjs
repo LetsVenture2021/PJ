@@ -64,6 +64,30 @@ test("service worker uses a static allowlist and excludes private routes", async
   for (const privatePath of ["upload/files", "responses/", "artifacts", "transcript"]) {
     assert.doesNotMatch(allowlist, new RegExp(privatePath, "i"));
   }
+  assert.match(source, /fetch\(event\.request\)[\s\S]*\.catch\(\(\) => caches\.match/);
+});
+
+test("voice signaling falls back before validating a non-PJ origin error", async () => {
+  const html = await readFile(new URL("../webrtc_client.html", import.meta.url), "utf8");
+  assert.match(html, /status === 404 \|\| status === 405/);
+  const errorBranch = html.indexOf("if (!response.ok)", html.indexOf("const signalingUrl"));
+  const protocolCheck = html.indexOf("assertProtocolResponse(response);", errorBranch);
+  assert.ok(errorBranch > -1 && protocolCheck > errorBranch);
+  assert.match(html.slice(errorBranch, protocolCheck), /shouldUseEphemeralSignalingFallback/);
+});
+
+test("legacy public health cannot block versioned voice session startup", async () => {
+  const html = await readFile(new URL("../webrtc_client.html", import.meta.url), "utf8");
+  const healthStart = html.indexOf("async function checkBackendHealth");
+  const healthEnd = html.indexOf("function summarizeToolNames", healthStart);
+  const healthSource = html.slice(healthStart, healthEnd);
+  assert.match(healthSource, /if \(!parsed\.ok\)/);
+  assert.match(healthSource, /healthVersion !== null && healthVersion !== undefined/);
+  assert.match(healthSource, /assertProtocolResponse\(response, parsed\)/);
+
+  const sessionStart = html.indexOf("async function ensureActiveSession");
+  const sessionEnd = html.indexOf("async function loadSharedSessionHistory", sessionStart);
+  assert.match(html.slice(sessionStart, sessionEnd), /fetchJson/);
 });
 
 test("mobile, keyboard approval and reduced-motion accessibility hooks exist", async () => {

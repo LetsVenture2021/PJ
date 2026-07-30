@@ -1799,9 +1799,17 @@
       } catch (_) {
         parsed = {};
       }
-      assertProtocolResponse(response, parsed);
       if (!parsed.ok) {
         throw new Error("Backend health endpoint did not return ok=true.");
+      }
+      // /health is a public deployment/readiness probe and older edge health
+      // handlers returned only { ok: true }. Reject an explicitly incompatible
+      // version, but do not prevent voice startup solely because this public
+      // probe omitted its version marker. Authenticated session and signaling
+      // responses remain strict below.
+      const healthVersion = parsed.version ?? response.headers.get("x-pj-protocol-version");
+      if (healthVersion !== null && healthVersion !== undefined) {
+        assertProtocolResponse(response, parsed);
       }
       return parsed;
     }
@@ -2211,6 +2219,13 @@
     }
 
     function shouldUseEphemeralSignalingFallback(status, detail) {
+      // A 404/405 can be returned by a static-site origin when its Worker route
+      // has not propagated yet.  The separately routed /token endpoint still
+      // lets the browser negotiate directly with OpenAI using a short-lived
+      // client secret, so keep voice available without exposing the API key.
+      if (status === 404 || status === 405) {
+        return true;
+      }
       if (status >= 500 && status <= 599) {
         return true;
       }
@@ -2403,7 +2418,6 @@
         }, 35000);
 
         let answerSdp = await response.text();
-        assertProtocolResponse(response);
         if (!response.ok) {
           const detail = parseErrorBody(answerSdp);
           if (shouldUseEphemeralSignalingFallback(response.status, detail)) {
@@ -2413,6 +2427,11 @@
           } else {
             throw new Error(`Signaling failed (${response.status})${detail ? `: ${detail}` : ""}`);
           }
+        } else {
+          // Only PJ responses carry the protocol header. Origin/CDN error
+          // pages do not, and must reach the fallback decision above rather
+          // than being misreported as a protocol-version mismatch.
+          assertProtocolResponse(response);
         }
 
         if (state.activeStartRequestId !== requestId) {
