@@ -74,3 +74,31 @@ test("mobile, keyboard approval and reduced-motion accessibility hooks exist", a
   assert.match(html, /role="log"/);
   assert.match(html, /approval-actions/);
 });
+
+test("voice modes, long prompts, and document artifacts are reachable from the UI", async () => {
+  const html = await readFile(new URL("../webrtc_client.html", import.meta.url), "utf8");
+  assert.match(html, /id="fastVoiceModeBtn"/);
+  assert.match(html, /setMode\(MODE\.REALTIME\)/);
+  assert.match(html, /id="textInput" maxlength="100000"/);
+  assert.match(html, /Create a document/);
+  assert.match(html, /downloadable artifact/);
+});
+
+test("artifact and feature-context controls have executable handlers", async () => {
+  const html = await readFile(new URL("../webrtc_client.html", import.meta.url), "utf8");
+  for (const action of [
+    "preview",
+    "compare",
+    "restore-as-new",
+    "follow-up",
+    "minimize",
+    "remove",
+  ]) {
+    assert.match(html, new RegExp(`action === ["']${action}["']`));
+  }
+  assert.match(html, /perfectFeatureInput/);
+  assert.match(html, /id="addProjectSourcesBtn"/);
+  assert.match(html, /id="addProjectArtifactsBtn"/);
+  assert.match(html, /structuredOutputEnabled\.checked/);
+  assert.match(html, /state\.activeSessionId \|\| state\.fullPowerSessionId/);
+});
