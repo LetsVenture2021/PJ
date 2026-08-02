@@ -68,7 +68,7 @@ const DEFAULT_INSTRUCTIONS =
 function buildAllowedOrigins(env) {
   const raw =
     env.PJ_ALLOWED_ORIGINS ||
-    "https://pj-assistant.ai,https://www.pj-assistant.ai,http://localhost:3001,http://127.0.0.1:3001,http://localhost:5173,http://127.0.0.1:5173";
+    "https://pj-assistant.ai,https://www.pj-assistant.ai,https://canva.com,https://www.canva.com,http://localhost:3001,http://127.0.0.1:3001,http://localhost:5173,http://127.0.0.1:5173";
   return raw
     .split(",")
     .map((v) => v.trim())
@@ -99,7 +99,7 @@ function pickCorsOrigin(request, allowedOrigins) {
 }
 
 function corsHeaders(corsOrigin) {
-  return {
+  const headers = {
     "access-control-allow-origin": corsOrigin,
     "access-control-allow-methods": "GET,POST,OPTIONS",
     "access-control-allow-headers":
@@ -107,6 +107,10 @@ function corsHeaders(corsOrigin) {
     "access-control-expose-headers":
       "x-request-id,x-pj-contract-version,x-pj-protocol-version,content-disposition,content-length,etag",
   };
+  if (corsOrigin !== "*") {
+    headers["access-control-allow-credentials"] = "true";
+  }
+  return headers;
 }
 
 function responseHeaders(corsOrigin, requestId, contentType = "application/json") {

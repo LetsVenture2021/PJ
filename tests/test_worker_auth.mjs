@@ -785,6 +785,18 @@ test("privileged routes authenticate before performing work", async () => {
   assert.equal(payload.error.code, "access_authentication_required");
 });
 
+test("canva origin is allowed for authenticated routes", async () => {
+  const response = await worker.fetch(
+    new Request("https://pj-assistant.ai/future-full-power", {
+      headers: { Origin: "https://www.canva.com" },
+    }),
+    env,
+  );
+  assert.equal(response.status, 401);
+  const payload = await response.json();
+  assert.equal(payload.error.code, "access_authentication_required");
+});
+
 test("allowed origin is trusted even when referer is a different host", async () => {
   const response = await worker.fetch(
     new Request("https://pj-assistant.ai/future-full-power", {
@@ -887,6 +899,7 @@ test("all Worker responses use the hardened response header policy", () => {
   );
   assert.equal(headers["referrer-policy"], "no-referrer");
   assert.match(headers["access-control-expose-headers"], /content-disposition/);
+  assert.equal(headers["access-control-allow-credentials"], "true");
 });
 
 test("realtime excludes long-running tools and aligns bridge timeouts", () => {
@@ -1200,9 +1213,9 @@ test("browser module initializes with Full Power helpers in shared scope", async
     __testFetches: [],
     __directToolOutput: null,
     location: {
-      hostname: "localhost",
-      protocol: "http:",
-      origin: "http://localhost:3001",
+      hostname: "www.canva.com",
+      protocol: "https:",
+      origin: "https://www.canva.com",
     },
   };
   const localStorage = {
@@ -1233,6 +1246,7 @@ test("browser module initializes with Full Power helpers in shared scope", async
 
   const hooks = initialize(window, document, localStorage, navigator);
   assert.ok(hooks);
+  assert.equal(elements.get("apiBase").value, "https://pj-assistant.ai");
   assert.equal(hooks.shouldUseEphemeralSignalingFallback(500, ""), true);
   assert.equal(hooks.shouldUseEphemeralSignalingFallback(503, "gateway unavailable"), true);
   assert.equal(hooks.shouldUseEphemeralSignalingFallback(599, "upstream failure"), true);
