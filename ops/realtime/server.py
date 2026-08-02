@@ -2000,7 +2000,7 @@ def artifact_metadata(session_id, artifact_id):
             artifact = ARTIFACT_FACADE.tombstone(
                 artifact_id, project_id=None, session_id=session_id
             )
-        return _json_response({"artifact": artifact.as_dict()}, req_id=req_id)
+        return _json_response({"ok": True, "artifact": artifact.as_dict()}, req_id=req_id)
     except ArtifactError as exc:
         return _error_response(exc.code, str(exc), 409, req_id)
 
@@ -2016,7 +2016,12 @@ def artifact_preview(session_id, artifact_id):
         return error
     try:
         return _json_response(
-            ARTIFACT_FACADE.preview(artifact_id, project_id=None, session_id=session_id),
+            {
+                "ok": True,
+                "preview": ARTIFACT_FACADE.preview(
+                    artifact_id, project_id=None, session_id=session_id
+                ),
+            },
             req_id=req_id,
         )
     except ArtifactError as exc:
@@ -2048,7 +2053,7 @@ def artifact_restore(session_id, artifact_id):
                 f"/responses/sessions/{session_id}/artifacts/{restored.artifact_id}/download"
             ),
         }
-        return _json_response({"artifact": public_artifact}, 201, req_id)
+        return _json_response({"ok": True, "artifact": public_artifact}, 201, req_id)
     except ArtifactError as exc:
         return _error_response(exc.code, str(exc), 409, req_id)
 
@@ -2076,7 +2081,7 @@ def artifact_compare(session_id):
         comparison = ARTIFACT_FACADE.compare(
             left_id, right_id, project_id=None, session_id=session_id
         )
-        return _json_response({"comparison": comparison}, req_id=req_id)
+        return _json_response({"ok": True, "comparison": comparison}, req_id=req_id)
     except ArtifactError as exc:
         return _error_response(exc.code, str(exc), 409, req_id)
 
@@ -2122,7 +2127,7 @@ def outcome_metadata(session_id, outcome_id):
         outcome = ARTIFACT_FACADE.get_outcome(outcome_id, project_id=None, session_id=session_id)
     except ArtifactError as exc:
         return _error_response(exc.code, str(exc), 404, req_id)
-    return _json_response({"outcome": outcome}, req_id=req_id)
+    return _json_response({"ok": True, "outcome": outcome}, req_id=req_id)
 
 
 @app.route("/responses/artifacts/<artifact_id>", methods=["GET"])

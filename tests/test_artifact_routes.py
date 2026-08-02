@@ -62,8 +62,10 @@ class ArtifactRouteTests(unittest.TestCase):
             )
 
         self.assertEqual(compared.status_code, 200)
+        self.assertTrue(compared.get_json()["ok"])
         self.assertEqual(compared.get_json()["comparison"]["kind"], "text_diff")
         self.assertEqual(restored.status_code, 201)
+        self.assertTrue(restored.get_json()["ok"])
         artifact = restored.get_json()["artifact"]
         self.assertNotEqual(artifact["artifact_id"], self.left.artifact_id)
         self.assertTrue(artifact["download_url"].endswith("/download"))
