@@ -3,6 +3,8 @@
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError
 
+MAX_MESSAGE_LENGTH = 100_000
+
 
 class RealtimePayloadValidationError(ValueError):
     """Raised when a realtime payload does not match its boundary schema."""
@@ -37,7 +39,11 @@ INBOUND_SCHEMAS = {
         "properties": {
             "external_id": {"type": "string", "minLength": 1, "maxLength": 200},
             "role": {"enum": ["user", "assistant"]},
-            "content": {"type": "string", "minLength": 1, "maxLength": 20000},
+            "content": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_MESSAGE_LENGTH,
+            },
             "source": {
                 "enum": ["typed", "input_audio", "output_audio", "output_text"],
             },
@@ -75,7 +81,11 @@ INBOUND_SCHEMAS = {
     "responses.turn": {
         "type": "object",
         "properties": {
-            "message": {"type": "string", "minLength": 1, "maxLength": 20000},
+            "message": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_MESSAGE_LENGTH,
+            },
             "structured_output": {"type": "object"},
         },
         "required": ["message"],
@@ -275,12 +285,10 @@ _INBOUND_VALIDATORS = {
     name: Draft202012Validator(schema) for name, schema in INBOUND_SCHEMAS.items()
 }
 _OUTBOUND_PAYLOAD_VALIDATORS = {
-    name: Draft202012Validator(schema)
-    for name, schema in OUTBOUND_PAYLOAD_SCHEMAS.items()
+    name: Draft202012Validator(schema) for name, schema in OUTBOUND_PAYLOAD_SCHEMAS.items()
 }
 _OUTBOUND_EVENT_VALIDATORS = {
-    name: Draft202012Validator(schema)
-    for name, schema in OUTBOUND_EVENT_SCHEMAS.items()
+    name: Draft202012Validator(schema) for name, schema in OUTBOUND_EVENT_SCHEMAS.items()
 }
 
 
@@ -290,11 +298,7 @@ def _error_detail(error: ValidationError) -> str:
         path += f"[{part}]" if isinstance(part, int) else f".{part}"
     if error.validator == "required" and isinstance(error.instance, dict):
         missing = next(
-            (
-                name
-                for name in error.validator_value
-                if name not in error.instance
-            ),
+            (name for name in error.validator_value if name not in error.instance),
             None,
         )
         if missing:

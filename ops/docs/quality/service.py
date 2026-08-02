@@ -60,8 +60,10 @@ def validate_document(
     today: date | None = None,
 ) -> QualityReport:
     """Validate UTF-8 Markdown deterministically; malformed bytes become a blocker."""
-    config = config or QualityConfig()
     path = Path(source)
+    config = config or QualityConfig()
+    if path.suffix.lower() == ".json" and config.require_title:
+        config = replace(config, require_title=False)
     raw = path.read_bytes()
     findings: list[Finding]
     try:
