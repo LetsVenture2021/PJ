@@ -925,6 +925,24 @@ async function handleResponsesProxy(request, env, corsOrigin, requestId, fetchIm
       (isStreamingTurn ? "text/event-stream" : "application/json");
     const isEventStream = upstreamContentType.includes("text/event-stream");
     const isJson = upstreamContentType.includes("application/json");
+    if (!isEventStream && !isJson && !(isArtifactDownload || isProjectExport)) {
+      logEvent(requestId, "responses.rejected", {
+        code: "responses_edge_challenged",
+        status: bridgeResponse.status,
+        path: inboundUrl.pathname,
+      });
+      return jsonResponse(
+        errorPayload(
+          "responses_edge_challenged",
+          "The Full Power bridge returned a non-JSON response, most likely an edge " +
+            "security challenge. Verify the WAF skip rule covers /responses/*.",
+          requestId,
+        ),
+        502,
+        corsOrigin,
+        requestId,
+      );
+    }
     const contentType = isEventStream
       ? "text/event-stream"
       : (isArtifactDownload || isProjectExport) && !isJson
