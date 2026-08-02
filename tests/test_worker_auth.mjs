@@ -812,6 +812,18 @@ test("privileged routes authenticate before performing work", async () => {
   assert.equal(payload.error.code, "access_authentication_required");
 });
 
+test("uncaught worker exceptions are returned as typed JSON errors", async () => {
+  const response = await worker.fetch(new Request("https://pj-assistant.ai/health"), {
+    PJ_ALLOWED_ORIGINS: { invalid: true },
+  });
+  assert.equal(response.status, 500);
+  assert.equal(response.headers.get("content-type"), "application/json");
+  const payload = await response.json();
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error.code, "internal_server_error");
+  assert.equal(payload.error.request_id, response.headers.get("x-request-id"));
+});
+
 test("canva origin is allowed for authenticated routes", async () => {
   const response = await worker.fetch(
     new Request("https://pj-assistant.ai/future-full-power", {
