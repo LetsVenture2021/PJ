@@ -31,6 +31,7 @@ _QUANTITY_RE = re.compile(
 _QUOTED_RE = re.compile(r"""(["'])(?:(?!\1).){1,500}\1""")
 _FENCED_CODE_RE = re.compile(r"```[\s\S]*?```")
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+_CLI_FLAG_RE = re.compile(r"(?<!\w)--[A-Za-z0-9][A-Za-z0-9-]*\b")
 _IDENTIFIER_RE = re.compile(
     r"(?<!\w)(?:[A-Za-z0-9]+(?:[_:/.-][A-Za-z0-9]+)+|"
     r"(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*\d)[A-Za-z0-9]+)(?!\w)"
@@ -181,6 +182,14 @@ def _validate_result(original: str, payload: dict, max_output_chars: int) -> dic
             "Prompt perfecting changed a control response.",
         )
     missing = _missing_preserved_literal_values(original, normalized)
+    conflicts = _conflicting_preserved_literal_categories(original, normalized)
+    if conflicts:
+        categories = ", ".join(conflicts)
+        raise PromptPerfectingError(
+            "prompt_intent_changed",
+            "Prompt perfecting changed exact "
+            f"{categories} literals from the original request.",
+        )
     if missing:
         normalized = _repair_preserved_literals(original, normalized, missing)
         if len(normalized) > max_output_chars:
@@ -210,7 +219,7 @@ def _literal_extractors():
         "quantity": lambda text: set(_QUANTITY_RE.findall(text)),
         "quoted": lambda text: {match.group(0) for match in _QUOTED_RE.finditer(text)},
         "code": lambda text: set(_FENCED_CODE_RE.findall(text) + _INLINE_CODE_RE.findall(text)),
-        "identifier": lambda text: set(_IDENTIFIER_RE.findall(text)),
+        "identifier": lambda text: set(_IDENTIFIER_RE.findall(text) + _CLI_FLAG_RE.findall(text)),
     }
 
 
@@ -228,6 +237,19 @@ def _missing_preserved_literal_values(original: str, refined: str) -> dict[str, 
         if absent:
             missing[category] = absent
     return missing
+
+
+def _conflicting_preserved_literal_categories(original: str, refined: str) -> list[str]:
+    original_literals = _preserved_literals(original)
+    refined_literals = _preserved_literals(refined)
+    conflicts = []
+    for category, original_values in original_literals.items():
+        if not original_values:
+            continue
+        refined_values = refined_literals.get(category, set())
+        if original_values - refined_values and refined_values - original_values:
+            conflicts.append(category)
+    return sorted(conflicts)
 
 
 def _missing_preserved_literals(original: str, refined: str) -> set[str]:
