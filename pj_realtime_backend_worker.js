@@ -970,6 +970,30 @@ async function handleResponsesProxy(request, env, corsOrigin, requestId, fetchIm
       streaming: isEventStream,
       artifact: isArtifactDownload && !isJson,
     });
+    if (!isEventStream && isJson) {
+      const jsonBody = await bridgeResponse.text();
+      if (jsonBody && parseJsonOrNull(jsonBody) === null) {
+        logEvent(requestId, "responses.rejected", {
+          code: "responses_invalid_json",
+          status: bridgeResponse.status,
+          path: inboundUrl.pathname,
+        });
+        return jsonResponse(
+          errorPayload(
+            "responses_invalid_json",
+            "The Full Power bridge returned invalid JSON.",
+            requestId,
+          ),
+          502,
+          corsOrigin,
+          requestId,
+        );
+      }
+      return new Response(jsonBody, {
+        status: bridgeResponse.status,
+        headers: responseHeaderSet,
+      });
+    }
     return new Response(bridgeResponse.body, {
       status: bridgeResponse.status,
       headers: responseHeaderSet,

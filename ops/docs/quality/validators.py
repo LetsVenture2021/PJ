@@ -85,7 +85,7 @@ def validate_text(text: str, config: QualityConfig) -> Iterable[Finding]:
                     number,
                     match.start() + 1,
                 )
-        if _FORMULA.match(line):
+        if _FORMULA.match(line) and not line.lstrip().startswith("---"):
             yield _finding(
                 "formula", "critical", "Potential spreadsheet formula injection.", number
             )

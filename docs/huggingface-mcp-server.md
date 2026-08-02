@@ -20,7 +20,7 @@ Create a fine-grained Hugging Face token with only the access needed for the
 models and repositories you intend to use.
 
 ```bash
-export HF_TOKEN='hf_...'
+printenv HF_TOKEN >/dev/null
 ```
 
 Optional configuration:

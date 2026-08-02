@@ -1826,7 +1826,7 @@
       try {
         parsed = body ? JSON.parse(body) : {};
       } catch (_) {
-        throw new Error(buildApiFailureDetail(response, body, "Backend health check"));
+        throw new Error(buildApiFailureDetail(response, body, "Backend health response"));
       }
       assertProtocolResponse(response, parsed);
       if (!parsed.ok) {
@@ -1871,7 +1871,7 @@
       try {
         parsed = body ? JSON.parse(body) : {};
       } catch (_) {
-        throw new Error(buildApiFailureDetail(response, body, "Tool schema fetch"));
+        throw new Error(buildApiFailureDetail(response, body, "Tool schema response"));
       }
       assertProtocolResponse(response, parsed);
       const tools = Array.isArray(parsed.tools) ? parsed.tools : [];

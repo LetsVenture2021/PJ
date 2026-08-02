@@ -28,6 +28,8 @@ content_sha256: 719874a80e2f474686505bbc01dfaea4e9b05ced3e1a2b559ac436afbd16b74d
 taxonomy: [workflow, trigger, credentials]
 ```
 **What this capability teaches:** Compose a basic triggered workflow, map data, and test it before activation.
+## Capability items
+### Item structure
 #### Task types
 - Workflow design
 - Implementation review
