@@ -184,7 +184,8 @@ def _validate_result(original: str, payload: dict, max_output_chars: int) -> dic
         )
     missing = _missing_preserved_literal_values(original, normalized)
     if missing:
-        if set(missing).issubset(_REPAIRABLE_LITERAL_CATEGORIES):
+        missing_categories = missing.keys()
+        if set(missing_categories).issubset(_REPAIRABLE_LITERAL_CATEGORIES):
             normalized = _repair_preserved_literals(original, normalized, missing)
             if len(normalized) > max_output_chars:
                 raise PromptPerfectingError(
@@ -321,7 +322,7 @@ def perfect_prompt(
             "- Boundaries: preserve every stated constraint verbatim - what must "
             "stay unchanged, what to avoid, approvals required before acting - "
             "and add a final self-check when the task is consequential.\n"
-            "Preserve exact URL, code, identifier, quoted, date, and quantity "
+            "Preserve exact URL, code, identifier, quoted, CLI flag, date, and quantity "
             "literals character-for-character. Preserve the exact intent, "
             "requested format, named entities, facts, constraints, dates, "
             "quantities, permissions, scope, and uncertainty. Write in the "
