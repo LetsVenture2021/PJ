@@ -16,6 +16,7 @@ import hmac
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -267,12 +268,25 @@ def _trim_detail(detail):
     return compact[:MAX_ERROR_DETAIL_LENGTH] + "..."
 
 
+def _json_compatible(value):
+    """Convert non-finite numeric values to null so payloads stay strict JSON."""
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {key: _json_compatible(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_compatible(item) for item in value]
+    return value
+
+
 def _json_response(payload, status=200, req_id=None, outbound_schema=None):
     req_id = req_id or _request_id()
+    schema_error = False
     if outbound_schema:
         try:
             validate_outbound_payload(outbound_schema, payload)
         except RealtimePayloadValidationError as exc:
+            schema_error = True
             _LOGGER.error(
                 "realtime.outbound_payload.invalid",
                 extra={"error_code": "invalid_outbound_payload"},
@@ -287,7 +301,26 @@ def _json_response(payload, status=200, req_id=None, outbound_schema=None):
                 },
             }
             status = 502
-    body = json.dumps({**payload, "version": PROTOCOL_VERSION})
+    safe_payload = _json_compatible(payload)
+    if outbound_schema and not schema_error:
+        try:
+            validate_outbound_payload(outbound_schema, safe_payload)
+        except RealtimePayloadValidationError as exc:
+            _LOGGER.error(
+                "realtime.outbound_payload.invalid",
+                extra={"error_code": "invalid_outbound_payload"},
+            )
+            safe_payload = {
+                "ok": False,
+                "error": {
+                    "code": "invalid_outbound_payload",
+                    "message": "Server response did not match the realtime contract.",
+                    "request_id": req_id,
+                    "detail": _trim_detail(exc.detail),
+                },
+            }
+            status = 502
+    body = json.dumps({**safe_payload, "version": PROTOCOL_VERSION}, allow_nan=False)
     resp = Response(body, status=status, mimetype="application/json")
     resp.headers["x-request-id"] = req_id
     resp.headers["x-pj-contract-version"] = CONTRACT_VERSION
@@ -1000,9 +1033,9 @@ def _validated_structured_output(value, req_id):
 
 def _sse(event):
     validate_outbound_event(event)
-    message = {**event, "version": PROTOCOL_VERSION}
+    message = {**_json_compatible(event), "version": PROTOCOL_VERSION}
     event_type = message.get("type", "message")
-    return f"event: {event_type}\ndata: {json.dumps(message, default=str)}\n\n"
+    return f"event: {event_type}\ndata: {json.dumps(message, default=str, allow_nan=False)}\n\n"
 
 
 @app.route("/", methods=["GET"])

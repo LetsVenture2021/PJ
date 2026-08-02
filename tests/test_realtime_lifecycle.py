@@ -201,6 +201,31 @@ class TestRealtimeSessionLifecycle(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.get_json()["version"], realtime_server.PROTOCOL_VERSION)
 
+    def test_capabilities_payload_is_strict_json_with_non_finite_values(self):
+        with patch.object(
+            realtime_server,
+            "capability_manifest",
+            return_value={
+                "native": {"web_search": {"status": "active", "configured": True}},
+                "diagnostics": {
+                    "score": float("nan"),
+                    "upper": float("inf"),
+                    "lower": float("-inf"),
+                },
+            },
+        ):
+            response = self.client.get("/responses/capabilities", headers=self.auth)
+
+        self.assertEqual(response.status_code, 200)
+        raw = response.get_data(as_text=True)
+        self.assertNotIn("NaN", raw)
+        self.assertNotIn("Infinity", raw)
+        payload = json.loads(raw)
+        self.assertTrue(payload["ok"])
+        self.assertIsNone(payload["capabilities"]["diagnostics"]["score"])
+        self.assertIsNone(payload["capabilities"]["diagnostics"]["upper"])
+        self.assertIsNone(payload["capabilities"]["diagnostics"]["lower"])
+
     def test_connect_start_stream_and_resume_success(self):
         session_id = self.create_realtime_session()
         with patch.object(
