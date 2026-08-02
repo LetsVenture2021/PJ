@@ -12,6 +12,8 @@ name = "pj-realtime-backend"
 main = "pj_realtime_backend_worker.js"
 
 routes = [
+  { pattern = "example.com/conversations*", zone_name = "example.com" },
+  { pattern = "example.com/projects*", zone_name = "example.com" },
   { pattern = "example.com/health", zone_name = "example.com" },
   { pattern = "example.com/session", zone_name = "example.com" },
   { pattern = "example.com/token", zone_name = "example.com" },
