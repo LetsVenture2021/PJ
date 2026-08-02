@@ -1,4 +1,4 @@
-const CACHE = "pj-static-v1";
+const CACHE = "pj-static-v2";
 const STATIC = [
   "/webrtc_client.html",
   "/manifest.webmanifest",
@@ -32,7 +32,7 @@ self.addEventListener("fetch", (event) => {
     !event.request.headers.has("authorization");
   if (!isStatic) return; // API, uploads, transcripts, artifacts and auth are never cached.
   event.respondWith(
-    caches.match(event.request, { ignoreSearch: true }).then(
+    caches.match(event.request).then(
       (cached) =>
         cached ||
         fetch(event.request).then((response) => {
