@@ -1415,8 +1415,11 @@ function shouldTryFallback(status, detail, primaryModel, fallbackModel) {
 
 function checkRequestTrust(request, allowedOrigins) {
   const origin = request.headers.get("origin");
-  if (origin && !isAllowedOrigin(origin, allowedOrigins)) {
-    return { ok: false, reason: `Origin not allowed: ${origin}` };
+  if (origin) {
+    if (!isAllowedOrigin(origin, allowedOrigins)) {
+      return { ok: false, reason: `Origin not allowed: ${origin}` };
+    }
+    return { ok: true };
   }
 
   const refererOrigin = normalizedOriginFromReferer(request.headers.get("referer"));

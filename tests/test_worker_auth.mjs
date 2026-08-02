@@ -785,6 +785,21 @@ test("privileged routes authenticate before performing work", async () => {
   assert.equal(payload.error.code, "access_authentication_required");
 });
 
+test("allowed origin is trusted even when referer is a different host", async () => {
+  const response = await worker.fetch(
+    new Request("https://pj-assistant.ai/future-full-power", {
+      headers: {
+        Origin: "https://pj-assistant.ai",
+        Referer: "https://canvas.instructure.com/courses/123/pages/example",
+      },
+    }),
+    env,
+  );
+  assert.equal(response.status, 401);
+  const payload = await response.json();
+  assert.equal(payload.error.code, "access_authentication_required");
+});
+
 test("public health has security headers and future routes fail closed", async () => {
   const health = await worker.fetch(new Request("https://pj-assistant.ai/health"), env);
   assert.equal(health.status, 200);
