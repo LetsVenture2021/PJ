@@ -92,8 +92,8 @@ tests pass but the same Worker route fails.
 3. **Capture health from both boundaries.**
 
    ```bash
-   curl -fsS https://YOUR_DOMAIN/health | python -m json.tool
-   curl -fsS http://127.0.0.1:3001/health | python -m json.tool
+   curl -fsS https://pj-assistant.example/health | python -m json.tool
+   curl -fsS https://runtime.internal.example/health | python -m json.tool
    ```
 
    Record Worker `full_tooling_ready`,
@@ -119,6 +119,43 @@ tests pass but the same Worker route fails.
 7. **Recover, verify, and monitor.** Follow the relevant playbook and the
    verification checklist below. The IC alone downgrades or closes the
    incident.
+
+## Required Full Power repair order
+
+Apply this sequence in order when Full Power is degraded:
+
+1. **Remove interactive Cloudflare challenges from PJ application paths.**
+   Keep Cloudflare Access in place, but add narrowly scoped WAF/Bot skip rules
+   for Access-protected frontend and API paths.
+2. **Verify the owner Access login.** Confirm the owner's email is included in
+   the owner-only Allow policy and that the browser has a valid Access session
+   cookie.
+3. **Restore the private Python runtime.** Confirm `realtime_server.py` or
+   Gunicorn is running and reachable from the Worker's configured bridge URL.
+4. **Verify the bridge token.** `PJ_TOOL_BRIDGE_TOKEN` must match exactly
+   between Worker secrets and the private runtime environment.
+5. **Verify schema retrieval.** Confirm the Worker can retrieve tool schemas
+   and related hashes from the private runtime.
+6. **Check static frontend deployment consistency.** Confirm `webrtc_client.html`
+   and `assets/pj_web_utils.js` come from the same release, then purge stale
+   Cloudflare cache if needed.
+7. **Retest `/health` and require Full Power readiness.** Do not declare
+   restoration until health resembles:
+
+   ```json
+   {
+     "tool_schema_reconciliation_status": "success",
+     "tool_schema_cache_count": 1,
+     "tool_manifest_sha256": "non-null",
+     "instructions_sha256": "non-null",
+     "tool_policy_sha256": "non-null",
+     "last_successful_reconciliation_at": "timestamp",
+     "full_tooling_ready": true
+   }
+   ```
+
+8. **Test microphone permission last.** Microphone checks are meaningful only
+   after the real frontend is loaded and `/token` succeeds.
 
 ## Playbook: timeout spikes
 
