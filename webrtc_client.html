@@ -1787,6 +1787,16 @@
       el.messages.scrollTop = el.messages.scrollHeight;
     }
 
+    function buildApiFailureDetail(response, body, label = "API request") {
+      const contentType = (response.headers.get("content-type") || "").trim();
+      const statusLine = `${response.status} ${response.statusText || ""}`.trim();
+      const detail = parseErrorBody(body);
+      const bodyPreview = shorten(String(body || ""), 500);
+      return `${label} failed: ${statusLine}; Content-Type: ${contentType || "missing"};${
+        detail ? ` Detail: ${detail};` : ""
+      } Body: ${bodyPreview || "(empty)"}`;
+    }
+
     async function checkBackendHealth(apiBase, requestId) {
       const response = await fetchWithTimeout(`${apiBase}/health`, {
         headers: requestHeaders(requestId),
@@ -1794,16 +1804,11 @@
       }, 8000);
 
       const body = await response.text();
-      if (!response.ok) {
-        const detail = parseErrorBody(body);
-        throw new Error(`Backend health check failed (${response.status})${detail ? `: ${detail}` : ""}`);
+      const contentType = (response.headers.get("content-type") || "").toLowerCase();
+      if (!response.ok || !contentType.includes("application/json")) {
+        throw new Error(buildApiFailureDetail(response, body, "Backend health check"));
       }
-      let parsed = {};
-      try {
-        parsed = body ? JSON.parse(body) : {};
-      } catch (_) {
-        parsed = {};
-      }
+      const parsed = body ? JSON.parse(body) : {};
       assertProtocolResponse(response, parsed);
       if (!parsed.ok) {
         throw new Error("Backend health endpoint did not return ok=true.");
@@ -1839,17 +1844,11 @@
       }, 12000);
 
       const body = await response.text();
-      if (!response.ok) {
-        const detail = parseErrorBody(body);
-        throw new Error(`Tool schema fetch failed (${response.status})${detail ? `: ${detail}` : ""}`);
+      const contentType = (response.headers.get("content-type") || "").toLowerCase();
+      if (!response.ok || !contentType.includes("application/json")) {
+        throw new Error(buildApiFailureDetail(response, body, "Tool schema fetch"));
       }
-
-      let parsed = {};
-      try {
-        parsed = body ? JSON.parse(body) : {};
-      } catch (_) {
-        parsed = {};
-      }
+      const parsed = body ? JSON.parse(body) : {};
       assertProtocolResponse(response, parsed);
       const tools = Array.isArray(parsed.tools) ? parsed.tools : [];
       return {
@@ -1866,28 +1865,17 @@
         ...options,
       }, timeoutMs);
       const body = await response.text();
-      const nonJsonDetail = () => {
-        const contentType = (response.headers.get("content-type") || "unknown").toLowerCase();
-        const bodyDetail = parseErrorBody(body);
-        const likelyHtml = contentType.includes("text/html") || /^\s*</.test(body || "");
-        const hint = likelyHtml
-          ? " likely cause: API base is wrong or an auth edge returned HTML instead of JSON."
-          : "";
-        return `status=${response.status}, content-type=${contentType}${
-          bodyDetail ? `, detail=${bodyDetail}` : ""
-        }${hint}`;
-      };
+      const contentType = (response.headers.get("content-type") || "").toLowerCase();
+      if (!response.ok || !contentType.includes("application/json")) {
+        throw new Error(buildApiFailureDetail(response, body));
+      }
       let parsed = {};
       try {
         parsed = body ? JSON.parse(body) : {};
       } catch (_) {
-        throw new Error(`Response payload was not valid JSON (${nonJsonDetail()})`);
+        throw new Error(buildApiFailureDetail(response, body));
       }
       assertProtocolResponse(response, parsed);
-      if (!response.ok) {
-        const detail = parseErrorBody(body);
-        throw new Error(`Request failed (${response.status})${detail ? `: ${detail}` : ""}`);
-      }
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         throw new Error("Response payload did not match the JSON object contract.");
       }
@@ -2261,26 +2249,16 @@
       }, 15000);
 
       const body = await response.text();
-      if (!response.ok) {
-        const detail = parseErrorBody(body);
-        throw new Error(`Token minting failed (${response.status})${detail ? `: ${detail}` : ""}`);
+      const contentType = (response.headers.get("content-type") || "").toLowerCase();
+      if (!response.ok || !contentType.includes("application/json")) {
+        throw new Error(buildApiFailureDetail(response, body, "Token minting request"));
       }
 
       let parsed = {};
       try {
         parsed = body ? JSON.parse(body) : {};
       } catch (_) {
-        const contentType = (response.headers.get("content-type") || "unknown").toLowerCase();
-        const detail = parseErrorBody(body);
-        const likelyHtml = contentType.includes("text/html") || /^\s*</.test(body || "");
-        const hint = likelyHtml
-          ? " likely cause: API base is wrong or an auth edge returned HTML instead of JSON."
-          : "";
-        throw new Error(
-          `Token minting response was not valid JSON (status=${response.status}, content-type=${contentType}${
-            detail ? `, detail=${detail}` : ""
-          }${hint})`,
-        );
+        throw new Error(buildApiFailureDetail(response, body, "Token minting response"));
       }
       assertProtocolResponse(response, parsed);
 
