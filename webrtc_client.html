@@ -1808,7 +1808,12 @@
       if (!response.ok || !contentType.includes("application/json")) {
         throw new Error(buildApiFailureDetail(response, body, "Backend health check"));
       }
-      const parsed = body ? JSON.parse(body) : {};
+      let parsed = {};
+      try {
+        parsed = body ? JSON.parse(body) : {};
+      } catch (_) {
+        throw new Error(buildApiFailureDetail(response, body, "Backend health response"));
+      }
       assertProtocolResponse(response, parsed);
       if (!parsed.ok) {
         throw new Error("Backend health endpoint did not return ok=true.");
@@ -1848,7 +1853,12 @@
       if (!response.ok || !contentType.includes("application/json")) {
         throw new Error(buildApiFailureDetail(response, body, "Tool schema fetch"));
       }
-      const parsed = body ? JSON.parse(body) : {};
+      let parsed = {};
+      try {
+        parsed = body ? JSON.parse(body) : {};
+      } catch (_) {
+        throw new Error(buildApiFailureDetail(response, body, "Tool schema response"));
+      }
       assertProtocolResponse(response, parsed);
       const tools = Array.isArray(parsed.tools) ? parsed.tools : [];
       return {
