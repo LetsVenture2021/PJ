@@ -647,6 +647,32 @@ test("Full Power proxy maps non-JSON bridge bodies to responses_edge_challenged"
   assert.equal(payload.error.code, "responses_edge_challenged");
 });
 
+test("Full Power proxy maps malformed JSON bridge bodies to responses_invalid_json", async () => {
+  const response = await handleResponsesProxy(
+    new Request("https://pj-assistant.ai/responses/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "test" }),
+    }),
+    {
+      PJ_TOOL_BRIDGE_URL: "https://tools.pj-assistant.ai/execute-tool",
+      PJ_TOOL_BRIDGE_TOKEN: "bridge-secret",
+    },
+    "https://pj-assistant.ai",
+    "request-responses-invalid-json",
+    async () =>
+      new Response('{"session":', {
+        status: 200,
+        headers: { "content-type": "application/json; charset=utf-8" },
+      }),
+  );
+
+  assert.equal(response.status, 502);
+  assert.equal(response.headers.get("content-type"), "application/json");
+  const payload = await response.json();
+  assert.equal(payload.error.code, "responses_invalid_json");
+});
+
 test("Full Power proxy preserves verified binary downloads with safe filenames", async () => {
   const artifactId = `ART-${"a".repeat(32)}`;
   let captured = null;
