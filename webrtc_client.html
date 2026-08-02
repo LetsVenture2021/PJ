@@ -1866,11 +1866,22 @@
         ...options,
       }, timeoutMs);
       const body = await response.text();
+      const nonJsonDetail = () => {
+        const contentType = (response.headers.get("content-type") || "unknown").toLowerCase();
+        const bodyDetail = parseErrorBody(body);
+        const likelyHtml = contentType.includes("text/html") || /^\s*</.test(body || "");
+        const hint = likelyHtml
+          ? " likely cause: API base is wrong or an auth edge returned HTML instead of JSON."
+          : "";
+        return `status=${response.status}, content-type=${contentType}${
+          bodyDetail ? `, detail=${bodyDetail}` : ""
+        }${hint}`;
+      };
       let parsed = {};
       try {
         parsed = body ? JSON.parse(body) : {};
       } catch (_) {
-        throw new Error("Response payload was not valid JSON.");
+        throw new Error(`Response payload was not valid JSON (${nonJsonDetail()})`);
       }
       assertProtocolResponse(response, parsed);
       if (!response.ok) {
@@ -2259,7 +2270,17 @@
       try {
         parsed = body ? JSON.parse(body) : {};
       } catch (_) {
-        throw new Error("Token minting response was not valid JSON.");
+        const contentType = (response.headers.get("content-type") || "unknown").toLowerCase();
+        const detail = parseErrorBody(body);
+        const likelyHtml = contentType.includes("text/html") || /^\s*</.test(body || "");
+        const hint = likelyHtml
+          ? " likely cause: API base is wrong or an auth edge returned HTML instead of JSON."
+          : "";
+        throw new Error(
+          `Token minting response was not valid JSON (status=${response.status}, content-type=${contentType}${
+            detail ? `, detail=${detail}` : ""
+          }${hint})`,
+        );
       }
       assertProtocolResponse(response, parsed);
 
