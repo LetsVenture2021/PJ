@@ -185,7 +185,8 @@ test("deployment routes cover APIs without claiming frontend assets", () => {
     /PJ_TOOL_BRIDGE_URL = "https:\/\/replace-with-private-runtime\/execute-tool"/,
   );
   assert.match(webClientSource, /window\.location\.hostname === "www\.pj-assistant\.ai"/);
-  assert.match(webClientSource, /\? "https:\/\/pj-assistant\.ai"/);
+  assert.match(webClientSource, /const CANONICAL_API_BASE = "https:\/\/pj-assistant\.ai"/);
+  assert.match(webClientSource, /runningOnCanva/);
 });
 
 test("only health and preflight are public", () => {
