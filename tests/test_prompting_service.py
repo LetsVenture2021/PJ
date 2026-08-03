@@ -35,7 +35,7 @@ class TestPromptPerfectingLiteralRepair(unittest.TestCase):
             [
                 "Create Canva CLI setup docs from https://www.canva.dev/docs/apps/setting-up-starter-kit/.",
                 "Use `canva_cli_app_scaffold_planner` and `npm create @canva/app@latest`.",
-                "Preserve \"false\" as JSON and `False` as Python.",
+                'Preserve "false" as JSON and `False` as Python.',
                 "Include --template and apps/webapp/server/logs/vector_sync_launchd.err.log.",
             ]
         )
@@ -59,7 +59,7 @@ class TestPromptPerfectingLiteralRepair(unittest.TestCase):
             "https://www.canva.dev/docs/apps/setting-up-starter-kit/",
             "`canva_cli_app_scaffold_planner`",
             "`npm create @canva/app@latest`",
-            "\"false\"",
+            '"false"',
             "`False`",
             "--template",
             "apps/webapp/server/logs/vector_sync_launchd.err.log",
