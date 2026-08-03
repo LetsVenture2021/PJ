@@ -35,6 +35,7 @@ _IDENTIFIER_RE = re.compile(
     r"(?<!\w)(?:[A-Za-z0-9]+(?:[_:/.-][A-Za-z0-9]+)+|"
     r"(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*\d)[A-Za-z0-9]+)(?!\w)"
 )
+_CLI_FLAG_RE = re.compile(r"(?<!\w)--[A-Za-z0-9][A-Za-z0-9-]*")
 
 
 class PromptPerfectingError(RuntimeError):
@@ -181,6 +182,15 @@ def _validate_result(original: str, payload: dict, max_output_chars: int) -> dic
             "Prompt perfecting changed a control response.",
         )
     missing = _missing_preserved_literal_values(original, normalized)
+    if _has_unrepairable_literal_drift(original, normalized, missing):
+        categories = ", ".join(
+            sorted(category for category in missing if category in {"URL", "date", "quantity"})
+        )
+        raise PromptPerfectingError(
+            "prompt_intent_changed",
+            "Prompt perfecting replaced exact "
+            f"{categories} literals from the original request.",
+        )
     if missing:
         normalized = _repair_preserved_literals(original, normalized, missing)
         if len(normalized) > max_output_chars:
@@ -210,7 +220,7 @@ def _literal_extractors():
         "quantity": lambda text: set(_QUANTITY_RE.findall(text)),
         "quoted": lambda text: {match.group(0) for match in _QUOTED_RE.finditer(text)},
         "code": lambda text: set(_FENCED_CODE_RE.findall(text) + _INLINE_CODE_RE.findall(text)),
-        "identifier": lambda text: set(_IDENTIFIER_RE.findall(text)),
+        "identifier": lambda text: set(_IDENTIFIER_RE.findall(text) + _CLI_FLAG_RE.findall(text)),
     }
 
 
@@ -232,6 +242,27 @@ def _missing_preserved_literal_values(original: str, refined: str) -> dict[str, 
 
 def _missing_preserved_literals(original: str, refined: str) -> set[str]:
     return set(_missing_preserved_literal_values(original, refined))
+
+
+def _has_unrepairable_literal_drift(
+    original: str,
+    refined: str,
+    missing: dict[str, list[str]] | None = None,
+) -> bool:
+    missing = missing or _missing_preserved_literal_values(original, refined)
+    if not missing:
+        return False
+    original_literals = _preserved_literals(original)
+    refined_literals = _preserved_literals(refined)
+    for category in {"URL", "date", "quantity"}:
+        if category not in missing:
+            continue
+        if any(
+            value not in original_literals.get(category, set())
+            for value in refined_literals.get(category, set())
+        ):
+            return True
+    return False
 
 
 def _repair_preserved_literals(
