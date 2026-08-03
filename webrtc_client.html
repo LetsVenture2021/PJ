@@ -533,6 +533,11 @@
     .artifact-panel-list { display: grid; gap: 12px; margin-top: 14px; }
     .artifact-panel .artifact-card { width: 100%; }
     .artifact-actions button { padding: 6px 8px; font-size: 11px; }
+    .artifact-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .artifact-card.collapsed > :not(.artifact-card-head) { display: none; }
+    .artifact-card-head { display: flex; align-items: center; gap: 8px; }
+    .artifact-card-head .artifact-card-title { flex: 1; }
+    .artifact-card-head button { min-height: 32px; padding: 4px 8px; }
     .outcome-card { border-left: 3px solid var(--ok); padding: 12px; background: var(--panel-2); border-radius: 8px; }
     .validation-badge { color: var(--ok); font-size: 12px; font-weight: 700; }
 
@@ -599,6 +604,16 @@
       border-color: #3b82f680;
       box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
     }
+
+    .composer-status {
+      flex-basis: 100%;
+      min-height: 18px;
+      color: var(--muted);
+      font-size: 11px;
+      text-align: right;
+    }
+
+    .composer-status.near-limit { color: var(--warn); }
 
     .composer button {
       min-width: 84px;
@@ -740,6 +755,7 @@
       </div>
 
       <div class="mode-switch" aria-label="Assistant mode">
+        <button id="fastVoiceModeBtn" type="button">Fast Voice</button>
         <button id="fullPowerVoiceModeBtn" class="active" type="button">Full Force Voice</button>
         <button id="fullPowerModeBtn" type="button">Full Power Text</button>
       </div>
@@ -779,8 +795,12 @@
           <button id="createProjectBtn" class="muted-btn" type="button">Create</button>
         </div>
         <div class="button-row">
-          <button id="moveConversationBtn" class="muted-btn" type="button">Move conversation here</button>
+          <button id="moveConversationBtn" class="muted-btn" type="button">Move current conversation</button>
           <button id="removeConversationBtn" class="muted-btn" type="button">Remove from project</button>
+        </div>
+        <div class="button-row">
+          <button id="addProjectSourcesBtn" class="muted-btn" type="button">Upload sources</button>
+          <button id="addProjectArtifactsBtn" class="muted-btn" type="button">Upload artifacts</button>
         </div>
         <details><summary>Sources</summary><div id="projectSources" class="note">No project selected.</div></details>
         <details><summary>Artifacts</summary><div id="projectArtifacts" class="note">No project selected.</div></details>
@@ -799,6 +819,7 @@
         </select>
         <label for="codexPrompt">Coding task</label>
         <textarea id="codexPrompt" placeholder="Review a repository, debug an issue, or describe what Codex should build."></textarea>
+        <button id="perfectCodexBtn" class="muted-btn full-width-btn" type="button">Perfect task and use</button>
         <button id="runCodexBtn" class="primary full-width-btn" type="button">Open in Codex</button>
         <small class="sub">Codex runs through Full Power. Write access remains owner-approval gated.</small>
       </section>
@@ -818,6 +839,7 @@
         <label><input id="visualTaskActive" type="checkbox"> Current task requires visual analysis</label>
         <label for="visualEquivalent">Text equivalent / accessibility description</label>
         <textarea id="visualEquivalent" placeholder="Describe the relevant visual content without sharing media."></textarea>
+        <button id="useVisualEquivalentBtn" class="muted-btn" type="button">Perfect description and use</button>
         <div id="capturePreview" class="capture-preview" aria-hidden="true">
           <video id="captureVideo" autoplay muted playsinline></video>
           <div id="captureOverlay" class="capture-overlay"></div>
@@ -839,11 +861,12 @@
         </div>
         <details id="structuredOutputPanel" class="structured-output">
           <summary>Structured JSON output</summary>
+          <label><input id="structuredOutputEnabled" type="checkbox"> Return structured JSON</label>
           <div class="field">
             <label for="schemaName">Schema name</label>
             <input id="schemaName" type="text" value="pj_response">
           </div>
-          <textarea id="schemaJson" spellcheck="false" placeholder='{"type":"object","properties":{},"additionalProperties":false}'></textarea>
+          <textarea id="schemaJson" spellcheck="false">{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}</textarea>
         </details>
       </div>
 
@@ -875,6 +898,7 @@
           <div class="suggestions">
             <button class="suggestion" type="button" data-prompt="Help me plan a project with clear milestones and next steps."><strong>Plan a project</strong>Turn an idea into clear milestones and next steps</button>
             <button class="suggestion" type="button" data-prompt="Help me summarize and compare my documents."><strong>Work with documents</strong>Summarize, compare, or transform your files</button>
+            <button class="suggestion" type="button" data-prompt="Create a polished document from my instructions. Ask for any essential missing details, then produce a downloadable artifact."><strong>Create a document</strong>Draft and export a downloadable deliverable</button>
             <button class="suggestion" type="button" data-prompt="Use the Codex workspace path: inspect this repository, state a short plan, make scoped changes only if approved, and run relevant validation."><strong>Work on code</strong>Inspect, patch, validate, and report clearly</button>
             <button class="suggestion" type="button" data-prompt="Research this with cited sources, separate facts from assumptions, and preserve links."><strong>Research</strong>Find, cite, and synthesize current evidence</button>
           </div>
@@ -912,8 +936,9 @@
             <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/>
           </svg>
         </button>
-        <textarea id="textInput" placeholder="Type a message to PJ..." disabled></textarea>
+        <textarea id="textInput" maxlength="100000" aria-describedby="composerStatus" placeholder="Type a message to PJ..." disabled></textarea>
         <button id="sendBtn" class="primary" disabled>Send</button>
+        <div id="composerStatus" class="composer-status" aria-live="polite">Up to 100,000 characters</div>
       </div>
     </main>
     <aside class="card artifact-panel" aria-label="Artifacts and outcomes">
@@ -954,12 +979,16 @@
       shorten,
       parseErrorBody,
       fetchWithTimeout,
-    } from "/assets/pj_web_utils.js?v=2026-07-28.6";
+    } from "/assets/pj_web_utils.js?v=2026-07-29.1";
 
     const localHostnames = new Set(["localhost", "127.0.0.1"]);
+    const canvaHostname = (window.location.hostname || "").toLowerCase();
+    const runningOnCanva = canvaHostname === "canva.com"
+      || canvaHostname === "www.canva.com"
+      || canvaHostname.endsWith(".canva.com");
     const DEFAULT_API_BASE = localHostnames.has(window.location.hostname)
       ? `${window.location.protocol}//${window.location.hostname}:3001`
-      : window.location.hostname === "www.pj-assistant.ai"
+      : window.location.hostname === "www.pj-assistant.ai" || runningOnCanva
         ? "https://pj-assistant.ai"
         : window.location.origin;
     const STORAGE_KEY = "pj-web-app-api-base";
@@ -994,10 +1023,12 @@
       toolSummary: document.getElementById("toolSummary"),
       experienceGrid: document.getElementById("experienceGrid"),
       experienceScore: document.getElementById("experienceScore"),
+      fastVoiceModeBtn: document.getElementById("fastVoiceModeBtn"),
       fullPowerVoiceModeBtn: document.getElementById("fullPowerVoiceModeBtn"),
       fullPowerModeBtn: document.getElementById("fullPowerModeBtn"),
       codexAction: document.getElementById("codexAction"),
       codexPrompt: document.getElementById("codexPrompt"),
+      perfectCodexBtn: document.getElementById("perfectCodexBtn"),
       runCodexBtn: document.getElementById("runCodexBtn"),
       modeNote: document.getElementById("modeNote"),
       fullPowerControls: document.getElementById("fullPowerControls"),
@@ -1006,6 +1037,7 @@
       historySearch: document.getElementById("historySearch"),
       searchHistoryBtn: document.getElementById("searchHistoryBtn"),
       structuredOutputPanel: document.getElementById("structuredOutputPanel"),
+      structuredOutputEnabled: document.getElementById("structuredOutputEnabled"),
       schemaName: document.getElementById("schemaName"),
       schemaJson: document.getElementById("schemaJson"),
       composerFilesBtn: document.getElementById("composerFilesBtn"),
@@ -1021,6 +1053,8 @@
       createProjectBtn: document.getElementById("createProjectBtn"),
       moveConversationBtn: document.getElementById("moveConversationBtn"),
       removeConversationBtn: document.getElementById("removeConversationBtn"),
+      addProjectSourcesBtn: document.getElementById("addProjectSourcesBtn"),
+      addProjectArtifactsBtn: document.getElementById("addProjectArtifactsBtn"),
       projectSources: document.getElementById("projectSources"),
       projectArtifacts: document.getElementById("projectArtifacts"),
       cameraBtn: document.getElementById("cameraBtn"),
@@ -1031,6 +1065,7 @@
       retainCapture: document.getElementById("retainCapture"),
       visualTaskActive: document.getElementById("visualTaskActive"),
       visualEquivalent: document.getElementById("visualEquivalent"),
+      useVisualEquivalentBtn: document.getElementById("useVisualEquivalentBtn"),
       capturePreview: document.getElementById("capturePreview"),
       captureVideo: document.getElementById("captureVideo"),
       captureOverlay: document.getElementById("captureOverlay"),
@@ -1043,6 +1078,7 @@
       canvasFullscreenBtn: document.getElementById("canvasFullscreenBtn"),
       canvasCloseBtn: document.getElementById("canvasCloseBtn"),
       workspaceTitle: document.getElementById("workspaceTitle"),
+      composerStatus: document.getElementById("composerStatus"),
     };
 
     const state = {
@@ -1065,6 +1101,7 @@
       pendingApprovals: {},
       fullPowerToolRows: new Map(),
       artifactCards: new Map(),
+      compareArtifactId: null,
       realtimeItems: new Map(),
       responseItems: new Map(),
       activeAssistantItemId: null,
@@ -1083,6 +1120,7 @@
       uploadItems: [],
       uploadLocalSkips: [],
       uploadBusy: false,
+      projectUploadKind: null,
       uploadSessionId: `upload_${createRequestId().replace(/[^A-Za-z0-9_-]/g, "_")}`,
       captureStream: null,
       captureKind: null,
@@ -1264,6 +1302,35 @@
       return state.activeSessionId || state.fullPowerSessionId || state.uploadSessionId;
     }
 
+    async function linkProjectUpload(parsed) {
+      const projectId = el.projectSelect.value;
+      const kind = state.projectUploadKind;
+      if (!projectId || !kind) return;
+      for (const file of parsed.files || []) {
+        const endpoint = `${apiBase()}/projects/${encodeURIComponent(projectId)}/${kind}`;
+        const body = kind === "sources"
+          ? {
+              source_type: "uploaded_document",
+              source_id: `${parsed.upload_id}:${file.saved_path || file.name}`,
+              label: file.name,
+              provenance: { upload_id: parsed.upload_id },
+            }
+          : {
+              artifact_type: "response_artifact",
+              artifact_id: `${parsed.upload_id}:${file.saved_path || file.name}`,
+              relative_path: file.saved_path,
+              sha256: file.sha256,
+              provenance: { upload_id: parsed.upload_id, label: file.name },
+            };
+        await fetchJson(endpoint, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: requestHeaders(createRequestId(), "application/json"),
+          body: JSON.stringify(body),
+        });
+      }
+    }
+
     async function uploadSelectedDocuments() {
       if (state.uploadBusy) return;
       const localSkips = state.uploadLocalSkips;
@@ -1406,6 +1473,7 @@
         for (let index = 0; index < batchList.length; index += 1) {
           const note = batchList.length > 1 ? ` (batch ${index + 1}/${batchList.length})` : "";
           const parsed = await uploadOneBatch(buildForm(batchList[index]), note);
+          await linkProjectUpload(parsed);
           totalCount += parsed.count || 0;
           totalBytesAll += (parsed.files || []).reduce((sum, file) => sum + (file.size || 0), 0);
           skippedAll.push(...(parsed.skipped || []));
@@ -1420,11 +1488,16 @@
               ` (${skippedAll[0]?.code || (localOversize.length ? "file_too_large" : "credential_like_filename")}).`
             : "");
         state.uploadLocalSkips = [];
+        if (state.projectUploadKind) {
+          statusBubble.textContent += ` Linked to project ${el.projectSelect.selectedOptions[0]?.textContent || ""}.`;
+          await refreshProjectScope();
+        }
       } catch (error) {
         statusBubble.textContent = shorten(String(error), 300);
       } finally {
         setUploadBusy(false);
         state.uploadItems = [];
+        state.projectUploadKind = null;
       }
     }
 
@@ -1640,6 +1713,7 @@
         stopFullPowerSession({ announce: false, preserveSession: true });
       }
       state.mode = mode;
+      el.fastVoiceModeBtn.classList.toggle("active", mode === MODE.REALTIME);
       el.fullPowerVoiceModeBtn.classList.toggle(
         "active", mode === MODE.FULL_POWER_VOICE
       );
@@ -1712,6 +1786,16 @@
       el.messages.scrollTop = el.messages.scrollHeight;
     }
 
+    function buildApiFailureDetail(response, body, label = "API request") {
+      const contentType = (response.headers.get("content-type") || "").trim();
+      const statusLine = `${response.status} ${response.statusText || ""}`.trim();
+      const detail = parseErrorBody(body);
+      const bodyPreview = shorten(String(body || ""), 500);
+      return `${label} failed: ${statusLine}; Content-Type: ${contentType || "missing"};${
+        detail ? ` Detail: ${detail};` : ""
+      } Body: ${bodyPreview || "(empty)"}`;
+    }
+
     async function checkBackendHealth(apiBase, requestId) {
       const response = await fetchWithTimeout(`${apiBase}/health`, {
         headers: requestHeaders(requestId),
@@ -1719,19 +1803,27 @@
       }, 8000);
 
       const body = await response.text();
-      if (!response.ok) {
-        const detail = parseErrorBody(body);
-        throw new Error(`Backend health check failed (${response.status})${detail ? `: ${detail}` : ""}`);
+      const contentType = (response.headers.get("content-type") || "").toLowerCase();
+      if (!response.ok || !contentType.includes("application/json")) {
+        throw new Error(buildApiFailureDetail(response, body, "Backend health check"));
       }
       let parsed = {};
       try {
         parsed = body ? JSON.parse(body) : {};
       } catch (_) {
-        parsed = {};
+        throw new Error(buildApiFailureDetail(response, body, "Backend health response"));
       }
-      assertProtocolResponse(response, parsed);
       if (!parsed.ok) {
         throw new Error("Backend health endpoint did not return ok=true.");
+      }
+      // /health is a public deployment/readiness probe and older edge health
+      // handlers returned only { ok: true }. Reject an explicitly incompatible
+      // version, but do not prevent voice startup solely because this public
+      // probe omitted its version marker. Authenticated session and signaling
+      // responses remain strict below.
+      const healthVersion = parsed.version ?? response.headers.get("x-pj-protocol-version");
+      if (healthVersion !== null && healthVersion !== undefined) {
+        assertProtocolResponse(response, parsed);
       }
       return parsed;
     }
@@ -1764,16 +1856,15 @@
       }, 12000);
 
       const body = await response.text();
-      if (!response.ok) {
-        const detail = parseErrorBody(body);
-        throw new Error(`Tool schema fetch failed (${response.status})${detail ? `: ${detail}` : ""}`);
+      const contentType = (response.headers.get("content-type") || "").toLowerCase();
+      if (!response.ok || !contentType.includes("application/json")) {
+        throw new Error(buildApiFailureDetail(response, body, "Tool schema fetch"));
       }
-
       let parsed = {};
       try {
         parsed = body ? JSON.parse(body) : {};
       } catch (_) {
-        parsed = {};
+        throw new Error(buildApiFailureDetail(response, body, "Tool schema response"));
       }
       assertProtocolResponse(response, parsed);
       const tools = Array.isArray(parsed.tools) ? parsed.tools : [];
@@ -1791,17 +1882,17 @@
         ...options,
       }, timeoutMs);
       const body = await response.text();
+      const contentType = (response.headers.get("content-type") || "").toLowerCase();
+      if (!response.ok || !contentType.includes("application/json")) {
+        throw new Error(buildApiFailureDetail(response, body));
+      }
       let parsed = {};
       try {
         parsed = body ? JSON.parse(body) : {};
       } catch (_) {
-        throw new Error("Response payload was not valid JSON.");
+        throw new Error(buildApiFailureDetail(response, body));
       }
       assertProtocolResponse(response, parsed);
-      if (!response.ok) {
-        const detail = parseErrorBody(body);
-        throw new Error(`Request failed (${response.status})${detail ? `: ${detail}` : ""}`);
-      }
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         throw new Error("Response payload did not match the JSON object contract.");
       }
@@ -1963,7 +2054,7 @@
             type: "message",
             role: item.role,
             content: [{
-              type: item.role === "assistant" ? "output_text" : "input_text",
+              type: item.role === "assistant" ? "text" : "input_text",
               text: item.content,
             }],
           },
@@ -2141,6 +2232,13 @@
     }
 
     function shouldUseEphemeralSignalingFallback(status, detail) {
+      // A 404/405 can be returned by a static-site origin when its Worker route
+      // has not propagated yet.  The separately routed /token endpoint still
+      // lets the browser negotiate directly with OpenAI using a short-lived
+      // client secret, so keep voice available without exposing the API key.
+      if (status === 404 || status === 405) {
+        return true;
+      }
       if (status >= 500 && status <= 599) {
         return true;
       }
@@ -2175,16 +2273,16 @@
       }, 15000);
 
       const body = await response.text();
-      if (!response.ok) {
-        const detail = parseErrorBody(body);
-        throw new Error(`Token minting failed (${response.status})${detail ? `: ${detail}` : ""}`);
+      const contentType = (response.headers.get("content-type") || "").toLowerCase();
+      if (!response.ok || !contentType.includes("application/json")) {
+        throw new Error(buildApiFailureDetail(response, body, "Token minting request"));
       }
 
       let parsed = {};
       try {
         parsed = body ? JSON.parse(body) : {};
       } catch (_) {
-        throw new Error("Token minting response was not valid JSON.");
+        throw new Error(buildApiFailureDetail(response, body, "Token minting response"));
       }
       assertProtocolResponse(response, parsed);
 
@@ -2333,7 +2431,6 @@
         }, 35000);
 
         let answerSdp = await response.text();
-        assertProtocolResponse(response);
         if (!response.ok) {
           const detail = parseErrorBody(answerSdp);
           if (shouldUseEphemeralSignalingFallback(response.status, detail)) {
@@ -2343,6 +2440,11 @@
           } else {
             throw new Error(`Signaling failed (${response.status})${detail ? `: ${detail}` : ""}`);
           }
+        } else {
+          // Only PJ responses carry the protocol header. Origin/CDN error
+          // pages do not, and must reach the fallback decision above rather
+          // than being misreported as a protocol-version mismatch.
+          assertProtocolResponse(response);
         }
 
         if (state.activeStartRequestId !== requestId) {
@@ -2415,17 +2517,25 @@
         let metadata = {};
         if (state.mode === MODE.FULL_POWER_VOICE) {
           setStatus("Refining prompt...", "live");
-          const perfected = await perfectPrompt(
-            message, "full_power_voice"
-          );
-          submitted = perfected.refined_prompt;
-          metadata = {
-            prompt_perfecting_version: perfected.version,
-            refined_prompt: perfected.refined_prompt.slice(0, 4000),
-            refined_prompt_truncated: perfected.refined_prompt.length > 4000,
-            refined_sha256: perfected.refined_sha256,
-            changed: perfected.changed,
-          };
+          try {
+            const perfected = await perfectPrompt(
+              message, "full_power_voice"
+            );
+            submitted = perfected.refined_prompt;
+            metadata = {
+              prompt_perfecting_version: perfected.version,
+              refined_prompt: perfected.refined_prompt.slice(0, 4000),
+              refined_prompt_truncated: perfected.refined_prompt.length > 4000,
+              refined_sha256: perfected.refined_sha256,
+              changed: perfected.changed,
+            };
+          } catch (perfectError) {
+            metadata = { prompt_perfecting_fallback: true };
+            appendBubble(
+              "system",
+              `Refinement unavailable; sending your original words: ${shorten(String(perfectError), 200)}`,
+            );
+          }
         }
         await persistRealtimeMessage({
           externalId,
@@ -2588,6 +2698,7 @@
       }
 
       function structuredOutputRequest() {
+        if (!el.structuredOutputEnabled.checked) return null;
         const raw = el.schemaJson.value.trim();
         if (!raw) return null;
         const name = el.schemaName.value.trim();
@@ -2722,6 +2833,77 @@
         }
       }
 
+      function artifactSessionId() {
+        return state.fullPowerSessionId || state.activeSessionId;
+      }
+
+      async function runArtifactAction(action, artifact, card) {
+        const sessionId = artifactSessionId();
+        if (action === "minimize") {
+          card.classList.toggle("collapsed");
+          const button = card.querySelector('[data-artifact-action="minimize"]');
+          button.textContent = card.classList.contains("collapsed") ? "Expand" : "Minimize";
+          return;
+        }
+        if (action === "remove") {
+          state.artifactCards.delete(artifact.artifact_id);
+          card.remove();
+          setStatus("Artifact removed from this panel");
+          return;
+        }
+        if (action === "follow-up") {
+          queueWorkflowPrompt(
+            `Follow up on artifact ${artifact.artifact_id} (${artifact.filename}). ` +
+            "Ask what I want changed, then create a new version without overwriting the original.",
+          );
+          return;
+        }
+        if (!sessionId) {
+          appendBubble("system", "Start or resume the artifact's conversation first.");
+          return;
+        }
+        const root = `${apiBase()}/responses/sessions/${encodeURIComponent(sessionId)}/artifacts`;
+        try {
+          if (action === "preview") {
+            const parsed = await fetchJson(
+              `${root}/${encodeURIComponent(artifact.artifact_id)}/preview`,
+              { headers: requestHeaders(createRequestId()) },
+            );
+            appendBubble("system", `Preview: ${shorten(JSON.stringify(parsed.preview), 1500)}`);
+          } else if (action === "restore-as-new") {
+            const parsed = await fetchJson(
+              `${root}/${encodeURIComponent(artifact.artifact_id)}/restore`,
+              { method: "POST", headers: requestHeaders(createRequestId(), "application/json"), body: "{}" },
+            );
+            renderArtifactCard(parsed.artifact);
+            appendBubble("system", `Restored ${artifact.filename} as a new immutable artifact.`);
+          } else if (action === "compare") {
+            if (!state.compareArtifactId) {
+              state.compareArtifactId = artifact.artifact_id;
+              setStatus("Select Compare on another artifact", "live");
+              return;
+            }
+            if (state.compareArtifactId === artifact.artifact_id) {
+              state.compareArtifactId = null;
+              setStatus("Artifact comparison cancelled", "live");
+              return;
+            }
+            const parsed = await fetchJson(`${root}/compare`, {
+              method: "POST",
+              headers: requestHeaders(createRequestId(), "application/json"),
+              body: JSON.stringify({
+                left_artifact_id: state.compareArtifactId,
+                right_artifact_id: artifact.artifact_id,
+              }),
+            });
+            state.compareArtifactId = null;
+            appendBubble("system", `Comparison: ${shorten(JSON.stringify(parsed.comparison), 1800)}`);
+          }
+        } catch (error) {
+          appendBubble("system", `Artifact action failed: ${shorten(String(error), 300)}`);
+        }
+      }
+
       function renderArtifactCard(artifact) {
         if (!artifact?.artifact_id || !artifact.filename || !artifact.download_url) return;
         let downloadUrl;
@@ -2735,12 +2917,27 @@
         if (!card) {
           card = document.createElement("div");
           card.className = "artifact-card";
+          const head = document.createElement("div");
+          head.className = "artifact-card-head";
           const title = document.createElement("div");
           title.className = "artifact-card-title";
+          card._title = title;
+          head.appendChild(title);
+          for (const [label, action] of [["Minimize", "minimize"], ["Remove", "remove"]]) {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "muted-btn";
+            button.textContent = label;
+            button.dataset.artifactAction = action;
+            button.addEventListener("click", () => runArtifactAction(action, artifact, card));
+            head.appendChild(button);
+          }
           const meta = document.createElement("div");
           meta.className = "artifact-card-meta";
+          card._meta = meta;
           const link = document.createElement("a");
           link.className = "artifact-download";
+          card._download = link;
           link.textContent = "Download";
           link.rel = "noopener";
           const validation = document.createElement("div");
@@ -2754,9 +2951,11 @@
             button.className = "muted-btn";
             button.textContent = label;
             button.dataset.artifactAction = label.toLowerCase().replaceAll(" ", "-");
+            button.addEventListener("click", () =>
+              runArtifactAction(button.dataset.artifactAction, artifact, card));
             actions.appendChild(button);
           }
-          card.append(title, meta, validation);
+          card.append(head, meta, validation);
           if (String(artifact.mime_type || "").startsWith("text/html")) {
             const open = document.createElement("button");
             open.type = "button";
@@ -2770,10 +2969,10 @@
           el.artifactPanelList.appendChild(card);
           state.artifactCards.set(artifact.artifact_id, card);
         }
-        card.querySelector(".artifact-card-title").textContent = artifact.filename;
-        card.querySelector(".artifact-card-meta").textContent =
+        card._title.textContent = artifact.filename;
+        card._meta.textContent =
           `${String(artifact.format || "").toUpperCase()} · ${formatArtifactBytes(artifact.byte_size)} · SHA-256 ${String(artifact.sha256 || "").slice(0, 16)}...`;
-        const link = card.querySelector(".artifact-download");
+        const link = card._download;
         link.href = downloadUrl.href;
         link.download = artifact.filename;
         let preview = card.querySelector(".artifact-image-preview");
@@ -2978,6 +3177,10 @@
       async function sendFullPowerMessage() {
         const message = el.textInput.value.trim();
         if (!message || state.phase !== PHASE.LIVE || !state.fullPowerSessionId || state.fullPowerBusy) return;
+        if (/\b(?:json|structured output|schema)\b/i.test(message)) {
+          el.structuredOutputEnabled.checked = true;
+          el.structuredOutputPanel.open = true;
+        }
         let structuredOutput;
         try {
           structuredOutput = structuredOutputRequest();
@@ -3033,6 +3236,25 @@
           appendBubble("system", `Codex could not start: ${shorten(String(error), 260)}`);
         } finally {
           el.runCodexBtn.disabled = false;
+        }
+      }
+
+      async function perfectFeatureInput(input, button, prefix) {
+        const value = input.value.trim();
+        if (!value) {
+          appendBubble("system", "Enter the feature context first.");
+          return;
+        }
+        button.disabled = true;
+        try {
+          const perfected = await perfectPrompt(value, "full_power");
+          input.value = "";
+          queueWorkflowPrompt(`${prefix}\n\n${perfected.refined_prompt}`);
+          appendBubble("system", "Context perfected and moved into the active request.");
+        } catch (error) {
+          appendBubble("system", `Context could not be perfected: ${shorten(String(error), 300)}`);
+        } finally {
+          button.disabled = false;
         }
       }
 
@@ -3099,16 +3321,28 @@
       try {
         if (state.mode === MODE.FULL_POWER_VOICE) {
           setStatus("Refining transcript...", "live");
-          const perfected = await perfectPrompt(
-            transcript, "full_power_voice"
-          );
-          metadata = {
-            prompt_perfecting_version: perfected.version,
-            refined_prompt: perfected.refined_prompt.slice(0, 4000),
-            refined_prompt_truncated: perfected.refined_prompt.length > 4000,
-            refined_sha256: perfected.refined_sha256,
-            changed: perfected.changed,
-          };
+          let refinedText = null;
+          try {
+            const perfected = await perfectPrompt(
+              transcript, "full_power_voice"
+            );
+            metadata = {
+              prompt_perfecting_version: perfected.version,
+              refined_prompt: perfected.refined_prompt.slice(0, 4000),
+              refined_prompt_truncated: perfected.refined_prompt.length > 4000,
+              refined_sha256: perfected.refined_sha256,
+              changed: perfected.changed,
+            };
+            if (perfected.changed) {
+              refinedText = perfected.refined_prompt;
+            }
+          } catch (perfectError) {
+            metadata = { prompt_perfecting_fallback: true };
+            appendBubble(
+              "system",
+              `Refinement unavailable; responding to your original words: ${shorten(String(perfectError), 200)}`,
+            );
+          }
           await persistRealtimeMessage({
             externalId,
             role: "user",
@@ -3119,21 +3353,23 @@
           if (!state.dataChannel || state.dataChannel.readyState !== "open") {
             throw new Error("Realtime channel closed before transcript replacement.");
           }
-          sendRealtimeEvent({
-            type: "conversation.item.delete",
-            item_id: externalId,
-          });
-          sendRealtimeEvent({
-            type: "conversation.item.create",
-            item: {
-              type: "message",
-              role: "user",
-              content: [{
-                type: "input_text",
-                text: perfected.refined_prompt,
-              }],
-            },
-          });
+          if (refinedText !== null) {
+            sendRealtimeEvent({
+              type: "conversation.item.delete",
+              item_id: externalId,
+            });
+            sendRealtimeEvent({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{
+                  type: "input_text",
+                  text: refinedText,
+                }],
+              },
+            });
+          }
           requestResponse();
           setStatus("Live", "live");
           return;
@@ -3563,8 +3799,19 @@
       "click",
       () => setMode(MODE.FULL_POWER_VOICE),
     );
+    el.fastVoiceModeBtn.addEventListener("click", () => setMode(MODE.REALTIME));
     el.fullPowerModeBtn.addEventListener("click", () => setMode(MODE.FULL_POWER));
     el.runCodexBtn.addEventListener("click", runCodexTask);
+    el.perfectCodexBtn.addEventListener("click", () => perfectFeatureInput(
+      el.codexPrompt,
+      el.perfectCodexBtn,
+      "Use this perfected coding-task context to inform the Codex feature:",
+    ));
+    el.useVisualEquivalentBtn.addEventListener("click", () => perfectFeatureInput(
+      el.visualEquivalent,
+      el.useVisualEquivalentBtn,
+      "Use this perfected accessibility description as visual context for the current task:",
+    ));
     el.refreshSessionsBtn.addEventListener("click", refreshFullPowerSessions);
     el.sessionSelect.addEventListener("change", () => {
       if (el.sessionSelect.value) resumeFullPowerSession(el.sessionSelect.value);
@@ -3582,6 +3829,14 @@
 
     async function refreshProjectScope() {
       const projectId = el.projectSelect.value;
+      const conversationId = state.activeSessionId || state.fullPowerSessionId;
+      el.moveConversationBtn.disabled = !projectId || !conversationId;
+      el.removeConversationBtn.disabled = !conversationId;
+      el.moveConversationBtn.title = conversationId
+        ? `Move current conversation ${conversationId}`
+        : "Start or resume a conversation first";
+      el.addProjectSourcesBtn.disabled = !projectId;
+      el.addProjectArtifactsBtn.disabled = !projectId;
       el.projectScope.textContent = projectId
         ? `Scope: current project · ${el.projectSelect.selectedOptions[0].textContent}`
         : "Scope: current project (none selected; retrieval is isolated)";
@@ -3607,10 +3862,22 @@
       el.projectSelect.value = data.project.id;
       await refreshProjectScope();
     });
+    function chooseProjectUpload(kind) {
+      if (!el.projectSelect.value) {
+        setStatus("Select a project before uploading");
+        return;
+      }
+      state.projectUploadKind = kind;
+      el.filePicker.value = "";
+      el.filePicker.click();
+    }
+    el.addProjectSourcesBtn.addEventListener("click", () => chooseProjectUpload("sources"));
+    el.addProjectArtifactsBtn.addEventListener("click", () => chooseProjectUpload("artifacts"));
     el.moveConversationBtn.addEventListener("click", async () => {
-      if (!el.projectSelect.value || !state.activeSessionId) return;
-      await fetchJson(`${apiBase()}/projects/${encodeURIComponent(el.projectSelect.value)}/conversations`, { method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"}, body: JSON.stringify({conversation_id: state.activeSessionId, conversation_type: state.mode === MODE.REALTIME ? "realtime" : "responses"}) });
-      setStatus("Conversation moved into current project.");
+      const conversationId = state.activeSessionId || state.fullPowerSessionId;
+      if (!el.projectSelect.value || !conversationId) return;
+      await fetchJson(`${apiBase()}/projects/${encodeURIComponent(el.projectSelect.value)}/conversations`, { method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"}, body: JSON.stringify({conversation_id: conversationId, conversation_type: state.mode === MODE.REALTIME ? "realtime" : "responses"}) });
+      setStatus(`Moved current conversation ${conversationId} into the selected project.`);
     });
     el.removeConversationBtn.addEventListener("click", async () => {
       if (!state.activeSessionId) return;
@@ -3639,6 +3906,12 @@
         event.preventDefault();
         sendSelectedMessage();
       }
+    });
+    el.textInput.addEventListener("input", () => {
+      const count = el.textInput.value.length;
+      const remaining = 100000 - count;
+      el.composerStatus.textContent = `${count.toLocaleString()} / 100,000 characters`;
+      el.composerStatus.classList.toggle("near-limit", remaining < 10000);
     });
     el.canvasPreviewBtn.addEventListener("click", () => renderCanvasView(false));
     el.canvasSourceBtn.addEventListener("click", () => renderCanvasView(true));
