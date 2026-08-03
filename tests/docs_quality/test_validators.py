@@ -30,7 +30,9 @@ class DocumentQualityTests(unittest.TestCase):
         if isinstance(content, bytes):
             source.write_bytes(content)  # lgtm [py/clear-text-storage-sensitive-data]
         else:
-            source.write_text(content, encoding="utf-8")  # lgtm [py/clear-text-storage-sensitive-data]
+            source.write_text(
+                content, encoding="utf-8"
+            )  # lgtm [py/clear-text-storage-sensitive-data]
         return validate_document(source, **kwargs)
 
     def test_positive_unicode_rtl_emoji_and_combining_text(self):

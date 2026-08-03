@@ -93,6 +93,7 @@ class MemoryService:
                 parsed = parsed.replace(tzinfo=timezone.utc)
             expires_at = parsed.astimezone(timezone.utc).isoformat()
         return self.store.update(memory_id, expires_at=expires_at)
+
     def forget(self, memory_id):
         return self.store.delete(memory_id)
 

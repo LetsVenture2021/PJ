@@ -255,9 +255,7 @@ def memory_settings():
     if "disabled_categories" in body:
         body["disabled_categories"] = list(
             dict.fromkeys(
-                value.strip().lower()
-                for value in body["disabled_categories"]
-                if value.strip()
+                value.strip().lower() for value in body["disabled_categories"] if value.strip()
             )
         )
     for key, value in body.items():
