@@ -25,12 +25,14 @@ class DocumentQualityTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def report(self, text, **kwargs):
+    def report(self, content, **kwargs):
         source = self.root / "source.md"
-        if isinstance(text, bytes):
-            source.write_bytes(text)
+        if isinstance(content, bytes):
+            source.write_bytes(content)  # lgtm [py/clear-text-storage-sensitive-data]
         else:
-            source.write_text(text, encoding="utf-8")
+            source.write_text(
+                content, encoding="utf-8"
+            )  # lgtm [py/clear-text-storage-sensitive-data]
         return validate_document(source, **kwargs)
 
     def test_positive_unicode_rtl_emoji_and_combining_text(self):
@@ -67,6 +69,10 @@ class DocumentQualityTests(unittest.TestCase):
         rules = {item.rule_id for item in report.findings}
         self.assertIn("DOC-LINK-001", rules)
         self.assertIn("DOC-SEC-001", rules)
+
+    def test_item_delimiters_are_not_treated_as_formulas(self):
+        report = self.report("# T\n\n---ITEM_START: N8N-001---\n")
+        self.assertNotIn("DOC-SEC-001", {item.rule_id for item in report.findings})
 
     def test_sensitive_findings_never_contain_raw_value(self):
         secret = "sk-supersecretvalue123456"
@@ -149,3 +155,19 @@ class DocumentQualityTests(unittest.TestCase):
 
         self.assertEqual(len(reports), 1)
         self.assertEqual(Path(reports[0].source).name, "brief.md")
+
+    def test_validate_manifest_json_entries_do_not_require_markdown_title(self):
+        documents_dir = self.root / "documents"
+        documents_dir.mkdir()
+        source = documents_dir / "record.json"
+        source.write_text('{"status":"ok"}', encoding="utf-8")
+        manifest = documents_dir / "library-manifest.json"
+        manifest.write_text(
+            json.dumps({"documents": [{"path": "documents/record.json"}]}),
+            encoding="utf-8",
+        )
+
+        reports = validate_manifest(manifest)
+
+        self.assertEqual(len(reports), 1)
+        self.assertFalse(reports[0].failed)

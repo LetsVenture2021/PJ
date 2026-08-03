@@ -1,4 +1,4 @@
-const CACHE = "pj-static-v1";
+const CACHE = "pj-static-v2";
 const STATIC = [
   "/webrtc_client.html",
   "/manifest.webmanifest",
@@ -8,6 +8,7 @@ const STATIC = [
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(STATIC)));
+  self.skipWaiting();
 });
 self.addEventListener("activate", (event) => {
   event.waitUntil(
@@ -31,16 +32,16 @@ self.addEventListener("fetch", (event) => {
     STATIC.includes(url.pathname) &&
     !event.request.headers.has("authorization");
   if (!isStatic) return; // API, uploads, transcripts, artifacts and auth are never cached.
+  // Prefer the network so a newly deployed voice client is not pinned behind
+  // an old cache entry. The cache remains an offline fallback for static UI.
   event.respondWith(
-    caches.match(event.request, { ignoreSearch: true }).then(
-      (cached) =>
-        cached ||
-        fetch(event.request).then((response) => {
-          if (response.ok && response.type === "basic") {
-            caches.open(CACHE).then((cache) => cache.put(event.request, response.clone()));
-          }
-          return response;
-        }),
-    ),
+    fetch(event.request)
+      .then((response) => {
+        if (response.ok && response.type === "basic") {
+          caches.open(CACHE).then((cache) => cache.put(event.request, response.clone()));
+        }
+        return response;
+      })
+      .catch(() => caches.match(event.request, { ignoreSearch: true })),
   );
 });

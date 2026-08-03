@@ -9,6 +9,18 @@ from ops.shared import embeddings
 MAX_BACKFILL_PER_CALL = 200
 
 
+def delete_memory_vector(memory_id: str, *, db_path=None) -> None:
+    """Low-level deletion adapter used by the memory domain."""
+    conn = sqlite3.connect(db_path or embeddings.DB_PATH)
+    try:
+        conn.execute("DELETE FROM semantic_vectors WHERE kind='memory' AND ref_id=?", (memory_id,))
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        conn.close()
+
+
 def _rows(kind: str, db_path=None):
     conn = sqlite3.connect(db_path or embeddings.DB_PATH)
     try:

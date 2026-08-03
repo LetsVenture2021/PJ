@@ -31,7 +31,7 @@ provider calls cross narrow, auditable interfaces.
 | --- | --- | --- |
 | Terminal chat | `./pj` / `python pj.py` | Interactive or one-shot Responses conversations with streamed text, tool calls, prompt refinement, structured JSON output, and durable history commands (`/new`, `/chats`, `/resume`, `/search`). |
 | Terminal voice | `./pj voice` | Microphone/speaker WebRTC session with server VAD, transcription, interruption, tool calls, and calibration metering. |
-| Web application | pj-assistant.ai or `http://127.0.0.1:3001/` | **Fast Voice** (immediate Realtime responses), **Full Power Voice** (transcripts refined before responding), and **Full Power Text** (the terminal-equivalent Responses runtime: web/file search, MCP, local tools, citations, structured output, shared history). |
+| Web application | pj-assistant.ai or `https://local-web.pj-assistant.ai:3001/` | **Fast Voice** (immediate Realtime responses), **Full Power Voice** (transcripts refined before responding), and **Full Power Text** (the terminal-equivalent Responses runtime: web/file search, MCP, local tools, citations, structured output, shared history). |
 | Hugging Face MCP server | `python huggingface_mcp_server.py` | Bounded public Hub discovery and token-authenticated inference over stdio MCP. |
 
 ### Web application features

@@ -36,6 +36,7 @@ _IDENTIFIER_RE = re.compile(
     r"(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*\d)[A-Za-z0-9]+)(?!\w)"
 )
 _CLI_FLAG_RE = re.compile(r"(?<!\w)--[A-Za-z0-9][A-Za-z0-9-]*")
+_REPAIRABLE_LITERAL_CATEGORIES = frozenset({"URL", "quoted", "code", "identifier"})
 
 
 class PromptPerfectingError(RuntimeError):
@@ -182,23 +183,24 @@ def _validate_result(original: str, payload: dict, max_output_chars: int) -> dic
             "Prompt perfecting changed a control response.",
         )
     missing = _missing_preserved_literal_values(original, normalized)
-    if _has_unrepairable_literal_drift(original, normalized, missing):
-        categories = ", ".join(
-            sorted(category for category in missing if category in {"URL", "date", "quantity"})
-        )
+    drifted_categories = _unrepairable_literal_drift_categories(original, normalized, missing)
+    if drifted_categories:
+        categories = ", ".join(sorted(drifted_categories))
         raise PromptPerfectingError(
             "prompt_intent_changed",
             "Prompt perfecting replaced exact "
             f"{categories} literals from the original request.",
         )
     if missing:
-        normalized = _repair_preserved_literals(original, normalized, missing)
-        if len(normalized) > max_output_chars:
-            raise PromptPerfectingError(
-                "invalid_prompt_perfecting_output",
-                "Prompt perfecting repair exceeded the configured output limit.",
-            )
-        missing = _missing_preserved_literal_values(original, normalized)
+        missing_categories = missing.keys()
+        if set(missing_categories).issubset(_REPAIRABLE_LITERAL_CATEGORIES):
+            normalized = _repair_preserved_literals(original, normalized, missing)
+            if len(normalized) > max_output_chars:
+                raise PromptPerfectingError(
+                    "invalid_prompt_perfecting_output",
+                    "Prompt perfecting repair exceeded the configured output limit.",
+                )
+            missing = _missing_preserved_literal_values(original, normalized)
     if missing:
         categories = ", ".join(sorted(missing))
         raise PromptPerfectingError(
@@ -244,25 +246,28 @@ def _missing_preserved_literals(original: str, refined: str) -> set[str]:
     return set(_missing_preserved_literal_values(original, refined))
 
 
-def _has_unrepairable_literal_drift(
+def _unrepairable_literal_drift_categories(
     original: str,
     refined: str,
     missing: dict[str, list[str]] | None = None,
-) -> bool:
-    missing = missing or _missing_preserved_literal_values(original, refined)
+) -> set[str]:
+    missing = missing if missing is not None else _missing_preserved_literal_values(original, refined)
     if not missing:
-        return False
+        return set()
+    strict_categories = {"URL", "date", "quantity"}
+    candidates = sorted(category for category in missing if category in strict_categories)
+    if not candidates:
+        return set()
     original_literals = _preserved_literals(original)
     refined_literals = _preserved_literals(refined)
-    for category in {"URL", "date", "quantity"}:
-        if category not in missing:
-            continue
+    drifted = set()
+    for category in candidates:
         if any(
             value not in original_literals.get(category, set())
             for value in refined_literals.get(category, set())
         ):
-            return True
-    return False
+            drifted.add(category)
+    return drifted
 
 
 def _repair_preserved_literals(
@@ -299,6 +304,13 @@ def _unchanged_result(original: str, surface: str, summary: str) -> dict:
     }
 
 
+def fallback_result(prompt: str, surface: str, reason: str = "") -> dict:
+    """Return the user's original prompt as a safe, unrefined perfecting result."""
+    original = _normalize_prompt(prompt if isinstance(prompt, str) else "")
+    summary = reason.strip() or "Prompt perfecting failed; the original prompt was retained."
+    return _unchanged_result(original, surface, summary)
+
+
 def perfect_prompt(
     client,
     cfg: dict,
@@ -313,9 +325,15 @@ def perfect_prompt(
     if not original:
         raise PromptPerfectingError("invalid_prompt", "Prompt must be a non-empty string.")
     if len(original) > settings.max_input_chars:
-        raise PromptPerfectingError(
-            "prompt_too_large",
-            f"Prompt exceeds {settings.max_input_chars} characters.",
+        if required:
+            raise PromptPerfectingError(
+                "prompt_too_large",
+                f"Prompt exceeds {settings.max_input_chars} characters.",
+            )
+        return _unchanged_result(
+            original,
+            surface,
+            "Prompt exceeds the perfecting size limit; the original prompt was retained.",
         )
     if not settings.enabled or surface not in settings.surfaces:
         if required:
@@ -348,7 +366,7 @@ def perfect_prompt(
             "- Boundaries: preserve every stated constraint verbatim - what must "
             "stay unchanged, what to avoid, approvals required before acting - "
             "and add a final self-check when the task is consequential.\n"
-            "Preserve exact URL, code, identifier, quoted, date, and quantity "
+            "Preserve exact URL, code, identifier, quoted, CLI flag, date, and quantity "
             "literals character-for-character. Preserve the exact intent, "
             "requested format, named entities, facts, constraints, dates, "
             "quantities, permissions, scope, and uncertainty. Write in the "
@@ -372,7 +390,7 @@ def perfect_prompt(
                         "strict": True,
                     }
                 },
-                max_output_tokens=4000,
+                max_output_tokens=min(16000, 4000 + len(original) // 2),
                 timeout=settings.timeout_seconds,
             )
         except APIError as exc:

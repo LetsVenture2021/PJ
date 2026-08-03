@@ -52,6 +52,7 @@ from ops.docs import formats as upload_formats
 from ops.productivity.ui import blueprint as productivity_blueprint
 from ops.docs import uploads as document_uploads
 from ops.artifacts import ArtifactError, ArtifactFacade
+from ops.memory import MemoryService
 from ops.projects import service as projects
 from pj_contract import CONTRACT_VERSION, PROTOCOL_VERSION
 from ops.shared.logging import (
@@ -63,6 +64,7 @@ from ops.shared.logging import (
     set_log_context,
 )
 from ops.realtime.payload_validation import (
+    MAX_MESSAGE_LENGTH,
     RealtimePayloadValidationError,
     validate_inbound_payload,
     validate_outbound_event,
@@ -88,7 +90,6 @@ from responses_runtime import (
 BASE_DIR = Path(__file__).resolve().parents[2]
 MAX_ERROR_DETAIL_LENGTH = 320
 MAX_SESSION_TITLE_LENGTH = 120
-MAX_MESSAGE_LENGTH = 20000
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 ARTIFACT_ID_PATTERN = re.compile(r"^ART-[a-f0-9]{32}$")
 SCHEMA_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
@@ -155,11 +156,111 @@ app.config.update(
     SESSION_COOKIE_SAMESITE="Strict",
 )
 app.config.setdefault("UPLOAD_SCANNER", None)
+memory_config = load_runtime_config().memory
+app.config.setdefault(
+    "MEMORY_SERVICE",
+    MemoryService(
+        memory_config.get("database_path", BASE_DIR / "pj_data.sqlite3"),
+        enabled=bool(memory_config.get("enabled", True)),
+        automatic_ui_preferences=bool(memory_config.get("automatic_ui_preferences", False)),
+    ),
+)
 app.config.setdefault("CONVERSATION_SERVICE", ConversationService())
 app.config.setdefault("JOB_SERVICE", None)
 app.register_blueprint(create_jobs_blueprint(lambda: app.config["JOB_SERVICE"]))
 CORS(app)  # allow local browser origins when running on localhost
 app.register_blueprint(create_workflow_blueprint())
+
+
+def _memory_service():
+    return app.config["MEMORY_SERVICE"]
+
+
+@app.route("/memories", methods=["GET"])
+def list_memories():
+    denied = _check_bridge_auth(_request_id(), required=True)
+    if denied:
+        return denied
+    project_scope = request.args.get("project_scope")
+    if not isinstance(project_scope, str) or not project_scope.strip():
+        return {"error": "project_scope is required"}, 400
+    return {
+        "memories": _memory_service().store.list(
+            status=request.args.get("status"), project_scope=project_scope.strip()
+        )
+    }
+
+
+@app.route("/memories/<memory_id>/<action>", methods=["POST"])
+def memory_action(memory_id, action):
+    denied = _check_bridge_auth(_request_id(), required=True)
+    if denied:
+        return denied
+    body = request.get_json(silent=True) or {}
+    service = _memory_service()
+    try:
+        if action == "accept":
+            result = service.accept(memory_id, edited_content=body.get("content"))
+        elif action == "reject":
+            result = service.reject(memory_id)
+        elif action == "pin":
+            result = service.pin(memory_id, body.get("pinned", True))
+        elif action == "expire":
+            result = service.expire(memory_id, body.get("expires_at"))
+        elif action == "forget":
+            result = {"deleted": service.forget(memory_id)}
+        elif action == "correct":
+            result = service.correct(memory_id, body.get("content", ""))
+        else:
+            return {"error": "unknown memory action"}, 404
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+    return {"memory": result}
+
+
+@app.route("/memories/bulk-delete", methods=["POST"])
+def memory_bulk_delete():
+    denied = _check_bridge_auth(_request_id(), required=True)
+    if denied:
+        return denied
+    ids = (request.get_json(silent=True) or {}).get("ids", [])
+    if not isinstance(ids, list):
+        return {"error": "ids must be an array"}, 400
+    return {"deleted": _memory_service().bulk_delete(ids)}
+
+
+@app.route("/memories/export", methods=["GET"])
+def memory_export():
+    denied = _check_bridge_auth(_request_id(), required=True)
+    if denied:
+        return denied
+    return _memory_service().export()
+
+
+@app.route("/memories/settings", methods=["POST"])
+def memory_settings():
+    denied = _check_bridge_auth(_request_id(), required=True)
+    if denied:
+        return denied
+    body = request.get_json(silent=True) or {}
+    if set(body) - {"enabled", "disabled_categories"}:
+        return {"error": "unknown setting"}, 400
+    if "enabled" in body and not isinstance(body["enabled"], bool):
+        return {"error": "enabled must be boolean"}, 400
+    if "disabled_categories" in body and (
+        not isinstance(body["disabled_categories"], list)
+        or not all(isinstance(x, str) for x in body["disabled_categories"])
+    ):
+        return {"error": "disabled_categories must be an array of strings"}, 400
+    if "disabled_categories" in body:
+        body["disabled_categories"] = list(
+            dict.fromkeys(
+                value.strip().lower() for value in body["disabled_categories"] if value.strip()
+            )
+        )
+    for key, value in body.items():
+        _memory_service().store.set_setting(key, value)
+    return {"updated": sorted(body)}
 
 
 @app.before_request
@@ -1347,9 +1448,16 @@ def prompt_perfect():
             load_config(),
             prompt,
             surface=surface,
+            required=False,
         )
     except promptops.PromptPerfectingError as exc:
-        return _error_response(exc.code, str(exc), 422, req_id)
+        # Fail open: returning the original prompt keeps voice and chat
+        # turns alive; refinement is an enhancement, not a gate.
+        _LOGGER.warning(
+            "prompt.perfecting.fallback",
+            extra={"request_id": req_id, "code": exc.code},
+        )
+        result = promptops.fallback_result(prompt, surface, str(exc))
     return _json_response(
         {"ok": True, "prompt": promptops.public_result(result)},
         req_id=req_id,
@@ -2023,6 +2131,64 @@ def artifact_preview(session_id, artifact_id):
         return _error_response(exc.code, str(exc), 409, req_id)
 
 
+@app.route("/responses/sessions/<session_id>/artifacts/<artifact_id>/restore", methods=["POST"])
+def artifact_restore(session_id, artifact_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    _artifact, error = _facade_access(artifact_id, session_id, req_id)
+    if error:
+        return error
+    try:
+        restored = ARTIFACT_FACADE.restore(artifact_id, project_id=None, session_id=session_id)
+        chatlog.link_session_artifact(session_id, restored.artifact_id)
+        path = ARTIFACT_FACADE.verified_path(
+            restored.artifact_id, project_id=None, session_id=session_id
+        )
+        public_artifact = restored.as_dict() | {
+            "filename": path.name,
+            "format": path.suffix.removeprefix(".") or "bin",
+            "mime_type": restored.media_type,
+            "byte_size": path.stat().st_size,
+            "sha256": restored.content_hash,
+            "download_url": (
+                f"/responses/sessions/{session_id}/artifacts/{restored.artifact_id}/download"
+            ),
+        }
+        return _json_response({"artifact": public_artifact}, 201, req_id)
+    except ArtifactError as exc:
+        return _error_response(exc.code, str(exc), 409, req_id)
+
+
+@app.route("/responses/sessions/<session_id>/artifacts/compare", methods=["POST"])
+def artifact_compare(session_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    payload, error = _validated_json(
+        req_id,
+        allowed={"left_artifact_id", "right_artifact_id"},
+        required={"left_artifact_id", "right_artifact_id"},
+    )
+    if error:
+        return error
+    left_id = payload["left_artifact_id"]
+    right_id = payload["right_artifact_id"]
+    for artifact_id in (left_id, right_id):
+        _artifact, access_error = _facade_access(artifact_id, session_id, req_id)
+        if access_error:
+            return access_error
+    try:
+        comparison = ARTIFACT_FACADE.compare(
+            left_id, right_id, project_id=None, session_id=session_id
+        )
+        return _json_response({"comparison": comparison}, req_id=req_id)
+    except ArtifactError as exc:
+        return _error_response(exc.code, str(exc), 409, req_id)
+
+
 @app.route("/responses/sessions/<session_id>/artifacts/<artifact_id>/download", methods=["GET"])
 def artifact_download(session_id, artifact_id):
     req_id = _request_id()
@@ -2159,10 +2325,16 @@ def stream_responses_turn(session_id):
             load_config(),
             message,
             surface="full_power",
+            required=False,
         )
     except promptops.PromptPerfectingError as exc:
-        chatlog.release_session_turn(session["id"], turn_token)
-        return _error_response(exc.code, str(exc), 422, req_id)
+        # Perfecting is an enhancement, never a gate: the user's original
+        # wording is always a safe prompt, so the turn proceeds with it.
+        _LOGGER.warning(
+            "prompt.perfecting.fallback",
+            extra={"request_id": req_id, "code": exc.code},
+        )
+        perfected = promptops.fallback_result(message, "full_power", str(exc))
     model_message = perfected["refined_prompt"]
     input_value = model_message
     if not session.get("last_response_id"):
