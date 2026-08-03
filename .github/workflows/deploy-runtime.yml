@@ -1,0 +1,32 @@
+name: Deploy runtime
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - master
+    paths:
+      - "fly.toml"
+      - "requirements.txt"
+      - "requirements-dev.txt"
+      - "runtime_config.py"
+      - "realtime_server.py"
+      - ".github/workflows/deploy-runtime.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Deploy runtime
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: flyctl deploy --remote-only --config fly.toml
