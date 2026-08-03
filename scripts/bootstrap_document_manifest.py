@@ -33,6 +33,15 @@ def _stable_id(path: str) -> str:
     return f"DOC-{token}"
 
 
+def _existing_stable_id(previous: dict, relative: str) -> str:
+    legacy_document_id = previous.get("document_id")
+    if isinstance(legacy_document_id, str) and legacy_document_id:
+        legacy_stable_id = legacy_document_id.upper()
+    else:
+        legacy_stable_id = None
+    return previous.get("stable_id") or legacy_stable_id or _stable_id(relative)
+
+
 def _validated_previous_schema_version(previous: dict, relative: str) -> None:
     version = previous.get("schema_version")
     if version is not None and version != CURRENT_RECORD_SCHEMA_VERSION:
@@ -61,7 +70,7 @@ def propose_records(manifest_path: Path = DEFAULT_MANIFEST) -> list[dict]:
                 {
                     "schema_version": CURRENT_RECORD_SCHEMA_VERSION,
                     "path": relative,
-                    "stable_id": previous.get("stable_id", _stable_id(relative)),
+                    "stable_id": _existing_stable_id(previous, relative),
                     "class": document_class,
                     "owner": previous.get("owner", "PJ DocOps"),
                     "status": previous.get("status", "published"),
