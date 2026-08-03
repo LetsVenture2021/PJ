@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ingest"
+  short_description: "Safely prepare and ingest governed PJ knowledge corpora"
+  default_prompt: "Use $ingest to prepare, preflight, ingest, and synchronize a knowledge source for PJ."

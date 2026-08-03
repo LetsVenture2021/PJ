@@ -1,0 +1,63 @@
+[agents]
+max_threads = 4
+max_depth = 1
+
+[agents.architecture_guardian]
+description = "Protects PJ's domain boundaries, compatibility aliases, and provider abstractions."
+config_file = "agents/architecture-guardian.toml"
+
+[agents.security_guardian]
+description = "Audits changes against PJ's privacy, approval, upload, secret, and logging invariants."
+config_file = "agents/security-guardian.toml"
+
+[agents.responses_engineer]
+description = "Designs and reviews Responses API orchestration through PJ's provider interface."
+config_file = "agents/responses-engineer.toml"
+
+[agents.realtime_engineer]
+description = "Owns safe Realtime, WebRTC, voice, and interruption lifecycle changes."
+config_file = "agents/realtime-engineer.toml"
+
+[agents.edge_engineer]
+description = "Reviews the Cloudflare Worker edge proxy, authentication, CORS, and route parity."
+config_file = "agents/edge-engineer.toml"
+
+[agents.test_strategist]
+description = "Builds deterministic, high-signal Python and JavaScript test coverage."
+config_file = "agents/test-strategist.toml"
+
+[agents.python_quality]
+description = "Improves Python 3.11 correctness, typing, maintainability, and compatibility."
+config_file = "agents/python-quality.toml"
+
+[agents.state_steward]
+description = "Protects backward-compatible SQLite, JSON, and filesystem state semantics."
+config_file = "agents/state-steward.toml"
+
+[agents.document_specialist]
+description = "Owns safe ingestion and production-quality document and artifact workflows."
+config_file = "agents/document-specialist.toml"
+
+[agents.experience_reviewer]
+description = "Evaluates PJ's terminal and browser workflows for clear, accessible outcomes."
+config_file = "agents/experience-reviewer.toml"
+
+[agents.reliability_engineer]
+description = "Hardens retries, idempotency, observability, recovery, and failure behavior."
+config_file = "agents/reliability-engineer.toml"
+
+[agents.release_captain]
+description = "Validates release readiness, configuration parity, documentation, and rollback."
+config_file = "agents/release-captain.toml"
+
+[agents.product_strategist]
+description = "Turns product goals into prioritized, measurable, governed delivery plans."
+config_file = "agents/product-strategist.toml"
+
+[agents.research_analyst]
+description = "Produces source-grounded technical and market research with explicit uncertainty."
+config_file = "agents/research-analyst.toml"
+
+[agents.red_team]
+description = "Independently challenges assumptions and hunts for safety and correctness failures."
+config_file = "agents/red-team.toml"

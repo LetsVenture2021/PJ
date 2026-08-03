@@ -18,6 +18,7 @@ from ops.shared.logging import (
 )
 from responses_runtime import (
     build_tools,
+    capability_manifest,
     load_config,
     load_mcp_servers,
     load_state,
@@ -102,6 +103,87 @@ def _perfect_cli_prompt(client, cfg, message):
         return None
 
 
+def _show_workbench(cfg, *, as_json=False):
+    manifest = capability_manifest(cfg)
+    if as_json:
+        print(json.dumps(manifest["experience"], indent=2))
+    else:
+        print(_render_workbench(manifest))
+
+
+def _render_workbench(manifest):
+    experience = manifest.get("experience") or {}
+    workflows = experience.get("workflows") or []
+    active = sum(1 for workflow in workflows if workflow.get("status") == "active")
+    lines = [
+        "",
+        "  WORKBENCH   (launch: /workbench <workflow> <task>)",
+        f"  {active}/{len(workflows)} workflows active"
+        f"   ·   default: {experience.get('default_mode', 'full_power_text')}",
+    ]
+    if not workflows:
+        lines.append("   No workflow manifest is available.")
+    for workflow in workflows:
+        workflow_id = str(workflow.get("id") or "")
+        label = str(workflow.get("label") or workflow_id or "Workflow")
+        status = str(workflow.get("status") or "unavailable").upper()
+        tools = workflow.get("tools") or []
+        tool_text = ", ".join(str(tool) for tool in tools[:4])
+        if len(tools) > 4:
+            tool_text += f", +{len(tools) - 4}"
+        lines.append(f"\n   {label:<12} [{status}]  {workflow_id}")
+        if tool_text:
+            lines.append(f"     {tool_text}")
+    boundaries = experience.get("approval_boundaries") or []
+    if boundaries:
+        lines.append(
+            "\n  Approval-gated: "
+            + ", ".join(str(boundary).replace("_", " ") for boundary in boundaries)
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _resolve_workbench_launch(line, cfg):
+    stripped = line.strip()
+    command = stripped.split(maxsplit=1)[0].lower() if stripped else ""
+    if command != "/workbench":
+        return None
+    parts = stripped.split(maxsplit=2)
+    if len(parts) == 1:
+        return None
+    manifest = capability_manifest(cfg)
+    workflows = (manifest.get("experience") or {}).get("workflows") or []
+    selected = parts[1].casefold()
+    workflow = next(
+        (
+            item
+            for item in workflows
+            if selected
+            in {
+                str(item.get("id") or "").casefold(),
+                str(item.get("label") or "").casefold(),
+            }
+        ),
+        None,
+    )
+    if workflow is None:
+        available = ", ".join(str(item.get("id")) for item in workflows)
+        return {"error": f"Unknown workflow '{parts[1]}'. Available: {available}"}
+    if len(parts) < 3 or not parts[2].strip():
+        return {
+            "error": (f"Add a task after '{parts[1]}'. Usage: /workbench {workflow['id']} <task>")
+        }
+    task = parts[2].strip()
+    launch_prompt = str(workflow.get("launch_prompt") or "").strip()
+    model_prompt = f"{launch_prompt}\n\nUser task:\n{task}" if launch_prompt else task
+    return {
+        "workflow": workflow,
+        "user_prompt": task,
+        "model_prompt": model_prompt,
+    }
+
+
 def main():
     configure_logging()
     bind_log_context(request_id=new_correlation_id())
@@ -116,6 +198,20 @@ def main():
         return
 
     cfg = load_config()
+    workbench_launch = None
+    if args and args[0] == "workbench":
+        if len(args) == 1 or args[1:] == ["--json"]:
+            _show_workbench(cfg, as_json=args[1:] == ["--json"])
+            return
+        workbench_launch = _resolve_workbench_launch(
+            "/workbench " + " ".join(args[1:]),
+            cfg,
+        )
+        if workbench_launch.get("error"):
+            print(f"PJ workbench error: {workbench_launch['error']}", file=sys.stderr)
+            raise SystemExit(2)
+        args = [workbench_launch["user_prompt"]]
+
     client = OpenAI()
     state = load_state()
 
@@ -129,7 +225,8 @@ def main():
         bind_log_context(session_id=session["id"])
         state["previous_response_id"] = session.get("last_response_id")
         chatlog.record_turn(session, "user", message)
-        perfected = _perfect_cli_prompt(client, cfg, message)
+        prompt_input = workbench_launch["model_prompt"] if workbench_launch else message
+        perfected = _perfect_cli_prompt(client, cfg, prompt_input)
         if perfected is None:
             raise SystemExit(2)
         model_message = perfected["refined_prompt"]
@@ -167,6 +264,7 @@ def main():
     print(
         f"Chatting with {cfg['name']} ({cfg['model']}). "
         "Palettes: / commands · # tools · % features · $ skills. "
+        "Workbench: /workbench. "
         "Ctrl+C to exit.\n"
     )
     session = chatlog.latest_session() or chatlog.new_session()
@@ -182,6 +280,16 @@ def main():
             if not message:
                 continue
             bind_log_context(request_id=new_correlation_id())
+            if message == "/workbench":
+                _show_workbench(cfg)
+                continue
+            workbench_launch = _resolve_workbench_launch(message, cfg)
+            if workbench_launch is not None:
+                if workbench_launch.get("error"):
+                    print(f"  {workbench_launch['error']}")
+                    continue
+                print(f"  Launching {workbench_launch['workflow']['label']} workflow.")
+                message = workbench_launch["user_prompt"]
             handled, switched = chatlog.handle_command(message, session, skills.TOOL_SCHEMAS, cfg)
             if handled:
                 if switched:
@@ -191,7 +299,8 @@ def main():
                     save_state(state)
                 continue
             chatlog.record_turn(session, "user", message)
-            perfected = _perfect_cli_prompt(client, cfg, message)
+            prompt_input = workbench_launch["model_prompt"] if workbench_launch else message
+            perfected = _perfect_cli_prompt(client, cfg, prompt_input)
             if perfected is None:
                 continue
             print(f"\n{cfg['name']}: ", end="", flush=True)

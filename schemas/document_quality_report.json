@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pj.local/schemas/document-quality-report-v1.json",
+  "type": "object",
+  "required": ["schema_version", "standard_version", "source", "source_sha256", "profile", "status", "findings", "counts"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "standard_version": {"type": "string"},
+    "source": {"type": "string"},
+    "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "profile": {"type": "string"},
+    "status": {"enum": ["pass", "fail"]},
+    "findings": {"type": "array", "items": {"type": "object", "required": ["rule_id", "severity", "location"], "additionalProperties": false, "properties": {"rule_id": {"type": "string"}, "severity": {"type": "string"}, "location": {"type": "string"}}}},
+    "counts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}}
+  }
+}

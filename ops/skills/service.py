@@ -19,6 +19,7 @@ must define:
     run(**kwargs) -> dict
 Active skills are loaded dynamically by skills.py at startup.
 """
+
 import ast
 import codecs
 import fcntl
@@ -43,6 +44,7 @@ import requests
 from ops.shared.providers import RequestsHttpProvider
 from ops.shared.retry import RetryPolicy, get_with_retry
 from runtime_config import load_runtime_config
+from .website_learning import WEBSITE_LEARNING_SCHEMA, learn_from_website
 
 _ROOT = Path(__file__).resolve().parents[2]
 _DB_PATH = _ROOT / "pj_data.sqlite3"
@@ -51,18 +53,15 @@ GENERATED_DIR.mkdir(exist_ok=True)
 _CONFIG_PATH = _ROOT / "config.json"
 _SYNC_LOCK_PATH = Path(
     os.getenv("PJ_VECTOR_SYNC_LOCK_PATH")
-    or Path.home() / "Library" / "Application Support" / "PJ"
-    / "vector-store-sync.lock"
+    or Path.home() / "Library" / "Application Support" / "PJ" / "vector-store-sync.lock"
 )
 _VECTOR_SOURCE_CACHE_DIR = Path(
     os.getenv("PJ_VECTOR_SOURCE_CACHE_DIR")
-    or Path.home() / "Library" / "Application Support" / "PJ"
-    / "vector-source-cache"
+    or Path.home() / "Library" / "Application Support" / "PJ" / "vector-source-cache"
 )
 _N8N_EVALUATION_RECEIPT_DIR = Path(
     os.getenv("PJ_N8N_EVALUATION_RECEIPT_DIR")
-    or Path.home() / "Library" / "Application Support" / "PJ"
-    / "n8n-evaluation-receipts"
+    or Path.home() / "Library" / "Application Support" / "PJ" / "n8n-evaluation-receipts"
 )
 
 DEFAULT_MAX_CHARS_PER_FILE = 5_000_000
@@ -77,40 +76,78 @@ N8N_MAX_CAPABILITIES = 80
 N8N_MIN_INVENTORY_COVERAGE = 0.95
 N8N_MIN_TOP5_RETRIEVAL = 0.90
 N8N_MAX_EVALUATION_RECEIPT_BYTES = 128_000
-DOWNLOADABLE_FILE_PURPOSES = {
-    "assistants_output", "batch_output", "fine-tune-results"
-}
+DOWNLOADABLE_FILE_PURPOSES = {"assistants_output", "batch_output", "fine-tune-results"}
 
 # Names that can never be overridden by generated skills.
 RESERVED_NAMES = {
-    "get_current_time", "add_task", "list_tasks", "complete_task",
-    "save_note", "search_notes", "get_active_browser_tab", "run_shortcut",
-    "observe_pattern", "list_observations", "create_skill", "activate_skill",
-    "review_skills", "deprecate_skill", "learn_from_vector_store",
-    "sync_vector_store", "get_vector_sync_status", "list_coding_capabilities",
-    "list_n8n_capabilities", "get_n8n_corpus_status",
+    "get_current_time",
+    "add_task",
+    "list_tasks",
+    "complete_task",
+    "save_note",
+    "search_notes",
+    "get_active_browser_tab",
+    "run_shortcut",
+    "observe_pattern",
+    "list_observations",
+    "create_skill",
+    "activate_skill",
+    "review_skills",
+    "deprecate_skill",
+    "learn_from_vector_store",
+    "sync_vector_store",
+    "get_vector_sync_status",
+    "list_coding_capabilities",
+    "list_n8n_capabilities",
+    "get_n8n_corpus_status",
     "get_pj_capability_snapshot",
-    "list_doc_templates", "create_doc_template", "draft_document",
-    "revise_document", "finalize_document", "export_document",
-    "list_documents", "get_document",
-    "list_calendar_events", "create_calendar_event", "list_reminders",
-    "create_reminder", "draft_email", "list_recent_emails",
-    "log_contact_interaction", "search_contact_history", "create_project",
-    "update_project", "portfolio_review", "log_commitment",
-    "list_commitments", "complete_commitment", "log_opportunity",
-    "update_opportunity", "pipeline_review", "log_decision",
-    "search_decisions", "log_risk", "fetch_url", "check_website",
-    "daily_brief", "create_goal_contract", "update_goal_contract",
-    "list_goal_contracts", "build_evidence_bundle", "timeline_replay",
+    "list_doc_templates",
+    "create_doc_template",
+    "draft_document",
+    "revise_document",
+    "finalize_document",
+    "export_document",
+    "list_documents",
+    "get_document",
+    "list_calendar_events",
+    "create_calendar_event",
+    "list_reminders",
+    "create_reminder",
+    "draft_email",
+    "list_recent_emails",
+    "log_contact_interaction",
+    "search_contact_history",
+    "create_project",
+    "update_project",
+    "portfolio_review",
+    "log_commitment",
+    "list_commitments",
+    "complete_commitment",
+    "log_opportunity",
+    "update_opportunity",
+    "pipeline_review",
+    "log_decision",
+    "search_decisions",
+    "log_risk",
+    "fetch_url",
+    "scrape_metadata",
+    "check_website",
+    "daily_brief",
+    "create_goal_contract",
+    "update_goal_contract",
+    "list_goal_contracts",
+    "build_evidence_bundle",
+    "timeline_replay",
     "weekly_operating_review",
+    "learn_from_website",
 }
 
 # Lifecycle policy (governed thresholds, tunable in one place).
 POLICY = {
-    "window_days": 30,          # telemetry window for review
-    "unused_age_days": 21,      # candidate/active unused this long -> flag
-    "stale_age_days": 90,       # active + never updated -> tech-refresh review
-    "min_calls_for_stats": 5,   # don't judge failure rate on tiny samples
+    "window_days": 30,  # telemetry window for review
+    "unused_age_days": 21,  # candidate/active unused this long -> flag
+    "stale_age_days": 90,  # active + never updated -> tech-refresh review
+    "min_calls_for_stats": 5,  # don't judge failure rate on tiny samples
     "pause_failure_rate": 0.5,  # >50% failures -> pause_and_revalidate
     "optimize_failure_rate": 0.2,
     "slow_p90_ms": 10_000,
@@ -300,9 +337,7 @@ def _db():
             finished_at TEXT
         )""")
         existing_run_columns = {
-            row[1] for row in conn.execute(
-                "PRAGMA table_info(skillops_learning_runs)"
-            ).fetchall()
+            row[1] for row in conn.execute("PRAGMA table_info(skillops_learning_runs)").fetchall()
         }
         for column, definition in {
             "run_type": "TEXT DEFAULT 'learn'",
@@ -317,14 +352,10 @@ def _db():
             "capabilities_unchanged": "INTEGER DEFAULT 0",
         }.items():
             if column not in existing_run_columns:
-                conn.execute(
-                    f"ALTER TABLE skillops_learning_runs "
-                    f"ADD COLUMN {column} {definition}"
-                )
+                conn.execute(f"ALTER TABLE skillops_learning_runs ADD COLUMN {column} {definition}")
         existing_import_columns = {
-            row[1] for row in conn.execute(
-                "PRAGMA table_info(skillops_corpus_import_runs)"
-            ).fetchall()
+            row[1]
+            for row in conn.execute("PRAGMA table_info(skillops_corpus_import_runs)").fetchall()
         }
         for column, definition in {
             "include_provisional": "INTEGER DEFAULT 1",
@@ -332,13 +363,11 @@ def _db():
         }.items():
             if column not in existing_import_columns:
                 conn.execute(
-                    f"ALTER TABLE skillops_corpus_import_runs "
-                    f"ADD COLUMN {column} {definition}"
+                    f"ALTER TABLE skillops_corpus_import_runs ADD COLUMN {column} {definition}"
                 )
         existing_sync_columns = {
-            row[1] for row in conn.execute(
-                "PRAGMA table_info(skillops_vector_sync_files)"
-            ).fetchall()
+            row[1]
+            for row in conn.execute("PRAGMA table_info(skillops_vector_sync_files)").fetchall()
         }
         for column, definition in {
             "sync_policy_hash": "TEXT",
@@ -348,13 +377,11 @@ def _db():
         }.items():
             if column not in existing_sync_columns:
                 conn.execute(
-                    f"ALTER TABLE skillops_vector_sync_files "
-                    f"ADD COLUMN {column} {definition}"
+                    f"ALTER TABLE skillops_vector_sync_files ADD COLUMN {column} {definition}"
                 )
         capability_columns = {
-            row[1] for row in conn.execute(
-                "PRAGMA table_info(skillops_coding_capabilities)"
-            ).fetchall()
+            row[1]
+            for row in conn.execute("PRAGMA table_info(skillops_coding_capabilities)").fetchall()
         }
         for column, definition in {
             "corpus_type": "TEXT DEFAULT 'ai_coding_capabilities'",
@@ -372,26 +399,20 @@ def _db():
         }.items():
             if column not in capability_columns:
                 conn.execute(
-                    f"ALTER TABLE skillops_coding_capabilities "
-                    f"ADD COLUMN {column} {definition}"
+                    f"ALTER TABLE skillops_coding_capabilities ADD COLUMN {column} {definition}"
                 )
         conn.execute(
             "UPDATE skillops_coding_capabilities "
             "SET corpus_type='ai_coding_capabilities' "
             "WHERE corpus_type IS NULL OR corpus_type=''"
         )
-        conn.execute(
-            "UPDATE skillops_coding_capabilities SET active=1 "
-            "WHERE active IS NULL"
-        )
+        conn.execute("UPDATE skillops_coding_capabilities SET active=1 WHERE active IS NULL")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_skillops_capabilities_corpus "
             "ON skillops_coding_capabilities(corpus_type, canonical_title)"
         )
         evaluation_columns = {
-            row[1] for row in conn.execute(
-                "PRAGMA table_info(skillops_n8n_evaluations)"
-            ).fetchall()
+            row[1] for row in conn.execute("PRAGMA table_info(skillops_n8n_evaluations)").fetchall()
         }
         for column, definition in {
             "corpus_sha256": "TEXT DEFAULT ''",
@@ -401,8 +422,7 @@ def _db():
         }.items():
             if column not in evaluation_columns:
                 conn.execute(
-                    f"ALTER TABLE skillops_n8n_evaluations "
-                    f"ADD COLUMN {column} {definition}"
+                    f"ALTER TABLE skillops_n8n_evaluations ADD COLUMN {column} {definition}"
                 )
         yield conn
         conn.commit()
@@ -416,24 +436,23 @@ def record_invocation(skill: str, ok: bool, latency_ms: int, error: str = None):
     try:
         with _db() as conn:
             conn.execute(
-                "INSERT INTO skillops_telemetry (skill, ok, latency_ms, error) "
-                "VALUES (?,?,?,?)",
-                (skill, 1 if ok else 0, latency_ms,
-                 (error or "")[:500] or None))
+                "INSERT INTO skillops_telemetry (skill, ok, latency_ms, error) VALUES (?,?,?,?)",
+                (skill, 1 if ok else 0, latency_ms, (error or "")[:500] or None),
+            )
     except Exception:
         pass  # telemetry must never break a skill call
 
 
 # ------------------------------------------------------------- observations
-def observe_pattern(pattern: str, context: str = "",
-                    frequency_hint: str = "") -> dict:
+def observe_pattern(pattern: str, context: str = "", frequency_hint: str = "") -> dict:
     """Record a recurring task/pattern/friction point worth automating."""
     obs_id = str(uuid.uuid4())[:8]
     with _db() as conn:
         conn.execute(
             "INSERT INTO skillops_observations "
             "(id, pattern, context, frequency_hint) VALUES (?,?,?,?)",
-            (obs_id, pattern, context, frequency_hint))
+            (obs_id, pattern, context, frequency_hint),
+        )
     return {"status": "recorded", "observation_id": obs_id}
 
 
@@ -443,11 +462,23 @@ def list_observations(status: str = "open") -> dict:
         rows = conn.execute(
             "SELECT id, pattern, context, frequency_hint, status, created_at "
             "FROM skillops_observations WHERE status = ? OR ? = 'all' "
-            "ORDER BY created_at DESC LIMIT 50", (status, status)).fetchall()
-    return {"count": len(rows), "observations": [
-        {"id": r[0], "pattern": r[1], "context": r[2],
-         "frequency_hint": r[3], "status": r[4], "created_at": r[5]}
-        for r in rows]}
+            "ORDER BY created_at DESC LIMIT 50",
+            (status, status),
+        ).fetchall()
+    return {
+        "count": len(rows),
+        "observations": [
+            {
+                "id": r[0],
+                "pattern": r[1],
+                "context": r[2],
+                "frequency_hint": r[3],
+                "status": r[4],
+                "created_at": r[5],
+            }
+            for r in rows
+        ],
+    }
 
 
 def _load_runtime_config() -> dict:
@@ -460,8 +491,7 @@ def _require_vector_store_id() -> str:
     if isinstance(configured, list) and configured:
         configured = configured[0]
     vector_store_id = str(
-        configured or cfg.get("vector_store_id")
-        or os.getenv("PJ_VECTOR_STORE_ID") or ""
+        configured or cfg.get("vector_store_id") or os.getenv("PJ_VECTOR_STORE_ID") or ""
     ).strip()
     if not vector_store_id:
         raise ValueError(
@@ -484,9 +514,15 @@ def _openai_headers(api_key: str) -> dict:
     }
 
 
-def _request_with_retry(url: str, *, headers: dict, params: dict = None,
-                        timeout: int = 30, stream: bool = False,
-                        retries: int = DEFAULT_REQUEST_RETRIES):
+def _request_with_retry(
+    url: str,
+    *,
+    headers: dict,
+    params: dict = None,
+    timeout: int = 30,
+    stream: bool = False,
+    retries: int = DEFAULT_REQUEST_RETRIES,
+):
     return get_with_retry(
         RequestsHttpProvider(requests),
         url,
@@ -502,8 +538,7 @@ def _request_with_retry(url: str, *, headers: dict, params: dict = None,
     )
 
 
-def _list_vector_store_files(vector_store_id: str, api_key: str,
-                             max_files: int = 0) -> list:
+def _list_vector_store_files(vector_store_id: str, api_key: str, max_files: int = 0) -> list:
     files = []
     after = None
     while True:
@@ -524,9 +559,7 @@ def _list_vector_store_files(vector_store_id: str, api_key: str,
             return files[:max_files]
         if not payload.get("has_more"):
             break
-        after = payload.get("last_id") or (
-            data[-1].get("id") if data else None
-        )
+        after = payload.get("last_id") or (data[-1].get("id") if data else None)
         if not after:
             break
     return files
@@ -600,25 +633,21 @@ def _safe_file_id(file_id: str) -> str:
     return value
 
 
-def cache_vector_source(file_id: str, content: bytes, *,
-                        filename: str = "", source_sha256: str = "") -> dict:
+def cache_vector_source(
+    file_id: str, content: bytes, *, filename: str = "", source_sha256: str = ""
+) -> dict:
     """Securely cache source text that OpenAI's input File API cannot return."""
     file_id = _safe_file_id(file_id)
     if not isinstance(content, bytes):
         raise ValueError("content must be bytes")
     if len(content) > MAX_MAX_CHARS_PER_FILE:
-        raise ValueError(
-            f"source exceeds cache limit ({MAX_MAX_CHARS_PER_FILE} bytes)"
-        )
+        raise ValueError(f"source exceeds cache limit ({MAX_MAX_CHARS_PER_FILE} bytes)")
     content.decode("utf-8")
     actual_sha256 = hashlib.sha256(content).hexdigest()
     if source_sha256 and source_sha256 != actual_sha256:
         raise ValueError("source_sha256 does not match content")
 
-    if (
-        _VECTOR_SOURCE_CACHE_DIR.exists()
-        and _VECTOR_SOURCE_CACHE_DIR.is_symlink()
-    ):
+    if _VECTOR_SOURCE_CACHE_DIR.exists() and _VECTOR_SOURCE_CACHE_DIR.is_symlink():
         raise RuntimeError("vector source cache directory must not be a symlink")
     _VECTOR_SOURCE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(_VECTOR_SOURCE_CACHE_DIR, 0o700)
@@ -643,9 +672,7 @@ def cache_vector_source(file_id: str, content: bytes, *,
             os.fsync(handle.fileno())
             temporary_content = Path(handle.name)
             temporary_paths.append(temporary_content)
-        temporary_manifest = (
-            _VECTOR_SOURCE_CACHE_DIR / f".{file_id}.{uuid.uuid4().hex}.json"
-        )
+        temporary_manifest = _VECTOR_SOURCE_CACHE_DIR / f".{file_id}.{uuid.uuid4().hex}.json"
         temporary_manifest.write_text(
             json.dumps(manifest, sort_keys=True),
             encoding="utf-8",
@@ -667,13 +694,11 @@ def cache_vector_source(file_id: str, content: bytes, *,
     }
 
 
-def _read_cached_vector_source(file_id: str, metadata: dict, entry: dict,
-                               max_chars_per_file: int) -> str | None:
+def _read_cached_vector_source(
+    file_id: str, metadata: dict, entry: dict, max_chars_per_file: int
+) -> str | None:
     file_id = _safe_file_id(file_id)
-    if (
-        _VECTOR_SOURCE_CACHE_DIR.exists()
-        and _VECTOR_SOURCE_CACHE_DIR.is_symlink()
-    ):
+    if _VECTOR_SOURCE_CACHE_DIR.exists() and _VECTOR_SOURCE_CACHE_DIR.is_symlink():
         raise RuntimeError("vector source cache directory must not be a symlink")
     content_path = _VECTOR_SOURCE_CACHE_DIR / f"{file_id}.content"
     manifest_path = _VECTOR_SOURCE_CACHE_DIR / f"{file_id}.json"
@@ -690,9 +715,7 @@ def _read_cached_vector_source(file_id: str, metadata: dict, entry: dict,
     content = content_path.read_bytes()
     actual_sha256 = hashlib.sha256(content).hexdigest()
     expected_sha256 = str(
-        (entry.get("attributes") or {}).get("source_sha256")
-        or manifest.get("source_sha256")
-        or ""
+        (entry.get("attributes") or {}).get("source_sha256") or manifest.get("source_sha256") or ""
     )
     if expected_sha256 and actual_sha256 != expected_sha256:
         raise RuntimeError(f"cached source hash mismatch for {file_id}")
@@ -717,17 +740,14 @@ def _cached_vector_source_fingerprint(file_id: str) -> str:
         raise RuntimeError(f"cached source manifest for {file_id} is unsafe")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     fingerprint = str(manifest.get("source_sha256") or "").lower()
-    if (
-        len(fingerprint) != 64
-        or any(char not in "0123456789abcdef" for char in fingerprint)
-    ):
+    if len(fingerprint) != 64 or any(char not in "0123456789abcdef" for char in fingerprint):
         raise RuntimeError(f"cached source manifest for {file_id} has no valid hash")
     return fingerprint
 
 
-def _read_openai_file_content(file_id: str, api_key: str,
-                              max_chars_per_file: int,
-                              expected_bytes: int = 0) -> tuple[str, bool]:
+def _read_openai_file_content(
+    file_id: str, api_key: str, max_chars_per_file: int, expected_bytes: int = 0
+) -> tuple[str, bool]:
     headers = _openai_headers(api_key)
     headers["Accept-Encoding"] = "identity"
     response = _request_with_retry(
@@ -787,13 +807,11 @@ def _markdown_heading_section(text: str, heading: str) -> str:
     return match.group(1).strip() if match else ""
 
 
-def _markdown_section_list(text: str, heading: str,
-                           ordered: bool = False) -> list:
+def _markdown_section_list(text: str, heading: str, ordered: bool = False) -> list:
     section = _markdown_heading_section(text, heading)
     if not section:
         return []
-    pattern = r"^\s*\d+[.)]\s+(.+?)\s*$" if ordered \
-        else r"^\s*-\s+(.+?)\s*$"
+    pattern = r"^\s*\d+[.)]\s+(.+?)\s*$" if ordered else r"^\s*-\s+(.+?)\s*$"
     values = []
     seen = set()
     for match in re.finditer(pattern, section, flags=re.M):
@@ -888,17 +906,21 @@ def _parse_coding_capability_corpus(text: str) -> dict:
     text = text or ""
     blocks = docops._extract_item_blocks(text)
     first_marker = re.search(r"^---ITEM_START", text, flags=re.M | re.I)
-    preamble = text[:first_marker.start()] if first_marker else text
-    start_count = len(re.findall(
-        r"^---ITEM_START(?:[^\r\n]*)$",
-        text,
-        flags=re.M | re.I,
-    ))
-    end_count = len(re.findall(
-        r"^---ITEM_END(?:[^\r\n]*)$",
-        text,
-        flags=re.M | re.I,
-    ))
+    preamble = text[: first_marker.start()] if first_marker else text
+    start_count = len(
+        re.findall(
+            r"^---ITEM_START(?:[^\r\n]*)$",
+            text,
+            flags=re.M | re.I,
+        )
+    )
+    end_count = len(
+        re.findall(
+            r"^---ITEM_END(?:[^\r\n]*)$",
+            text,
+            flags=re.M | re.I,
+        )
+    )
     errors = []
     invalid = 0
     if start_count != end_count or len(blocks) != start_count:
@@ -963,86 +985,65 @@ def _parse_coding_capability_corpus(text: str) -> dict:
         freshness_raw = metadata.get("requires_current_docs_check")
         if isinstance(freshness_raw, bool):
             requires_current_docs_check = freshness_raw
-        elif (
-            isinstance(freshness_raw, str)
-            and freshness_raw.strip().lower() in {"true", "false"}
-        ):
-            requires_current_docs_check = (
-                freshness_raw.strip().lower() == "true"
-            )
+        elif isinstance(freshness_raw, str) and freshness_raw.strip().lower() in {"true", "false"}:
+            requires_current_docs_check = freshness_raw.strip().lower() == "true"
         else:
             invalid += 1
-            errors.append(
-                f"item {index}: requires_current_docs_check must be an "
-                "explicit boolean"
-            )
+            errors.append(f"item {index}: requires_current_docs_check must be an explicit boolean")
             continue
         if item_id != marker_id:
             invalid += 1
-            errors.append(
-                f"item {index}: item_id {item_id!r} does not match "
-                f"marker {marker_id!r}"
-            )
+            errors.append(f"item {index}: item_id {item_id!r} does not match marker {marker_id!r}")
             continue
         if item_id in seen_ids:
             invalid += 1
             errors.append(f"item {index}: duplicate item_id {item_id!r}")
             continue
         seen_ids.add(item_id)
-        record_sha256 = hashlib.sha256(
-            block["content"].encode("utf-8")
-        ).hexdigest()
-        records.append({
-            "item_id": item_id,
-            "canonical_title": title,
-            "tool_family": tool_family,
-            "surface": surface,
-            "version_scope": str(metadata.get("version_scope") or "").strip(),
-            "corpus_status": str(metadata.get("corpus_status") or "").strip(),
-            "requires_current_docs_check": requires_current_docs_check,
-            "provisional": (
-                docops._is_truthy(
-                    metadata.get("provisional", metadata.get("is_provisional"))
-                )
-                or "provisional" in str(
-                    metadata.get("corpus_status") or ""
-                ).strip().lower()
-                or str(metadata.get("corpus_status") or "").strip().lower()
-                in {"draft", "experimental", "wip"}
-            ),
-            "source_page_url": str(
-                metadata.get("source_page_url") or ""
-            ).strip(),
-            "source_record_id": str(
-                metadata.get("source_record_id") or item_id
-            ).strip(),
-            "source_content_sha256": str(
-                metadata.get("content_sha256") or ""
-            ).strip(),
-            "record_sha256": record_sha256,
-            "what_it_teaches": docops._extract_markdown_field(
-                block["content"],
-                "What this item teaches",
-            ),
-            "appropriate_tasks": _markdown_section_list(
-                block["content"],
-                "Appropriate tasks",
-            ),
-            "workflow": _markdown_section_list(
-                block["content"],
-                "Recommended operating workflow",
-                ordered=True,
-            ),
-            "safety_controls": _markdown_section_list(
-                block["content"],
-                "Safety and governance controls",
-            ),
-            "authoritative_sources": _markdown_section_list(
-                block["content"],
-                "Current authoritative sources",
-            ),
-            "metadata": metadata,
-        })
+        record_sha256 = hashlib.sha256(block["content"].encode("utf-8")).hexdigest()
+        records.append(
+            {
+                "item_id": item_id,
+                "canonical_title": title,
+                "tool_family": tool_family,
+                "surface": surface,
+                "version_scope": str(metadata.get("version_scope") or "").strip(),
+                "corpus_status": str(metadata.get("corpus_status") or "").strip(),
+                "requires_current_docs_check": requires_current_docs_check,
+                "provisional": (
+                    docops._is_truthy(metadata.get("provisional", metadata.get("is_provisional")))
+                    or "provisional" in str(metadata.get("corpus_status") or "").strip().lower()
+                    or str(metadata.get("corpus_status") or "").strip().lower()
+                    in {"draft", "experimental", "wip"}
+                ),
+                "source_page_url": str(metadata.get("source_page_url") or "").strip(),
+                "source_record_id": str(metadata.get("source_record_id") or item_id).strip(),
+                "source_content_sha256": str(metadata.get("content_sha256") or "").strip(),
+                "record_sha256": record_sha256,
+                "what_it_teaches": docops._extract_markdown_field(
+                    block["content"],
+                    "What this item teaches",
+                ),
+                "appropriate_tasks": _markdown_section_list(
+                    block["content"],
+                    "Appropriate tasks",
+                ),
+                "workflow": _markdown_section_list(
+                    block["content"],
+                    "Recommended operating workflow",
+                    ordered=True,
+                ),
+                "safety_controls": _markdown_section_list(
+                    block["content"],
+                    "Safety and governance controls",
+                ),
+                "authoritative_sources": _markdown_section_list(
+                    block["content"],
+                    "Current authoritative sources",
+                ),
+                "metadata": metadata,
+            }
+        )
     return {
         "corpus_type": "ai_coding_capabilities",
         "corpus_version": corpus_version,
@@ -1057,15 +1058,12 @@ def _parse_coding_capability_corpus(text: str) -> dict:
 def _looks_like_coding_capability_corpus(text: str) -> bool:
     candidate = text or ""
     first_marker = re.search(r"^---ITEM_START", candidate, flags=re.M | re.I)
-    preamble = candidate[:first_marker.start()] if first_marker else candidate
-    if (
-        re.search(
-            rf"^\s*corpus_type\s*:\s*{re.escape(N8N_CORPUS_TYPE)}\s*$",
-            preamble,
-            flags=re.M | re.I,
-        )
-        or re.search(r"^\s*#\s+.*\bn8n\b.*\bcorpus\b", preamble, flags=re.M | re.I)
-    ):
+    preamble = candidate[: first_marker.start()] if first_marker else candidate
+    if re.search(
+        rf"^\s*corpus_type\s*:\s*{re.escape(N8N_CORPUS_TYPE)}\s*$",
+        preamble,
+        flags=re.M | re.I,
+    ) or re.search(r"^\s*#\s+.*\bn8n\b.*\bcorpus\b", preamble, flags=re.M | re.I):
         return False
     first_item = re.search(
         r"^---ITEM_START(?:[^\r\n]*)\r?\n"
@@ -1075,22 +1073,28 @@ def _looks_like_coding_capability_corpus(text: str) -> bool:
     )
     first_body = first_item.group("body") if first_item else ""
     metadata = _parse_leading_item_metadata(first_body)
-    header_signal = bool(re.search(
-        r"^\s*#\s+AI CODING TOOLS\s+[—-]+\s+"
-        r"VECTOR-STORE TRAINING CORPUS\s*$",
-        preamble,
-        flags=re.M | re.I,
-    ))
-    training_signal = bool(re.search(
-        r"^##\s+TRAINING ITEMS\s*$",
-        preamble,
-        flags=re.M | re.I,
-    ))
-    corpus_metadata_signal = bool(re.search(
-        r"^\s*(?:corpus_version|record_count)\s*:",
-        preamble,
-        flags=re.M | re.I,
-    ))
+    header_signal = bool(
+        re.search(
+            r"^\s*#\s+AI CODING TOOLS\s+[—-]+\s+"
+            r"VECTOR-STORE TRAINING CORPUS\s*$",
+            preamble,
+            flags=re.M | re.I,
+        )
+    )
+    training_signal = bool(
+        re.search(
+            r"^##\s+TRAINING ITEMS\s*$",
+            preamble,
+            flags=re.M | re.I,
+        )
+    )
+    corpus_metadata_signal = bool(
+        re.search(
+            r"^\s*(?:corpus_version|record_count)\s*:",
+            preamble,
+            flags=re.M | re.I,
+        )
+    )
     capability_metadata_count = sum(
         key in metadata
         for key in (
@@ -1104,11 +1108,7 @@ def _looks_like_coding_capability_corpus(text: str) -> bool:
     )
     return bool(
         capability_metadata_count >= 3
-        and (
-            header_signal
-            or training_signal
-            or corpus_metadata_signal
-        )
+        and (header_signal or training_signal or corpus_metadata_signal)
     )
 
 
@@ -1128,9 +1128,7 @@ def _looks_like_codeops_guidance(text: str) -> bool:
             "corpus_status",
             "requires_current_docs_check",
         )
-        signal_count = sum(
-            metadata.get(key) not in (None, "") for key in metadata_signals
-        )
+        signal_count = sum(metadata.get(key) not in (None, "") for key in metadata_signals)
         section_count = sum(
             bool(_markdown_heading_section(block["content"], heading))
             for heading in (
@@ -1142,10 +1140,7 @@ def _looks_like_codeops_guidance(text: str) -> bool:
         if (
             section_count >= 2
             and signal_count >= 4
-            and (
-                metadata.get("source_page_url")
-                or metadata.get("source_record_id")
-            )
+            and (metadata.get("source_page_url") or metadata.get("source_record_id"))
         ):
             return True
     return False
@@ -1163,19 +1158,18 @@ def _is_coding_capability_corpus(text: str) -> bool:
 
 
 def import_coding_capability_corpus_text(
-        corpus_text: str,
-        overwrite_existing: bool = True,
-        include_provisional: bool = True,
-        dry_run: bool = False,
-        source_file_id: str = "",
-        parent_run_id: str = "",
-        audit: bool = True) -> dict:
+    corpus_text: str,
+    overwrite_existing: bool = True,
+    include_provisional: bool = True,
+    dry_run: bool = False,
+    source_file_id: str = "",
+    parent_run_id: str = "",
+    audit: bool = True,
+) -> dict:
     """Import structured coding-tool guidance into the capability registry."""
     parsed = _parse_coding_capability_corpus(corpus_text)
     import_run_id = "cap-" + str(uuid.uuid4())[:8]
-    source_sha256 = hashlib.sha256(
-        (corpus_text or "").encode("utf-8")
-    ).hexdigest()
+    source_sha256 = hashlib.sha256((corpus_text or "").encode("utf-8")).hexdigest()
     now = datetime.now(timezone.utc).isoformat()
     if audit:
         with _db() as conn:
@@ -1208,14 +1202,16 @@ def import_coding_capability_corpus_text(
             for record in parsed["records"]:
                 if record["provisional"] and not include_provisional:
                     skipped_provisional += 1
-                    imports.append({
-                        "item_id": record["item_id"],
-                        "canonical_title": record["canonical_title"],
-                        "tool_family": record["tool_family"],
-                        "surface": record["surface"],
-                        "version": None,
-                        "action": "skipped_provisional",
-                    })
+                    imports.append(
+                        {
+                            "item_id": record["item_id"],
+                            "canonical_title": record["canonical_title"],
+                            "tool_family": record["tool_family"],
+                            "surface": record["surface"],
+                            "version": None,
+                            "action": "skipped_provisional",
+                        }
+                    )
                     continue
                 existing = conn.execute(
                     "SELECT record_sha256, version "
@@ -1298,18 +1294,18 @@ def import_coding_capability_corpus_text(
                         action = "created"
                         version = 1
                         created += 1
-                imports.append({
-                    "item_id": record["item_id"],
-                    "canonical_title": record["canonical_title"],
-                    "tool_family": record["tool_family"],
-                    "surface": record["surface"],
-                    "version": version,
-                    "action": action,
-                })
+                imports.append(
+                    {
+                        "item_id": record["item_id"],
+                        "canonical_title": record["canonical_title"],
+                        "tool_family": record["tool_family"],
+                        "surface": record["surface"],
+                        "version": version,
+                        "action": action,
+                    }
+                )
 
-    status = "invalid" if parsed["errors"] else (
-        "dry_run_complete" if dry_run else "imported"
-    )
+    status = "invalid" if parsed["errors"] else ("dry_run_complete" if dry_run else "imported")
     details = {
         "imports": imports,
         "errors": parsed["errors"],
@@ -1473,20 +1469,20 @@ def _load_n8n_release_approval() -> dict:
     configured = configured if isinstance(configured, dict) else {}
     return {
         "corpus_sha256": str(
-            os.getenv("PJ_N8N_APPROVED_CORPUS_SHA256")
-            or configured.get("corpus_sha256")
-            or ""
-        ).strip().lower(),
+            os.getenv("PJ_N8N_APPROVED_CORPUS_SHA256") or configured.get("corpus_sha256") or ""
+        )
+        .strip()
+        .lower(),
         "corpus_version": str(
-            os.getenv("PJ_N8N_APPROVED_CORPUS_VERSION")
-            or configured.get("corpus_version")
-            or ""
+            os.getenv("PJ_N8N_APPROVED_CORPUS_VERSION") or configured.get("corpus_version") or ""
         ).strip(),
         "evaluation_receipt_sha256": str(
             os.getenv("PJ_N8N_APPROVED_EVALUATION_SHA256")
             or configured.get("evaluation_receipt_sha256")
             or ""
-        ).strip().lower(),
+        )
+        .strip()
+        .lower(),
     }
 
 
@@ -1508,8 +1504,7 @@ def load_n8n_evaluation_receipt(path: Path) -> dict:
     return receipt
 
 
-def cache_n8n_evaluation_receipt(
-        corpus_sha256: str, receipt: dict) -> dict:
+def cache_n8n_evaluation_receipt(corpus_sha256: str, receipt: dict) -> dict:
     corpus_sha256 = str(corpus_sha256 or "").strip().lower()
     if not re.fullmatch(r"[a-f0-9]{64}", corpus_sha256):
         raise ValueError("invalid n8n corpus SHA-256")
@@ -1523,13 +1518,8 @@ def cache_n8n_evaluation_receipt(
     ).encode("utf-8")
     if len(payload) > N8N_MAX_EVALUATION_RECEIPT_BYTES:
         raise ValueError("n8n evaluation receipt exceeds the safety limit")
-    if (
-        _N8N_EVALUATION_RECEIPT_DIR.exists()
-        and _N8N_EVALUATION_RECEIPT_DIR.is_symlink()
-    ):
-        raise RuntimeError(
-            "n8n evaluation receipt directory must not be a symlink"
-        )
+    if _N8N_EVALUATION_RECEIPT_DIR.exists() and _N8N_EVALUATION_RECEIPT_DIR.is_symlink():
+        raise RuntimeError("n8n evaluation receipt directory must not be a symlink")
     _N8N_EVALUATION_RECEIPT_DIR.mkdir(parents=True, exist_ok=True)
     os.chmod(_N8N_EVALUATION_RECEIPT_DIR, 0o700)
     destination = _N8N_EVALUATION_RECEIPT_DIR / f"{corpus_sha256}.json"
@@ -1556,8 +1546,7 @@ def cache_n8n_evaluation_receipt(
     }
 
 
-def _load_n8n_evaluation_receipt_for_corpus(
-        corpus_sha256: str) -> dict | None:
+def _load_n8n_evaluation_receipt_for_corpus(corpus_sha256: str) -> dict | None:
     config = _load_runtime_config()
     configured_path = str(
         os.getenv("PJ_N8N_EVALUATION_RECEIPT_PATH")
@@ -1574,64 +1563,39 @@ def _load_n8n_evaluation_receipt_for_corpus(
     return None
 
 
-def _n8n_evaluation_gates(
-        capability_count: int,
-        metrics: dict,
-        *,
-        source_integrity: bool) -> dict:
+def _n8n_evaluation_gates(capability_count: int, metrics: dict, *, source_integrity: bool) -> dict:
     canonical_total = int(metrics.get("canonical_pages_total", 0))
     canonical_covered = int(metrics.get("canonical_pages_covered", 0))
     inaccessible_total = int(metrics.get("inaccessible_sources_total", 0))
-    inaccessible_dispositioned = int(
-        metrics.get("inaccessible_sources_dispositioned", 0)
-    )
+    inaccessible_dispositioned = int(metrics.get("inaccessible_sources_dispositioned", 0))
     retrieval_total = int(metrics.get("retrieval_cases_total", 0))
     retrieval_passed = int(metrics.get("retrieval_top5_passed", 0))
     security_total = int(metrics.get("security_warning_cases_total", 0))
     security_passed = int(metrics.get("security_warning_cases_passed", 0))
-    inventory_coverage = (
-        canonical_covered / canonical_total if canonical_total else 0.0
-    )
+    inventory_coverage = canonical_covered / canonical_total if canonical_total else 0.0
     inaccessible_coverage = (
-        inaccessible_dispositioned / inaccessible_total
-        if inaccessible_total else 1.0
+        inaccessible_dispositioned / inaccessible_total if inaccessible_total else 1.0
     )
-    retrieval_top5 = (
-        retrieval_passed / retrieval_total if retrieval_total else 0.0
-    )
-    security_warning_retrieval = (
-        security_passed / security_total if security_total else 0.0
-    )
+    retrieval_top5 = retrieval_passed / retrieval_total if retrieval_total else 0.0
+    security_warning_retrieval = security_passed / security_total if security_total else 0.0
     gates = {
-        "metric_consistency": all((
-            0 <= canonical_covered <= canonical_total,
-            0 <= inaccessible_dispositioned <= inaccessible_total,
-            0 <= retrieval_passed <= retrieval_total,
-            0 <= security_passed <= security_total,
-        )),
-        "capability_count": (
-            N8N_MIN_CAPABILITIES
-            <= int(capability_count)
-            <= N8N_MAX_CAPABILITIES
+        "metric_consistency": all(
+            (
+                0 <= canonical_covered <= canonical_total,
+                0 <= inaccessible_dispositioned <= inaccessible_total,
+                0 <= retrieval_passed <= retrieval_total,
+                0 <= security_passed <= security_total,
+            )
         ),
+        "capability_count": (N8N_MIN_CAPABILITIES <= int(capability_count) <= N8N_MAX_CAPABILITIES),
         "inventory_coverage": (
-            canonical_total > 0
-            and inventory_coverage >= N8N_MIN_INVENTORY_COVERAGE
+            canonical_total > 0 and inventory_coverage >= N8N_MIN_INVENTORY_COVERAGE
         ),
         "inaccessible_source_disposition": inaccessible_coverage >= 1.0,
-        "top5_retrieval": (
-            retrieval_total > 0
-            and retrieval_top5 >= N8N_MIN_TOP5_RETRIEVAL
-        ),
-        "security_warning_retrieval": (
-            security_total > 0 and security_warning_retrieval >= 1.0
-        ),
-        "zero_invented_node_parameters": (
-            int(metrics.get("invented_node_parameters", -1)) == 0
-        ),
-        "zero_credential_exposure": (
-            int(metrics.get("credential_exposures", -1)) == 0
-        ),
+        "top5_retrieval": (retrieval_total > 0 and retrieval_top5 >= N8N_MIN_TOP5_RETRIEVAL),
+        "security_warning_retrieval": (security_total > 0 and security_warning_retrieval >= 1.0),
+        "zero_invented_node_parameters": (int(metrics.get("invented_node_parameters", -1)) == 0),
+        "zero_credential_exposure": (int(metrics.get("credential_exposures", -1)) == 0),
         "source_integrity": bool(source_integrity),
     }
     return {
@@ -1640,27 +1604,20 @@ def _n8n_evaluation_gates(
         "metrics": {
             **{key: int(metrics.get(key, 0)) for key in _N8N_EVALUATION_FIELDS},
             "inventory_coverage": round(inventory_coverage, 6),
-            "inaccessible_disposition_coverage": round(
-                inaccessible_coverage, 6
-            ),
+            "inaccessible_disposition_coverage": round(inaccessible_coverage, 6),
             "top5_retrieval_rate": round(retrieval_top5, 6),
-            "security_warning_retrieval_rate": round(
-                security_warning_retrieval, 6
-            ),
+            "security_warning_retrieval_rate": round(security_warning_retrieval, 6),
         },
     }
 
 
 def _evaluate_n8n_receipt(
-        parsed: dict,
-        corpus_sha256: str,
-        receipt: dict | None) -> tuple[dict, list[str]]:
+    parsed: dict, corpus_sha256: str, receipt: dict | None
+) -> tuple[dict, list[str]]:
     errors = []
     expected_registry_sha256 = _n8n_records_sha256(parsed["records"])
     if not isinstance(receipt, dict):
-        errors.append(
-            "an independent n8n evaluation receipt is required"
-        )
+        errors.append("an independent n8n evaluation receipt is required")
         receipt = {}
     metrics = receipt.get("metrics")
     metrics = metrics if isinstance(metrics, dict) else {}
@@ -1675,72 +1632,49 @@ def _evaluate_n8n_receipt(
             errors.append(f"n8n evaluation receipt is missing {name}")
     if str(receipt.get("schema_version") or "") != "1":
         errors.append("n8n evaluation receipt schema_version must be '1'")
-    if (
-        str(receipt.get("corpus_sha256") or "").strip().lower()
-        != corpus_sha256
-    ):
+    if str(receipt.get("corpus_sha256") or "").strip().lower() != corpus_sha256:
         errors.append("n8n evaluation receipt corpus_sha256 does not match")
-    if (
-        str(receipt.get("corpus_version") or "").strip()
-        != parsed["corpus_version"]
-    ):
+    if str(receipt.get("corpus_version") or "").strip() != parsed["corpus_version"]:
         errors.append("n8n evaluation receipt corpus_version does not match")
-    if (
-        str(receipt.get("registry_sha256") or "").strip().lower()
-        != expected_registry_sha256
-    ):
+    if str(receipt.get("registry_sha256") or "").strip().lower() != expected_registry_sha256:
         errors.append("n8n evaluation receipt registry_sha256 does not match")
     if not re.fullmatch(
         r"[a-f0-9]{64}",
         str(receipt.get("evidence_sha256") or "").strip().lower(),
     ):
-        errors.append(
-            "n8n evaluation receipt evidence_sha256 must be a lowercase SHA-256"
-        )
+        errors.append("n8n evaluation receipt evidence_sha256 must be a lowercase SHA-256")
     normalized_metrics = {}
     for field in _N8N_EVALUATION_FIELDS:
         value = metrics.get(field)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            errors.append(
-                f"n8n evaluation receipt {field} must be a non-negative integer"
-            )
+            errors.append(f"n8n evaluation receipt {field} must be a non-negative integer")
             normalized_metrics[field] = 0
         else:
             normalized_metrics[field] = value
     declared_metrics = parsed["declared_evaluation"]["metrics"]
     if any(
-        int(declared_metrics.get(field, -1))
-        != normalized_metrics[field]
+        int(declared_metrics.get(field, -1)) != normalized_metrics[field]
         for field in _N8N_EVALUATION_FIELDS
     ):
-        errors.append(
-            "n8n corpus-declared evaluation metrics do not match the "
-            "independent receipt"
-        )
+        errors.append("n8n corpus-declared evaluation metrics do not match the independent receipt")
     evaluation = _n8n_evaluation_gates(
         len(parsed["records"]),
         normalized_metrics,
         source_integrity=(
             bool(parsed["records"])
             and len(parsed["records"]) == parsed["items_total"]
-            and all(
-                record["source_content_sha256"]
-                for record in parsed["records"]
-            )
+            and all(record["source_content_sha256"] for record in parsed["records"])
         ),
     )
     receipt_sha256 = _n8n_receipt_sha256(receipt) if receipt else ""
     approval = _load_n8n_release_approval()
     approval_gates = {
         "approved_corpus_digest": bool(
-            re.fullmatch(
-                r"[a-f0-9]{64}", approval["corpus_sha256"]
-            )
+            re.fullmatch(r"[a-f0-9]{64}", approval["corpus_sha256"])
             and approval["corpus_sha256"] == corpus_sha256
         ),
         "approved_corpus_version": bool(
-            approval["corpus_version"]
-            and approval["corpus_version"] == parsed["corpus_version"]
+            approval["corpus_version"] and approval["corpus_version"] == parsed["corpus_version"]
         ),
         "approved_evaluation_receipt": bool(
             re.fullmatch(
@@ -1750,50 +1684,49 @@ def _evaluate_n8n_receipt(
             and approval["evaluation_receipt_sha256"] == receipt_sha256
         ),
     }
-    evaluation.update({
-        "passed": evaluation["passed"] and not errors,
-        "approval_gates": approval_gates,
-        "approved": all(approval_gates.values()),
-        "corpus_sha256": corpus_sha256,
-        "registry_sha256": expected_registry_sha256,
-        "receipt_sha256": receipt_sha256,
-        "evaluation_id": str(receipt.get("evaluation_id") or ""),
-        "evaluated_at": str(receipt.get("evaluated_at") or ""),
-        "evaluator": str(receipt.get("evaluator") or ""),
-        "evidence_sha256": str(receipt.get("evidence_sha256") or ""),
-        "evidence_source": "independent_receipt" if receipt else "",
-    })
+    evaluation.update(
+        {
+            "passed": evaluation["passed"] and not errors,
+            "approval_gates": approval_gates,
+            "approved": all(approval_gates.values()),
+            "corpus_sha256": corpus_sha256,
+            "registry_sha256": expected_registry_sha256,
+            "receipt_sha256": receipt_sha256,
+            "evaluation_id": str(receipt.get("evaluation_id") or ""),
+            "evaluated_at": str(receipt.get("evaluated_at") or ""),
+            "evaluator": str(receipt.get("evaluator") or ""),
+            "evidence_sha256": str(receipt.get("evidence_sha256") or ""),
+            "evidence_source": "independent_receipt" if receipt else "",
+        }
+    )
     return evaluation, errors
 
 
 def _looks_like_n8n_capability_corpus(text: str) -> bool:
     candidate = text or ""
     first_marker = re.search(r"^---ITEM_START", candidate, flags=re.M | re.I)
-    preamble = candidate[:first_marker.start()] if first_marker else candidate
+    preamble = candidate[: first_marker.start()] if first_marker else candidate
     first_item = re.search(
         r"^---ITEM_START(?:[^\r\n]*)\r?\n"
         r"(?P<body>.*?)(?=^---ITEM_(?:END|START)|\Z)",
         candidate,
         flags=re.M | re.S | re.I,
     )
-    metadata = _parse_leading_item_metadata(
-        first_item.group("body") if first_item else ""
+    metadata = _parse_leading_item_metadata(first_item.group("body") if first_item else "")
+    header_signal = bool(
+        re.search(
+            r"^\s*#\s+.*\bn8n\b.*\b(?:capability|training)\b.*\bcorpus\b",
+            preamble,
+            flags=re.M | re.I,
+        )
     )
-    header_signal = bool(re.search(
-        r"^\s*#\s+.*\bn8n\b.*\b(?:capability|training)\b.*\bcorpus\b",
-        preamble,
-        flags=re.M | re.I,
-    ))
-    corpus_signal = (
-        _preamble_scalar(preamble, "corpus_type").casefold()
-        == N8N_CORPUS_TYPE
+    corpus_signal = _preamble_scalar(preamble, "corpus_type").casefold() == N8N_CORPUS_TYPE
+    domain_signal = (
+        str(metadata.get("domain") or metadata.get("platform") or metadata.get("tool_family") or "")
+        .strip()
+        .casefold()
+        == "n8n"
     )
-    domain_signal = str(
-        metadata.get("domain")
-        or metadata.get("platform")
-        or metadata.get("tool_family")
-        or ""
-    ).strip().casefold() == "n8n"
     contract_signals = sum(
         bool(metadata.get(key))
         for key in (
@@ -1803,9 +1736,7 @@ def _looks_like_n8n_capability_corpus(text: str) -> bool:
             "corpus_status",
         )
     )
-    return bool(domain_signal and contract_signals >= 2 and (
-        header_signal or corpus_signal
-    ))
+    return bool(domain_signal and contract_signals >= 2 and (header_signal or corpus_signal))
 
 
 def _parse_n8n_capability_corpus(text: str) -> dict:
@@ -1815,7 +1746,7 @@ def _parse_n8n_capability_corpus(text: str) -> dict:
     framing = _validate_item_corpus_framing(text)
     blocks = framing["blocks"]
     first_marker = re.search(r"^---ITEM_START", text, flags=re.M | re.I)
-    preamble = text[:first_marker.start()] if first_marker else text
+    preamble = text[: first_marker.start()] if first_marker else text
     errors = list(framing["errors"])
     corpus_type = _preamble_scalar(preamble, "corpus_type")
     corpus_version = _preamble_scalar(preamble, "corpus_version")
@@ -1854,94 +1785,57 @@ def _parse_n8n_capability_corpus(text: str) -> dict:
         item_id = str(metadata.get("item_id") or block["marker_id"] or "").strip()
         title = str(metadata.get("canonical_title") or "").strip()
         domain = str(
-            metadata.get("domain")
-            or metadata.get("platform")
-            or metadata.get("tool_family")
-            or ""
+            metadata.get("domain") or metadata.get("platform") or metadata.get("tool_family") or ""
         ).strip()
         source_page_url = str(metadata.get("source_page_url") or "").strip()
-        source_record_id = str(
-            metadata.get("source_record_id") or item_id
-        ).strip()
-        source_content_sha256 = str(
-            metadata.get("content_sha256") or ""
-        ).strip().lower()
-        if (
-            not item_id.startswith("N8N-")
-            or item_id != block["marker_id"]
-            or item_id in seen_ids
-        ):
+        source_record_id = str(metadata.get("source_record_id") or item_id).strip()
+        source_content_sha256 = str(metadata.get("content_sha256") or "").strip().lower()
+        if not item_id.startswith("N8N-") or item_id != block["marker_id"] or item_id in seen_ids:
             errors.append(
-                f"item {index}: item_id must be a unique N8N- identifier "
-                "matching its marker"
+                f"item {index}: item_id must be a unique N8N- identifier matching its marker"
             )
             continue
         seen_ids.add(item_id)
         freshness_raw = metadata.get("requires_current_docs_check")
         if isinstance(freshness_raw, bool):
             requires_current_docs_check = freshness_raw
-        elif (
-            isinstance(freshness_raw, str)
-            and freshness_raw.strip().casefold() in {"true", "false"}
-        ):
-            requires_current_docs_check = (
-                freshness_raw.strip().casefold() == "true"
-            )
+        elif isinstance(freshness_raw, str) and freshness_raw.strip().casefold() in {
+            "true",
+            "false",
+        }:
+            requires_current_docs_check = freshness_raw.strip().casefold() == "true"
         else:
-            errors.append(
-                f"item {index}: requires_current_docs_check must be boolean"
-            )
+            errors.append(f"item {index}: requires_current_docs_check must be boolean")
             continue
 
         taxonomy = _metadata_string_list(metadata.get("taxonomy")) or (
             _markdown_section_list(block["content"], "Taxonomy")
         )
-        task_types = _markdown_section_list(
-            block["content"], "Task types"
-        )
+        task_types = _markdown_section_list(block["content"], "Task types")
         workflow = _markdown_section_list(
             block["content"], "Recommended operating workflow", ordered=True
         )
-        output_contract = _markdown_section_text(
-            block["content"], "Output contract"
-        )
-        safety_controls = _markdown_section_list(
-            block["content"], "Safety and governance controls"
-        )
+        output_contract = _markdown_section_text(block["content"], "Output contract")
+        safety_controls = _markdown_section_list(block["content"], "Safety and governance controls")
         cloud_self_hosted = _markdown_section_list(
             block["content"], "Cloud and self-hosted differences"
         )
-        version_constraints = _markdown_section_list(
-            block["content"], "Version constraints"
-        )
-        validation = _markdown_section_list(
-            block["content"], "Validation checklist"
-        )
-        failure_modes = _markdown_section_list(
-            block["content"], "Failure modes"
-        )
+        version_constraints = _markdown_section_list(block["content"], "Version constraints")
+        validation = _markdown_section_list(block["content"], "Validation checklist")
+        failure_modes = _markdown_section_list(block["content"], "Failure modes")
         authoritative_sources = _markdown_section_list(
             block["content"], "Current authoritative sources"
         )
-        freshness = _markdown_section_list(
-            block["content"], "Freshness requirements"
-        )
-        approval_policy = _markdown_section_text(
-            block["content"], "Approval policy"
-        )
+        freshness = _markdown_section_list(block["content"], "Freshness requirements")
+        approval_policy = _markdown_section_text(block["content"], "Approval policy")
         what_it_teaches = (
-            docops._extract_markdown_field(
-                block["content"], "What this capability teaches"
-            )
-            or docops._extract_markdown_field(
-                block["content"], "What this item teaches"
-            )
-            or _markdown_section_text(
-                block["content"], "What this capability teaches"
-            )
+            docops._extract_markdown_field(block["content"], "What this capability teaches")
+            or docops._extract_markdown_field(block["content"], "What this item teaches")
+            or _markdown_section_text(block["content"], "What this capability teaches")
         )
         missing = [
-            name for name, value in (
+            name
+            for name, value in (
                 ("canonical_title", title),
                 ("domain=n8n", domain.casefold() == "n8n"),
                 ("source_page_url", source_page_url),
@@ -1965,17 +1859,10 @@ def _parse_n8n_capability_corpus(text: str) -> dict:
             if not value
         ]
         if missing:
-            errors.append(
-                f"item {index}: missing required n8n fields: "
-                + ", ".join(missing)
-            )
+            errors.append(f"item {index}: missing required n8n fields: " + ", ".join(missing))
             continue
-        if (
-            _safe_https_source_url(source_page_url) != source_page_url
-            or any(
-                _safe_https_source_url(source) != source
-                for source in authoritative_sources
-            )
+        if _safe_https_source_url(source_page_url) != source_page_url or any(
+            _safe_https_source_url(source) != source for source in authoritative_sources
         ):
             errors.append(
                 f"item {index}: authoritative sources must be canonical HTTPS "
@@ -1983,64 +1870,50 @@ def _parse_n8n_capability_corpus(text: str) -> dict:
             )
             continue
         if not re.fullmatch(r"[a-f0-9]{64}", source_content_sha256):
-            errors.append(
-                f"item {index}: content_sha256 must be a lowercase SHA-256"
-            )
+            errors.append(f"item {index}: content_sha256 must be a lowercase SHA-256")
             continue
         if source_page_url not in authoritative_sources:
             errors.append(
-                f"item {index}: source_page_url must be included in "
-                "Current authoritative sources"
+                f"item {index}: source_page_url must be included in Current authoritative sources"
             )
             continue
-        if any(
-            pattern.search(block["content"])
-            for pattern in _N8N_SECRET_PATTERNS
-        ):
+        if any(pattern.search(block["content"]) for pattern in _N8N_SECRET_PATTERNS):
             errors.append(f"item {index}: potential credential material detected")
             continue
-        records.append({
-            "item_id": item_id,
-            "canonical_title": title,
-            "tool_family": "n8n",
-            "surface": str(
-                metadata.get("surface") or "Cloud and self-hosted"
-            ).strip(),
-            "version_scope": str(
-                metadata.get("version_scope") or ""
-            ).strip(),
-            "corpus_status": str(
-                metadata.get("corpus_status") or ""
-            ).strip(),
-            "requires_current_docs_check": requires_current_docs_check,
-            "provisional": (
-                docops._is_truthy(
-                    metadata.get("provisional", metadata.get("is_provisional"))
-                )
-                or str(metadata.get("corpus_status") or "").strip().casefold()
-                in {"draft", "experimental", "wip", "provisional"}
-            ),
-            "source_page_url": source_page_url,
-            "source_record_id": source_record_id,
-            "source_content_sha256": source_content_sha256,
-            "record_sha256": hashlib.sha256(
-                block["content"].encode("utf-8")
-            ).hexdigest(),
-            "what_it_teaches": what_it_teaches,
-            "task_types": task_types,
-            "workflow": workflow,
-            "safety_controls": safety_controls,
-            "authoritative_sources": authoritative_sources,
-            "taxonomy": taxonomy,
-            "output_contract": output_contract,
-            "cloud_self_hosted": cloud_self_hosted,
-            "version_constraints": version_constraints,
-            "validation": validation,
-            "failure_modes": failure_modes,
-            "freshness": freshness,
-            "approval_policy": approval_policy,
-            "metadata": metadata,
-        })
+        records.append(
+            {
+                "item_id": item_id,
+                "canonical_title": title,
+                "tool_family": "n8n",
+                "surface": str(metadata.get("surface") or "Cloud and self-hosted").strip(),
+                "version_scope": str(metadata.get("version_scope") or "").strip(),
+                "corpus_status": str(metadata.get("corpus_status") or "").strip(),
+                "requires_current_docs_check": requires_current_docs_check,
+                "provisional": (
+                    docops._is_truthy(metadata.get("provisional", metadata.get("is_provisional")))
+                    or str(metadata.get("corpus_status") or "").strip().casefold()
+                    in {"draft", "experimental", "wip", "provisional"}
+                ),
+                "source_page_url": source_page_url,
+                "source_record_id": source_record_id,
+                "source_content_sha256": source_content_sha256,
+                "record_sha256": hashlib.sha256(block["content"].encode("utf-8")).hexdigest(),
+                "what_it_teaches": what_it_teaches,
+                "task_types": task_types,
+                "workflow": workflow,
+                "safety_controls": safety_controls,
+                "authoritative_sources": authoritative_sources,
+                "taxonomy": taxonomy,
+                "output_contract": output_contract,
+                "cloud_self_hosted": cloud_self_hosted,
+                "version_constraints": version_constraints,
+                "validation": validation,
+                "failure_modes": failure_modes,
+                "freshness": freshness,
+                "approval_policy": approval_policy,
+                "metadata": metadata,
+            }
+        )
 
     declared_evaluation = _n8n_evaluation_gates(
         len(records),
@@ -2063,13 +1936,9 @@ def _parse_n8n_capability_corpus(text: str) -> dict:
     }
 
 
-def _prepare_n8n_corpus(
-        corpus_text: str,
-        evaluation_receipt: dict | None = None) -> dict:
+def _prepare_n8n_corpus(corpus_text: str, evaluation_receipt: dict | None = None) -> dict:
     parsed = _parse_n8n_capability_corpus(corpus_text)
-    corpus_sha256 = hashlib.sha256(
-        (corpus_text or "").encode("utf-8")
-    ).hexdigest()
+    corpus_sha256 = hashlib.sha256((corpus_text or "").encode("utf-8")).hexdigest()
     receipt = evaluation_receipt
     if receipt is None:
         try:
@@ -2087,9 +1956,7 @@ def _prepare_n8n_corpus(
     return parsed
 
 
-def preflight_n8n_corpus_text(
-        corpus_text: str,
-        evaluation_receipt: dict | None = None) -> dict:
+def preflight_n8n_corpus_text(corpus_text: str, evaluation_receipt: dict | None = None) -> dict:
     parsed = _prepare_n8n_corpus(corpus_text, evaluation_receipt)
     ingestion_ready = (
         not parsed["errors"]
@@ -2178,36 +2045,27 @@ def _record_n8n_evaluation(parsed: dict, source_file_id: str) -> str:
 
 
 def import_n8n_capability_corpus_text(
-        corpus_text: str,
-        overwrite_existing: bool = True,
-        include_provisional: bool = False,
-        dry_run: bool = False,
-        source_file_id: str = "",
-        parent_run_id: str = "",
-        audit: bool = True,
-        evaluation_receipt: dict | None = None) -> dict:
+    corpus_text: str,
+    overwrite_existing: bool = True,
+    include_provisional: bool = False,
+    dry_run: bool = False,
+    source_file_id: str = "",
+    parent_run_id: str = "",
+    audit: bool = True,
+    evaluation_receipt: dict | None = None,
+) -> dict:
     """Import governed n8n records into the shared domain capability registry."""
     parsed = _prepare_n8n_corpus(corpus_text, evaluation_receipt)
     if not parsed["evaluation"]["passed"]:
         failed_gates = [
-            name
-            for name, passed in parsed["evaluation"]["gates"].items()
-            if not passed
+            name for name, passed in parsed["evaluation"]["gates"].items() if not passed
         ]
-        parsed["errors"].append(
-            "n8n evaluation gates failed: " + ", ".join(failed_gates)
-        )
+        parsed["errors"].append("n8n evaluation gates failed: " + ", ".join(failed_gates))
     if not parsed["evaluation"]["approved"]:
         failed_approval = [
-            name
-            for name, passed
-            in parsed["evaluation"]["approval_gates"].items()
-            if not passed
+            name for name, passed in parsed["evaluation"]["approval_gates"].items() if not passed
         ]
-        parsed["errors"].append(
-            "n8n release approval gates failed: "
-            + ", ".join(failed_approval)
-        )
+        parsed["errors"].append("n8n release approval gates failed: " + ", ".join(failed_approval))
     import_run_id = "n8n-" + str(uuid.uuid4())[:8]
     source_sha256 = parsed["source_sha256"]
     now = datetime.now(timezone.utc).isoformat()
@@ -2244,18 +2102,18 @@ def import_n8n_capability_corpus_text(
                 record["item_id"]
                 for record in parsed["records"]
                 if (
-                    (row := conn.execute(
-                        "SELECT corpus_type FROM skillops_coding_capabilities "
-                        "WHERE item_id=?",
-                        (record["item_id"],),
-                    ).fetchone())
+                    (
+                        row := conn.execute(
+                            "SELECT corpus_type FROM skillops_coding_capabilities WHERE item_id=?",
+                            (record["item_id"],),
+                        ).fetchone()
+                    )
                     and row[0] != N8N_CORPUS_TYPE
                 )
             ]
             if collisions:
                 parsed["errors"].append(
-                    "n8n capability IDs collide with another corpus: "
-                    + ", ".join(collisions[:5])
+                    "n8n capability IDs collide with another corpus: " + ", ".join(collisions[:5])
                 )
             changed_existing = []
             if not overwrite_existing and not collisions:
@@ -2266,28 +2124,22 @@ def import_n8n_capability_corpus_text(
                         "WHERE item_id=? AND corpus_type=?",
                         (record["item_id"], N8N_CORPUS_TYPE),
                     ).fetchone()
-                    if (
-                        existing_row
-                        and existing_row[0] != record["record_sha256"]
-                    ):
+                    if existing_row and existing_row[0] != record["record_sha256"]:
                         changed_existing.append(record["item_id"])
                 if changed_existing:
                     parsed["errors"].append(
                         "authoritative n8n import requires overwrite_existing "
-                        "for changed records: "
-                        + ", ".join(changed_existing[:5])
+                        "for changed records: " + ", ".join(changed_existing[:5])
                     )
-            for record in (
-                parsed["records"]
-                if not collisions and not changed_existing
-                else []
-            ):
+            for record in parsed["records"] if not collisions and not changed_existing else []:
                 if record["provisional"] and not include_provisional:
                     skipped_provisional += 1
-                    imports.append({
-                        "item_id": record["item_id"],
-                        "action": "skipped_provisional",
-                    })
+                    imports.append(
+                        {
+                            "item_id": record["item_id"],
+                            "action": "skipped_provisional",
+                        }
+                    )
                     continue
                 existing = conn.execute(
                     "SELECT record_sha256, version, active "
@@ -2399,12 +2251,14 @@ def import_n8n_capability_corpus_text(
                         action = "created"
                         version = 1
                         created += 1
-                imports.append({
-                    "item_id": record["item_id"],
-                    "canonical_title": record["canonical_title"],
-                    "version": version,
-                    "action": action,
-                })
+                imports.append(
+                    {
+                        "item_id": record["item_id"],
+                        "canonical_title": record["canonical_title"],
+                        "version": version,
+                        "action": action,
+                    }
+                )
             if not dry_run and not collisions and overwrite_existing:
                 active_ids = [
                     record["item_id"]
@@ -2419,15 +2273,12 @@ def import_n8n_capability_corpus_text(
                     parameters.extend(active_ids)
                 cursor = conn.execute(
                     "UPDATE skillops_coding_capabilities SET active=0, "
-                    "retired_at=?, updated_at=? WHERE corpus_type=? AND active=1 "
-                    + exclusion,
+                    "retired_at=?, updated_at=? WHERE corpus_type=? AND active=1 " + exclusion,
                     tuple(parameters),
                 )
                 retired = cursor.rowcount
 
-    status = "invalid" if parsed["errors"] else (
-        "dry_run_complete" if dry_run else "imported"
-    )
+    status = "invalid" if parsed["errors"] else ("dry_run_complete" if dry_run else "imported")
     evaluation_id = None
     if status == "imported":
         evaluation_id = _record_n8n_evaluation(parsed, source_file_id)
@@ -2481,12 +2332,17 @@ def import_n8n_capability_corpus_text(
     }
 
 
-def _import_vector_content(text: str, *, overwrite_existing: bool,
-                           include_provisional: bool, dry_run: bool,
-                           source_file_id: str = "",
-                           source_label: str = "",
-                           parent_run_id: str = "",
-                           audit: bool = True) -> dict:
+def _import_vector_content(
+    text: str,
+    *,
+    overwrite_existing: bool,
+    include_provisional: bool,
+    dry_run: bool,
+    source_file_id: str = "",
+    source_label: str = "",
+    parent_run_id: str = "",
+    audit: bool = True,
+) -> dict:
     framing = _validate_item_corpus_framing(text)
     if framing["errors"]:
         return _invalid_vector_corpus_result(
@@ -2533,16 +2389,13 @@ def _import_vector_content(text: str, *, overwrite_existing: bool,
         return {
             **result,
             "corpus_type": "codeops_guidance",
-            "items_total": int(
-                result.get("items_total", result.get("record_count", 0))
-            ),
-            "items_skipped_provisional": int(
-                result.get("items_skipped_provisional", 0)
-            ),
+            "items_total": int(result.get("items_total", result.get("record_count", 0))),
+            "items_skipped_provisional": int(result.get("items_skipped_provisional", 0)),
             "items_skipped_invalid": 0,
             "errors": [],
         }
     import docops
+
     result = docops.import_doc_templates_from_knowledge_pack_text(
         text,
         overwrite_existing=overwrite_existing,
@@ -2553,8 +2406,7 @@ def _import_vector_content(text: str, *, overwrite_existing: bool,
     return result
 
 
-def list_coding_capabilities(query: str = "", tool_family: str = "",
-                             limit: int = 50) -> dict:
+def list_coding_capabilities(query: str = "", tool_family: str = "", limit: int = 50) -> dict:
     """List structured coding capabilities learned from training corpora."""
     query = str(query or "").strip()
     tool_family = str(tool_family or "").strip()
@@ -2575,8 +2427,14 @@ def list_coding_capabilities(query: str = "", tool_family: str = "",
             "AND (?='' OR tool_family LIKE ?) "
             "ORDER BY tool_family, canonical_title LIMIT ?",
             (
-                query, like, like, like, like,
-                tool_family, family_like, limit,
+                query,
+                like,
+                like,
+                like,
+                like,
+                tool_family,
+                family_like,
+                limit,
             ),
         ).fetchall()
         audit_rows = conn.execute(
@@ -2635,10 +2493,8 @@ def list_coding_capabilities(query: str = "", tool_family: str = "",
 
 
 def list_n8n_capabilities(
-        query: str = "",
-        taxonomy: str = "",
-        task_type: str = "",
-        limit: int = 50) -> dict:
+    query: str = "", taxonomy: str = "", task_type: str = "", limit: int = 50
+) -> dict:
     """List governed n8n capabilities without activating unsafe execution."""
     query = str(query or "").strip()
     taxonomy = str(taxonomy or "").strip()
@@ -2665,9 +2521,15 @@ def list_n8n_capabilities(
             "ORDER BY canonical_title LIMIT ?",
             (
                 N8N_CORPUS_TYPE,
-                query, like, like, like, like,
-                taxonomy, taxonomy_like,
-                task_type, task_like,
+                query,
+                like,
+                like,
+                like,
+                like,
+                taxonomy,
+                taxonomy_like,
+                task_type,
+                task_like,
                 limit,
             ),
         ).fetchall()
@@ -2723,17 +2585,18 @@ def get_n8n_corpus_status(include_census: bool = True) -> dict:
             "WHERE corpus_type=? AND active=1 ORDER BY item_id",
             (N8N_CORPUS_TYPE,),
         ).fetchall()
-        registry_sha256 = hashlib.sha256(
-            json.dumps(
-                [
-                    {"item_id": row[0], "record_sha256": row[1]}
-                    for row in registry_rows
-                ],
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
-            ).encode("utf-8")
-        ).hexdigest() if registry_rows else ""
+        registry_sha256 = (
+            hashlib.sha256(
+                json.dumps(
+                    [{"item_id": row[0], "record_sha256": row[1]} for row in registry_rows],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                ).encode("utf-8")
+            ).hexdigest()
+            if registry_rows
+            else ""
+        )
         evaluation_row = conn.execute(
             "SELECT evaluation_id, corpus_version, source_file_id, "
             "corpus_sha256, registry_sha256, receipt_sha256, evidence_source, "
@@ -2769,14 +2632,18 @@ def get_n8n_corpus_status(include_census: bool = True) -> dict:
             "AND status!='locked' "
             "ORDER BY started_at DESC LIMIT 1"
         ).fetchone()
-        census_detail_rows = conn.execute(
-            "SELECT source_file_id, filename, canonical_url, "
-            "disposition_status, disposition_detail, terminal, "
-            "content_sha256, content_chars, source_version, "
-            "last_seen_run_id, last_seen_at, terminal_at "
-            "FROM skillops_n8n_source_census "
-            "ORDER BY last_seen_at DESC LIMIT 100"
-        ).fetchall() if include_census else []
+        census_detail_rows = (
+            conn.execute(
+                "SELECT source_file_id, filename, canonical_url, "
+                "disposition_status, disposition_detail, terminal, "
+                "content_sha256, content_chars, source_version, "
+                "last_seen_run_id, last_seen_at, terminal_at "
+                "FROM skillops_n8n_source_census "
+                "ORDER BY last_seen_at DESC LIMIT 100"
+            ).fetchall()
+            if include_census
+            else []
+        )
         evaluated_source_row = None
         if evaluation_row and evaluation_row[2]:
             evaluated_source_row = conn.execute(
@@ -2824,13 +2691,9 @@ def get_n8n_corpus_status(include_census: bool = True) -> dict:
             "details": json.loads(evaluation_row[19] or "{}"),
             "evaluated_at": evaluation_row[20],
         }
-        evaluation_gates.update(
-            evaluation["details"].get("gates") or {}
-        )
+        evaluation_gates.update(evaluation["details"].get("gates") or {})
     evaluation_gates["capability_count"] = (
-        N8N_MIN_CAPABILITIES
-        <= capability_count
-        <= N8N_MAX_CAPABILITIES
+        N8N_MIN_CAPABILITIES <= capability_count <= N8N_MAX_CAPABILITIES
     )
     evaluation_gates["source_integrity"] = (
         capability_count > 0 and source_hash_count == capability_count
@@ -2840,9 +2703,7 @@ def get_n8n_corpus_status(include_census: bool = True) -> dict:
     census_terminal = sum(int(row[2]) for row in census_rows if row[1])
     census_by_status = {}
     for row in census_rows:
-        census_by_status[row[0]] = (
-            census_by_status.get(row[0], 0) + int(row[2])
-        )
+        census_by_status[row[0]] = census_by_status.get(row[0], 0) + int(row[2])
     sync = (
         {
             "run_id": sync_row[0],
@@ -2858,7 +2719,8 @@ def get_n8n_corpus_status(include_census: bool = True) -> dict:
             "started_at": sync_row[10],
             "finished_at": sync_row[11],
         }
-        if sync_row else {"status": "no_recorded_sync"}
+        if sync_row
+        else {"status": "no_recorded_sync"}
     )
     latest_import_healthy = bool(
         import_row
@@ -2878,17 +2740,13 @@ def get_n8n_corpus_status(include_census: bool = True) -> dict:
     approval = _load_n8n_release_approval()
     approval_gates = {
         "approved_corpus_digest": bool(
-            evaluation
-            and approval["corpus_sha256"] == evaluation["corpus_sha256"]
+            evaluation and approval["corpus_sha256"] == evaluation["corpus_sha256"]
         ),
         "approved_corpus_version": bool(
-            evaluation
-            and approval["corpus_version"] == evaluation["corpus_version"]
+            evaluation and approval["corpus_version"] == evaluation["corpus_version"]
         ),
         "approved_evaluation_receipt": bool(
-            evaluation
-            and approval["evaluation_receipt_sha256"]
-            == evaluation["receipt_sha256"]
+            evaluation and approval["evaluation_receipt_sha256"] == evaluation["receipt_sha256"]
         ),
     }
     release_gates = {
@@ -2906,8 +2764,7 @@ def get_n8n_corpus_status(include_census: bool = True) -> dict:
         ),
         "census_complete": census_total > 0 and census_terminal == census_total,
         "synchronization_terminal": (
-            sync.get("status")
-            in {"completed", "partial_failed", "failed"}
+            sync.get("status") in {"completed", "partial_failed", "failed"}
             and bool(sync.get("finished_at"))
         ),
         "synchronization_healthy": (
@@ -2932,15 +2789,13 @@ def get_n8n_corpus_status(include_census: bool = True) -> dict:
             "started_at": import_row[10],
             "finished_at": import_row[11],
         }
-        if import_row else None
+        if import_row
+        else None
     )
     return {
         "status": "ready" if production_ready else "blocked",
         "production_ready": production_ready,
-        "ingestion_ready": (
-            all(evaluation_gates.values())
-            and all(approval_gates.values())
-        ),
+        "ingestion_ready": (all(evaluation_gates.values()) and all(approval_gates.values())),
         "capability_count": capability_count,
         "source_hash_count": source_hash_count,
         "registry_version": int(capability_row[2] or 0),
@@ -2949,9 +2804,7 @@ def get_n8n_corpus_status(include_census: bool = True) -> dict:
         "latest_evaluation": evaluation,
         "latest_sync": sync,
         "release_gates": release_gates,
-        "blocked_reasons": [
-            name for name, passed in release_gates.items() if not passed
-        ],
+        "blocked_reasons": [name for name, passed in release_gates.items() if not passed],
         "thresholds": {
             "capability_count_min": N8N_MIN_CAPABILITIES,
             "capability_count_max": N8N_MAX_CAPABILITIES,
@@ -2989,11 +2842,12 @@ def get_n8n_corpus_status(include_census: bool = True) -> dict:
 
 
 def learn_from_vector_store(
-        dry_run: bool = False,
-        max_files: int = 0,
-        overwrite_existing: bool = False,
-        include_provisional: bool = False,
-        max_chars_per_file: int = DEFAULT_MAX_CHARS_PER_FILE) -> dict:
+    dry_run: bool = False,
+    max_files: int = 0,
+    overwrite_existing: bool = False,
+    include_provisional: bool = False,
+    max_chars_per_file: int = DEFAULT_MAX_CHARS_PER_FILE,
+) -> dict:
     """Import template specs from every file in the configured vector store."""
     run_id = "lrn-" + str(uuid.uuid4())[:8]
     now = datetime.now(timezone.utc).isoformat()
@@ -3057,10 +2911,7 @@ def learn_from_vector_store(
         totals["files_seen"] = len(files)
         metadata_by_id = _list_openai_file_metadata(
             api_key,
-            {
-                str(entry.get("file_id") or entry.get("id") or "")
-                for entry in files
-            },
+            {str(entry.get("file_id") or entry.get("id") or "") for entry in files},
         )
 
         prepared_files = []
@@ -3069,29 +2920,24 @@ def learn_from_vector_store(
             if not content_file_id:
                 continue
             metadata = metadata_by_id.get(str(content_file_id), {})
-            filename = str(
-                metadata.get("filename")
-                or entry.get("filename")
-                or content_file_id
-            )
+            filename = str(metadata.get("filename") or entry.get("filename") or content_file_id)
             cached_text = _read_cached_vector_source(
                 str(content_file_id),
                 metadata,
                 entry,
                 max_chars_per_file,
             )
-            if (
-                cached_text is None
-                and not _file_content_is_downloadable(metadata)
-            ):
+            if cached_text is None and not _file_content_is_downloadable(metadata):
                 totals["files_skipped_unavailable"] += 1
-                file_reports.append({
-                    "file_id": content_file_id,
-                    "vector_store_file_id": entry.get("id"),
-                    "filename": filename,
-                    "purpose": metadata.get("purpose"),
-                    "status": "skipped_content_unavailable",
-                })
+                file_reports.append(
+                    {
+                        "file_id": content_file_id,
+                        "vector_store_file_id": entry.get("id"),
+                        "filename": filename,
+                        "purpose": metadata.get("purpose"),
+                        "status": "skipped_content_unavailable",
+                    }
+                )
                 continue
             if cached_text is not None:
                 text, truncated = cached_text, False
@@ -3104,13 +2950,9 @@ def learn_from_vector_store(
                 )
             if truncated:
                 raise RuntimeError(
-                    f"{content_file_id}: partial file reads are not eligible "
-                    "for learning"
+                    f"{content_file_id}: partial file reads are not eligible for learning"
                 )
-            staged_path = (
-                Path(staging_dir.name)
-                / f"{len(prepared_files):08d}.txt"
-            )
+            staged_path = Path(staging_dir.name) / f"{len(prepared_files):08d}.txt"
             staged_path.write_text(text, encoding="utf-8")
             preflight = _import_vector_content(
                 text,
@@ -3134,14 +2976,16 @@ def learn_from_vector_store(
                     f"was incomplete: {invalid_count} invalid item(s); "
                     f"{'; '.join(str(error) for error in import_errors[:3])}"
                 )
-            prepared_files.append({
-                "entry": entry,
-                "content_file_id": content_file_id,
-                "filename": filename,
-                "metadata": metadata,
-                "staged_path": staged_path,
-                "preflight": preflight,
-            })
+            prepared_files.append(
+                {
+                    "entry": entry,
+                    "content_file_id": content_file_id,
+                    "filename": filename,
+                    "metadata": metadata,
+                    "staged_path": staged_path,
+                    "preflight": preflight,
+                }
+            )
 
         for prepared in prepared_files:
             entry = prepared["entry"]
@@ -3168,46 +3012,36 @@ def learn_from_vector_store(
                 if imported.get("corpus_type") == "codeops_guidance"
                 else 0
             )
-            totals["capabilities_created"] += int(
-                imported.get("capabilities_created", 0)
-            )
-            totals["capabilities_updated"] += int(
-                imported.get("capabilities_updated", 0)
-            )
-            totals["capabilities_unchanged"] += int(
-                imported.get("capabilities_unchanged", 0)
-            )
+            totals["capabilities_created"] += int(imported.get("capabilities_created", 0))
+            totals["capabilities_updated"] += int(imported.get("capabilities_updated", 0))
+            totals["capabilities_unchanged"] += int(imported.get("capabilities_unchanged", 0))
             totals["aliases_registered"] += int(imported.get("aliases_registered", 0))
-            totals["items_skipped_provisional"] += int(
-                imported.get("items_skipped_provisional", 0)
-            )
-            totals["items_skipped_invalid"] += int(
-                imported.get("items_skipped_invalid", 0)
-            )
+            totals["items_skipped_provisional"] += int(imported.get("items_skipped_provisional", 0))
+            totals["items_skipped_invalid"] += int(imported.get("items_skipped_invalid", 0))
             for err in imported.get("errors", [])[:10]:
                 errors.append(f"{content_file_id}: {err}")
-            file_reports.append({
-                "file_id": content_file_id,
-                "vector_store_file_id": entry.get("id"),
-                "filename": filename,
-                "purpose": metadata.get("purpose"),
-                "truncated": False,
-                "items_total": imported.get("items_total", 0),
-                "corpus_type": imported.get("corpus_type", "docops_templates"),
-                "templates_created": imported.get("templates_created", 0),
-                "templates_updated": imported.get("templates_updated", 0),
-                "guidance_records_imported": (
-                    imported.get("record_count", 0)
-                    if imported.get("corpus_type") == "codeops_guidance"
-                    else 0
-                ),
-                "capabilities_created": imported.get("capabilities_created", 0),
-                "capabilities_updated": imported.get("capabilities_updated", 0),
-                "capabilities_unchanged": imported.get(
-                    "capabilities_unchanged", 0
-                ),
-                "status": imported.get("status"),
-            })
+            file_reports.append(
+                {
+                    "file_id": content_file_id,
+                    "vector_store_file_id": entry.get("id"),
+                    "filename": filename,
+                    "purpose": metadata.get("purpose"),
+                    "truncated": False,
+                    "items_total": imported.get("items_total", 0),
+                    "corpus_type": imported.get("corpus_type", "docops_templates"),
+                    "templates_created": imported.get("templates_created", 0),
+                    "templates_updated": imported.get("templates_updated", 0),
+                    "guidance_records_imported": (
+                        imported.get("record_count", 0)
+                        if imported.get("corpus_type") == "codeops_guidance"
+                        else 0
+                    ),
+                    "capabilities_created": imported.get("capabilities_created", 0),
+                    "capabilities_updated": imported.get("capabilities_updated", 0),
+                    "capabilities_unchanged": imported.get("capabilities_unchanged", 0),
+                    "status": imported.get("status"),
+                }
+            )
 
         context = (
             f"vector_store_id={vector_store_id}; dry_run={bool(dry_run)}; "
@@ -3294,12 +3128,14 @@ def learn_from_vector_store(
                 "details_json=?, finished_at=? WHERE run_id=?",
                 (
                     err[:500],
-                    json.dumps({
-                        "totals": totals,
-                        "files": file_reports,
-                        "errors": errors[:100],
-                        "vector_store_id": vector_store_id,
-                    }),
+                    json.dumps(
+                        {
+                            "totals": totals,
+                            "files": file_reports,
+                            "errors": errors[:100],
+                            "vector_store_id": vector_store_id,
+                        }
+                    ),
                     datetime.now(timezone.utc).isoformat(),
                     run_id,
                 ),
@@ -3338,40 +3174,39 @@ def _stable_hash(value) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _sync_policy_hash(overwrite_existing: bool,
-                      include_provisional: bool) -> str:
-    return _stable_hash({
-        "importer_revision": SYNC_IMPORTER_REVISION,
-        "overwrite_existing": bool(overwrite_existing),
-        "include_provisional": bool(include_provisional),
-    })
+def _sync_policy_hash(overwrite_existing: bool, include_provisional: bool) -> str:
+    return _stable_hash(
+        {
+            "importer_revision": SYNC_IMPORTER_REVISION,
+            "overwrite_existing": bool(overwrite_existing),
+            "include_provisional": bool(include_provisional),
+        }
+    )
 
 
-def _sync_version_hash(entry: dict, metadata: dict,
-                       sync_policy_hash: str,
-                       cache_fingerprint: str = "") -> str:
-    return _stable_hash({
-        "vector_store_file_id": entry.get("id"),
-        "source_file_id": entry.get("file_id"),
-        "vector_store_created_at": entry.get("created_at"),
-        "attributes": entry.get("attributes"),
-        "source_created_at": metadata.get("created_at"),
-        "filename": metadata.get("filename"),
-        "bytes": metadata.get("bytes"),
-        "purpose": metadata.get("purpose"),
-        "cache_fingerprint": cache_fingerprint,
-        "sync_policy_hash": sync_policy_hash,
-    })
+def _sync_version_hash(
+    entry: dict, metadata: dict, sync_policy_hash: str, cache_fingerprint: str = ""
+) -> str:
+    return _stable_hash(
+        {
+            "vector_store_file_id": entry.get("id"),
+            "source_file_id": entry.get("file_id"),
+            "vector_store_created_at": entry.get("created_at"),
+            "attributes": entry.get("attributes"),
+            "source_created_at": metadata.get("created_at"),
+            "filename": metadata.get("filename"),
+            "bytes": metadata.get("bytes"),
+            "purpose": metadata.get("purpose"),
+            "cache_fingerprint": cache_fingerprint,
+            "sync_policy_hash": sync_policy_hash,
+        }
+    )
 
 
 def _is_n8n_vector_source(entry: dict, metadata: dict, text: str = "") -> bool:
     attributes = entry.get("attributes") or {}
     corpus_type = str(attributes.get("corpus_type") or "").strip().casefold()
-    filename = str(
-        metadata.get("filename")
-        or entry.get("filename")
-        or ""
-    ).casefold()
+    filename = str(metadata.get("filename") or entry.get("filename") or "").casefold()
     return bool(
         corpus_type in {"n8n", N8N_CORPUS_TYPE}
         or "n8n" in filename
@@ -3380,35 +3215,31 @@ def _is_n8n_vector_source(entry: dict, metadata: dict, text: str = "") -> bool:
 
 
 def _record_n8n_source_census(
-        vector_store_id: str,
-        source_file_id: str,
-        vector_store_file_id: str,
-        filename: str,
-        run_id: str,
-        disposition_status: str,
-        *,
-        terminal: bool,
-        detail: str = "",
-        content_sha256: str = "",
-        content_chars: int = 0,
-        entry: dict = None,
-        metadata: dict = None,
-        preserve_disposition: bool = False):
+    vector_store_id: str,
+    source_file_id: str,
+    vector_store_file_id: str,
+    filename: str,
+    run_id: str,
+    disposition_status: str,
+    *,
+    terminal: bool,
+    detail: str = "",
+    content_sha256: str = "",
+    content_chars: int = 0,
+    entry: dict = None,
+    metadata: dict = None,
+    preserve_disposition: bool = False,
+):
     now = datetime.now(timezone.utc).isoformat()
     entry = entry or {}
     metadata = metadata or {}
     attributes = entry.get("attributes") or {}
     canonical_url = str(
-        attributes.get("canonical_url")
-        or attributes.get("source_url")
-        or ""
+        attributes.get("canonical_url") or attributes.get("source_url") or ""
     ).strip()
     canonical_url = _safe_https_source_url(canonical_url)
     source_version = str(
-        attributes.get("version")
-        or metadata.get("created_at")
-        or entry.get("created_at")
-        or ""
+        attributes.get("version") or metadata.get("created_at") or entry.get("created_at") or ""
     ).strip()
     safe_attributes = {
         key: attributes.get(key)
@@ -3483,35 +3314,24 @@ def _record_n8n_source_census(
         )
 
 
-def _mark_unseen_n8n_sources(
-        vector_store_id: str,
-        seen_source_ids: set[str],
-        run_id: str) -> int:
+def _mark_unseen_n8n_sources(vector_store_id: str, seen_source_ids: set[str], run_id: str) -> int:
     now = datetime.now(timezone.utc).isoformat()
     parameters = [
         "absent",
-        (
-            "Source was not present in the latest complete vector-store "
-            f"census ({run_id})."
-        ),
+        (f"Source was not present in the latest complete vector-store census ({run_id})."),
         now,
         vector_store_id,
     ]
     exclusion = ""
     if seen_source_ids:
         ordered_ids = sorted(seen_source_ids)
-        exclusion = (
-            " AND source_file_id NOT IN ("
-            + ",".join("?" for _ in ordered_ids)
-            + ")"
-        )
+        exclusion = " AND source_file_id NOT IN (" + ",".join("?" for _ in ordered_ids) + ")"
         parameters.extend(ordered_ids)
     with _db() as conn:
         cursor = conn.execute(
             "UPDATE skillops_n8n_source_census SET disposition_status=?, "
             "disposition_detail=?, terminal=1, terminal_at=? "
-            "WHERE vector_store_id=?"
-            + exclusion,
+            "WHERE vector_store_id=?" + exclusion,
             tuple(parameters),
         )
     return cursor.rowcount
@@ -3543,9 +3363,15 @@ def _get_sync_state(vector_store_id: str, source_file_id: str) -> dict:
     }
 
 
-def _record_sync_attempt(vector_store_id: str, source_file_id: str,
-                         vector_store_file_id: str, filename: str,
-                         run_id: str, status: str, error: str = ""):
+def _record_sync_attempt(
+    vector_store_id: str,
+    source_file_id: str,
+    vector_store_file_id: str,
+    filename: str,
+    run_id: str,
+    status: str,
+    error: str = "",
+):
     now = datetime.now(timezone.utc).isoformat()
     with _db() as conn:
         conn.execute(
@@ -3587,11 +3413,18 @@ def _record_sync_attempt(vector_store_id: str, source_file_id: str,
             )
 
 
-def _record_sync_success(vector_store_id: str, source_file_id: str,
-                         vector_store_file_id: str, filename: str,
-                         version_hash: str, sync_policy_hash: str,
-                         content_sha256: str,
-                         content_chars: int, run_id: str, status: str):
+def _record_sync_success(
+    vector_store_id: str,
+    source_file_id: str,
+    vector_store_file_id: str,
+    filename: str,
+    version_hash: str,
+    sync_policy_hash: str,
+    content_sha256: str,
+    content_chars: int,
+    run_id: str,
+    status: str,
+):
     now = datetime.now(timezone.utc).isoformat()
     with _db() as conn:
         conn.execute(
@@ -3635,10 +3468,17 @@ def _record_sync_success(vector_store_id: str, source_file_id: str,
         )
 
 
-def _record_sync_handled(vector_store_id: str, source_file_id: str,
-                         vector_store_file_id: str, filename: str,
-                         version_hash: str, sync_policy_hash: str,
-                         run_id: str, status: str, detail: str = ""):
+def _record_sync_handled(
+    vector_store_id: str,
+    source_file_id: str,
+    vector_store_file_id: str,
+    filename: str,
+    version_hash: str,
+    sync_policy_hash: str,
+    run_id: str,
+    status: str,
+    detail: str = "",
+):
     """Persist a version that was safely classified without importing content."""
     now = datetime.now(timezone.utc).isoformat()
     with _db() as conn:
@@ -3686,9 +3526,9 @@ def _record_sync_handled(vector_store_id: str, source_file_id: str,
         )
 
 
-def _content_was_synchronized(vector_store_id: str,
-                              content_sha256: str,
-                              sync_policy_hash: str) -> bool:
+def _content_was_synchronized(
+    vector_store_id: str, content_sha256: str, sync_policy_hash: str
+) -> bool:
     with _db() as conn:
         row = conn.execute(
             "SELECT 1 FROM skillops_vector_sync_files "
@@ -3700,11 +3540,18 @@ def _content_was_synchronized(vector_store_id: str,
     return bool(row)
 
 
-def _start_sync_run(run_id: str, vector_store_id: str, *,
-                    dry_run: bool, overwrite_existing: bool,
-                    include_provisional: bool, force: bool,
-                    max_files: int, max_chars_per_file: int,
-                    status: str = "running"):
+def _start_sync_run(
+    run_id: str,
+    vector_store_id: str,
+    *,
+    dry_run: bool,
+    overwrite_existing: bool,
+    include_provisional: bool,
+    force: bool,
+    max_files: int,
+    max_chars_per_file: int,
+    status: str = "running",
+):
     with _db() as conn:
         conn.execute(
             "INSERT INTO skillops_learning_runs "
@@ -3729,8 +3576,7 @@ def _start_sync_run(run_id: str, vector_store_id: str, *,
         )
 
 
-def _finish_sync_run(run_id: str, status: str, totals: dict,
-                     details: dict, error: str = ""):
+def _finish_sync_run(run_id: str, status: str, totals: dict, details: dict, error: str = ""):
     with _db() as conn:
         conn.execute(
             "UPDATE skillops_learning_runs SET "
@@ -3769,18 +3615,10 @@ def _finish_sync_run(run_id: str, status: str, totals: dict,
 
 
 def _bounded_sync_details(totals: dict, reports: list, errors: list) -> dict:
-    actionable = [
-        report for report in reports
-        if report.get("status") != "skipped_unchanged"
-    ]
-    unchanged = [
-        report for report in reports
-        if report.get("status") == "skipped_unchanged"
-    ]
+    actionable = [report for report in reports if report.get("status") != "skipped_unchanged"]
+    unchanged = [report for report in reports if report.get("status") == "skipped_unchanged"]
     retained = actionable[:MAX_SYNC_REPORT_DETAILS]
-    retained.extend(
-        unchanged[:max(0, MAX_SYNC_REPORT_DETAILS - len(retained))]
-    )
+    retained.extend(unchanged[: max(0, MAX_SYNC_REPORT_DETAILS - len(retained))])
     return {
         "totals": totals,
         "files": retained,
@@ -3791,12 +3629,13 @@ def _bounded_sync_details(totals: dict, reports: list, errors: list) -> dict:
 
 
 def sync_vector_store(
-        dry_run: bool = False,
-        max_files: int = 0,
-        overwrite_existing: bool = True,
-        include_provisional: bool = True,
-        max_chars_per_file: int = DEFAULT_MAX_CHARS_PER_FILE,
-        force: bool = False) -> dict:
+    dry_run: bool = False,
+    max_files: int = 0,
+    overwrite_existing: bool = True,
+    include_provisional: bool = True,
+    max_chars_per_file: int = DEFAULT_MAX_CHARS_PER_FILE,
+    force: bool = False,
+) -> dict:
     """Synchronize vector files into governed DocOps and coding registries."""
     max_files = max(0, int(max_files or 0))
     max_chars_per_file = max(
@@ -3850,9 +3689,11 @@ def sync_vector_store(
                 run_id,
                 "locked",
                 totals,
-                {"totals": totals, "files": [], "errors": [
-                    "another vector-store synchronization is already running"
-                ]},
+                {
+                    "totals": totals,
+                    "files": [],
+                    "errors": ["another vector-store synchronization is already running"],
+                },
                 "another vector-store synchronization is already running",
             )
             return {
@@ -3881,10 +3722,7 @@ def sync_vector_store(
             totals["files_seen"] = len(files)
             metadata_by_id = _list_openai_file_metadata(
                 api_key,
-                {
-                    str(entry.get("file_id") or entry.get("id") or "")
-                    for entry in files
-                },
+                {str(entry.get("file_id") or entry.get("id") or "") for entry in files},
             )
             sync_policy_hash = _sync_policy_hash(
                 overwrite_existing,
@@ -3925,9 +3763,7 @@ def sync_vector_store(
                     n8n_source = _is_n8n_vector_source(entry, metadata)
                     if n8n_source:
                         n8n_seen_source_ids.add(source_file_id)
-                    cache_fingerprint = _cached_vector_source_fingerprint(
-                        source_file_id
-                    )
+                    cache_fingerprint = _cached_vector_source_fingerprint(source_file_id)
                     version_hash = _sync_version_hash(
                         entry,
                         metadata,
@@ -3935,10 +3771,7 @@ def sync_vector_store(
                         cache_fingerprint,
                     )
                     state = _get_sync_state(vector_store_id, source_file_id)
-                    if (
-                        not force
-                        and state.get("success_version_hash") == version_hash
-                    ):
+                    if not force and state.get("success_version_hash") == version_hash:
                         totals["files_skipped_unchanged"] += 1
                         report["status"] = "skipped_unchanged"
                         if not dry_run:
@@ -3984,19 +3817,18 @@ def sync_vector_store(
                         entry,
                         max_chars_per_file,
                     )
-                    if (
-                        cached_text is None
-                        and not _file_content_is_downloadable(metadata)
-                    ):
+                    if cached_text is None and not _file_content_is_downloadable(metadata):
                         totals["files_skipped_unavailable"] += 1
                         purpose = str(metadata.get("purpose") or "unknown")
-                        report.update({
-                            "status": "skipped_content_unavailable",
-                            "reason": (
-                                f"OpenAI does not expose content downloads for "
-                                f"purpose={purpose}"
-                            ),
-                        })
+                        report.update(
+                            {
+                                "status": "skipped_content_unavailable",
+                                "reason": (
+                                    f"OpenAI does not expose content downloads for "
+                                    f"purpose={purpose}"
+                                ),
+                            }
+                        )
                         if not dry_run:
                             _record_sync_handled(
                                 vector_store_id,
@@ -4040,9 +3872,7 @@ def sync_vector_store(
                         raise RuntimeError(
                             "partial file reads are not eligible for synchronization"
                         )
-                    content_sha256 = hashlib.sha256(
-                        text.encode("utf-8")
-                    ).hexdigest()
+                    content_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
                     n8n_source = _is_n8n_vector_source(entry, metadata, text)
                     if n8n_source:
                         n8n_seen_source_ids.add(source_file_id)
@@ -4060,13 +3890,10 @@ def sync_vector_store(
                             entry=entry,
                             metadata=metadata,
                         )
-                    if (
-                        not force
-                        and _content_was_synchronized(
-                            vector_store_id,
-                            content_sha256,
-                            sync_policy_hash,
-                        )
+                    if not force and _content_was_synchronized(
+                        vector_store_id,
+                        content_sha256,
+                        sync_policy_hash,
                     ):
                         totals["files_skipped_unchanged"] += 1
                         report["status"] = "skipped_duplicate_content"
@@ -4093,10 +3920,7 @@ def sync_vector_store(
                                     run_id,
                                     "duplicate",
                                     terminal=True,
-                                    detail=(
-                                        "Identical verified content was already "
-                                        "synchronized."
-                                    ),
+                                    detail=("Identical verified content was already synchronized."),
                                     content_sha256=content_sha256,
                                     content_chars=len(text),
                                     entry=entry,
@@ -4115,23 +3939,20 @@ def sync_vector_store(
                         parent_run_id=run_id,
                         audit=False,
                     )
-                    content_type = preflight.get(
-                        "corpus_type", "docops_templates"
-                    )
-                    if (
-                        int(preflight.get("items_total", 0)) == 0
-                        and not preflight.get("errors")
-                    ):
+                    content_type = preflight.get("corpus_type", "docops_templates")
+                    if int(preflight.get("items_total", 0)) == 0 and not preflight.get("errors"):
                         totals["files_skipped_unsupported"] += 1
-                        report.update({
-                            "status": "skipped_unsupported_content",
-                            "content_sha256": content_sha256,
-                            "content_chars": len(text),
-                            "reason": (
-                                "no supported DocOps, CodeOps, coding, or n8n "
-                                "capability ITEM blocks"
-                            ),
-                        })
+                        report.update(
+                            {
+                                "status": "skipped_unsupported_content",
+                                "content_sha256": content_sha256,
+                                "content_chars": len(text),
+                                "reason": (
+                                    "no supported DocOps, CodeOps, coding, or n8n "
+                                    "capability ITEM blocks"
+                                ),
+                            }
+                        )
                         if not dry_run:
                             _record_sync_handled(
                                 vector_store_id,
@@ -4163,9 +3984,7 @@ def sync_vector_store(
                         continue
                     imported = preflight
 
-                    invalid_count = int(
-                        imported.get("items_skipped_invalid", 0)
-                    )
+                    invalid_count = int(imported.get("items_skipped_invalid", 0))
                     import_errors = imported.get("errors", [])
                     if invalid_count or import_errors:
                         census_failure_status = "invalid"
@@ -4201,9 +4020,7 @@ def sync_vector_store(
                         ):
                             totals[key] += int(imported.get(key, 0))
                     elif content_type == "codeops_guidance":
-                        totals["guidance_records_imported"] += int(
-                            imported.get("record_count", 0)
-                        )
+                        totals["guidance_records_imported"] += int(imported.get("record_count", 0))
                         totals["items_skipped_provisional"] += int(
                             imported.get("items_skipped_provisional", 0)
                         )
@@ -4219,38 +4036,24 @@ def sync_vector_store(
                             "items_skipped_invalid",
                         ):
                             totals[key] += int(imported.get(key, 0))
-                    report.update({
-                        "status": (
-                            "would_synchronize" if dry_run else "synchronized"
-                        ),
-                        "content_type": content_type,
-                        "corpus_type": imported.get(
-                            "corpus_type", content_type
-                        ),
-                        "content_sha256": content_sha256,
-                        "content_chars": len(text),
-                        "items_total": imported.get(
-                            "items_total", imported.get("record_count", 0)
-                        ),
-                        "templates_created": imported.get(
-                            "templates_created", 0
-                        ),
-                        "templates_updated": imported.get(
-                            "templates_updated", 0
-                        ),
-                        "guidance_records_imported": imported.get(
-                            "record_count", 0
-                        ),
-                        "capabilities_created": imported.get(
-                            "capabilities_created", 0
-                        ),
-                        "capabilities_updated": imported.get(
-                            "capabilities_updated", 0
-                        ),
-                        "capabilities_unchanged": imported.get(
-                            "capabilities_unchanged", 0
-                        ),
-                    })
+                    report.update(
+                        {
+                            "status": ("would_synchronize" if dry_run else "synchronized"),
+                            "content_type": content_type,
+                            "corpus_type": imported.get("corpus_type", content_type),
+                            "content_sha256": content_sha256,
+                            "content_chars": len(text),
+                            "items_total": imported.get(
+                                "items_total", imported.get("record_count", 0)
+                            ),
+                            "templates_created": imported.get("templates_created", 0),
+                            "templates_updated": imported.get("templates_updated", 0),
+                            "guidance_records_imported": imported.get("record_count", 0),
+                            "capabilities_created": imported.get("capabilities_created", 0),
+                            "capabilities_updated": imported.get("capabilities_updated", 0),
+                            "capabilities_unchanged": imported.get("capabilities_unchanged", 0),
+                        }
+                    )
                     if not dry_run:
                         _record_sync_success(
                             vector_store_id,
@@ -4475,8 +4278,7 @@ def _validate_code(name: str, code: str) -> list:
         tree = ast.parse(code)
     except SyntaxError as exc:
         return [f"syntax error: {exc}"]
-    top = {n.name for n in ast.walk(tree)
-           if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    top = {n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
     if "run" not in top:
         errors.append("code must define a run(**kwargs) function")
     if not name.isidentifier() or name != name.lower():
@@ -4495,8 +4297,7 @@ def _validate_code(name: str, code: str) -> list:
         elif isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_CALL_NAMES:
                 errors.append(f"forbidden call: {node.func.id}()")
-            elif isinstance(node.func, ast.Attribute) and \
-                    isinstance(node.func.value, ast.Name):
+            elif isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
                 pair = (node.func.value.id, node.func.attr)
                 if pair in FORBIDDEN_ATTR_CALLS:
                     errors.append(f"forbidden call: {pair[0]}.{pair[1]}()")
@@ -4510,10 +4311,12 @@ def _smoke_test(path: Path, test_args: dict) -> dict:
         f"spec=importlib.util.spec_from_file_location('smoke', {str(path)!r})\n"
         "m=importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n"
         f"out=m.run(**json.loads({json.dumps(json.dumps(test_args))}))\n"
-        "print(json.dumps({'ok':True,'result':str(out)[:500]}))\n")
+        "print(json.dumps({'ok':True,'result':str(out)[:500]}))\n"
+    )
     try:
-        out = subprocess.run([sys.executable, "-c", prog],
-                             capture_output=True, text=True, timeout=30)
+        out = subprocess.run(
+            [sys.executable, "-c", prog], capture_output=True, text=True, timeout=30
+        )
         if out.returncode != 0:
             return {"ok": False, "error": out.stderr.strip()[:800]}
         return json.loads(out.stdout.strip().splitlines()[-1])
@@ -4523,9 +4326,14 @@ def _smoke_test(path: Path, test_args: dict) -> dict:
         return {"ok": False, "error": str(exc)}
 
 
-def create_skill(name: str, description: str, code: str,
-                 parameters_json: str = "{}", test_args_json: str = "",
-                 addresses_observation: str = "") -> dict:
+def create_skill(
+    name: str,
+    description: str,
+    code: str,
+    parameters_json: str = "{}",
+    test_args_json: str = "",
+    addresses_observation: str = "",
+) -> dict:
     """Install a new (or upgraded) PJ-authored skill.
 
     code must define run(**kwargs) -> dict. parameters_json is the
@@ -4543,13 +4351,16 @@ def create_skill(name: str, description: str, code: str,
     if errors:
         return {"status": "rejected", "errors": errors}
 
-    schema = {"type": "function", "name": name,
-              "description": description[:1024],
-              "parameters": parameters or
-              {"type": "object", "properties": {}, "required": []}}
+    schema = {
+        "type": "function",
+        "name": name,
+        "description": description[:1024],
+        "parameters": parameters or {"type": "object", "properties": {}, "required": []},
+    }
     module_src = (
         f'"""PJ-generated skill: {name} (SkillOps)."""\n'
-        f"SCHEMA = {json.dumps(schema, indent=2)}\n\n{code}\n")
+        f"SCHEMA = {json.dumps(schema, indent=2)}\n\n{code}\n"
+    )
     path = GENERATED_DIR / f"{name}.py"
     path.write_text(module_src)
 
@@ -4561,32 +4372,40 @@ def create_skill(name: str, description: str, code: str,
             smoke = {"ok": False, "error": f"bad test_args_json: {exc}"}
         if not smoke.get("ok"):
             path.unlink(missing_ok=True)
-            return {"status": "rejected", "errors": ["smoke test failed"],
-                    "smoke_test": smoke}
+            return {"status": "rejected", "errors": ["smoke test failed"], "smoke_test": smoke}
 
     now = datetime.now(timezone.utc).isoformat()
     with _db() as conn:
-        row = conn.execute("SELECT version FROM skillops_registry WHERE name=?",
-                           (name,)).fetchone()
+        row = conn.execute("SELECT version FROM skillops_registry WHERE name=?", (name,)).fetchone()
         if row:
             conn.execute(
                 "UPDATE skillops_registry SET version=version+1, "
                 "description=?, path=?, updated_at=?, status='candidate', "
                 "review_note='upgraded, pending re-activation' WHERE name=?",
-                (description, str(path), now, name))
+                (description, str(path), now, name),
+            )
             version = row[0] + 1
         else:
             conn.execute(
                 "INSERT INTO skillops_registry "
                 "(name, description, path, created_at, updated_at) "
-                "VALUES (?,?,?,?,?)", (name, description, str(path), now, now))
+                "VALUES (?,?,?,?,?)",
+                (name, description, str(path), now, now),
+            )
             version = 1
         if addresses_observation:
-            conn.execute("UPDATE skillops_observations SET status='addressed' "
-                         "WHERE id=?", (addresses_observation,))
-    return {"status": "installed_as_candidate", "name": name,
-            "version": version, "path": str(path), "smoke_test": smoke,
-            "next": "call activate_skill to enable it (takes effect next PJ session)"}
+            conn.execute(
+                "UPDATE skillops_observations SET status='addressed' WHERE id=?",
+                (addresses_observation,),
+            )
+    return {
+        "status": "installed_as_candidate",
+        "name": name,
+        "version": version,
+        "path": str(path),
+        "smoke_test": smoke,
+        "next": "call activate_skill to enable it (takes effect next PJ session)",
+    }
 
 
 def activate_skill(name: str) -> dict:
@@ -4601,17 +4420,22 @@ def activate_skill(name: str) -> dict:
 
     skill_path = Path(row[0] or "")
     if not skill_path.exists():
-        return {"status": "rejected", "name": name,
-                "errors": [f"skill file missing at {skill_path}"]}
+        return {
+            "status": "rejected",
+            "name": name,
+            "errors": [f"skill file missing at {skill_path}"],
+        }
 
     errors = _validate_code(name, skill_path.read_text())
     if errors:
         with _db() as conn:
             conn.execute(
-                "UPDATE skillops_registry SET review_note=?, updated_at=? "
-                "WHERE name=?",
-                ("activation blocked by safety policy",
-                 datetime.now(timezone.utc).isoformat(), name),
+                "UPDATE skillops_registry SET review_note=?, updated_at=? WHERE name=?",
+                (
+                    "activation blocked by safety policy",
+                    datetime.now(timezone.utc).isoformat(),
+                    name,
+                ),
             )
         return {"status": "rejected", "name": name, "errors": errors}
 
@@ -4621,8 +4445,7 @@ def activate_skill(name: str) -> dict:
             "updated_at=? WHERE name=? AND status IN ('candidate','deprecated')",
             (datetime.now(timezone.utc).isoformat(), name),
         )
-    return {"status": "active", "name": name,
-            "note": "loads on next PJ start"}
+    return {"status": "active", "name": name, "note": "loads on next PJ start"}
 
 
 def deprecate_skill(name: str, reason: str = "") -> dict:
@@ -4631,7 +4454,8 @@ def deprecate_skill(name: str, reason: str = "") -> dict:
         cur = conn.execute(
             "UPDATE skillops_registry SET status='deprecated', review_note=?, "
             "updated_at=? WHERE name=?",
-            (reason[:500], datetime.now(timezone.utc).isoformat(), name))
+            (reason[:500], datetime.now(timezone.utc).isoformat(), name),
+        )
     if not cur.rowcount:
         return {"status": "not_found", "name": name}
     return {"status": "deprecated", "name": name, "reason": reason}
@@ -4658,10 +4482,11 @@ def review_skills() -> dict:
     with _db() as conn:
         registry = conn.execute(
             "SELECT name, version, status, description, created_at, "
-            "updated_at, review_note FROM skillops_registry").fetchall()
+            "updated_at, review_note FROM skillops_registry"
+        ).fetchall()
         tele = conn.execute(
-            "SELECT skill, ok, latency_ms FROM skillops_telemetry "
-            "WHERE ts >= ?", (window_start,)).fetchall()
+            "SELECT skill, ok, latency_ms FROM skillops_telemetry WHERE ts >= ?", (window_start,)
+        ).fetchall()
         open_obs = conn.execute(
             "SELECT COUNT(*) FROM skillops_observations WHERE status='open'"
         ).fetchone()[0]
@@ -4693,35 +4518,47 @@ def review_skills() -> dict:
         reasons, rec = [], "maintain"
 
         if status == "candidate":
-            rec = "promote_candidate" if calls == 0 else (
-                "promote_candidate" if fail_rate == 0 else "observe")
+            rec = (
+                "promote_candidate"
+                if calls == 0
+                else ("promote_candidate" if fail_rate == 0 else "observe")
+            )
             reasons.append("candidate awaiting activation")
         elif calls == 0 and age_days >= POLICY["unused_age_days"]:
             rec = "deprecation_candidate"
-            reasons.append(f"no calls in {POLICY['window_days']}d window, "
-                           f"age {age_days}d")
-        elif calls >= POLICY["min_calls_for_stats"] and \
-                fail_rate >= POLICY["pause_failure_rate"]:
+            reasons.append(f"no calls in {POLICY['window_days']}d window, age {age_days}d")
+        elif calls >= POLICY["min_calls_for_stats"] and fail_rate >= POLICY["pause_failure_rate"]:
             rec = "pause_and_revalidate"
             reasons.append(f"failure rate {fail_rate:.0%} over {calls} calls")
-        elif calls >= POLICY["min_calls_for_stats"] and \
-                fail_rate >= POLICY["optimize_failure_rate"]:
+        elif (
+            calls >= POLICY["min_calls_for_stats"] and fail_rate >= POLICY["optimize_failure_rate"]
+        ):
             rec = "optimize"
             reasons.append(f"failure rate {fail_rate:.0%}")
         elif p90 > POLICY["slow_p90_ms"]:
             rec = "optimize"
             reasons.append(f"p90 latency {p90}ms")
         if status == "active" and staleness_days >= POLICY["stale_age_days"]:
-            reasons.append(f"unchanged for {staleness_days}d — check for "
-                           "newer tech/APIs and changing usage trends")
+            reasons.append(
+                f"unchanged for {staleness_days}d — check for "
+                "newer tech/APIs and changing usage trends"
+            )
             if rec == "maintain":
                 rec = "tech_refresh_review"
 
-        recommendations.append({
-            "skill": name, "version": version, "status": status,
-            "recommendation": rec, "reasons": reasons,
-            "calls_30d": calls, "failure_rate": round(fail_rate, 3),
-            "p90_latency_ms": p90, "review_note": note or None})
+        recommendations.append(
+            {
+                "skill": name,
+                "version": version,
+                "status": status,
+                "recommendation": rec,
+                "reasons": reasons,
+                "calls_30d": calls,
+                "failure_rate": round(fail_rate, 3),
+                "p90_latency_ms": p90,
+                "review_note": note or None,
+            }
+        )
 
     # Built-in skills seen in telemetry but not in the registry.
     builtin = []
@@ -4729,20 +4566,28 @@ def review_skills() -> dict:
         if any(r[0] == skill for r in registry):
             continue
         fail_rate = s["failures"] / s["calls"] if s["calls"] else 0
-        builtin.append({"skill": skill, "calls_30d": s["calls"],
-                        "failure_rate": round(fail_rate, 3),
-                        "p90_latency_ms": _percentile(s["lat"], 90)})
+        builtin.append(
+            {
+                "skill": skill,
+                "calls_30d": s["calls"],
+                "failure_rate": round(fail_rate, 3),
+                "p90_latency_ms": _percentile(s["lat"], 90),
+            }
+        )
 
-    return {"generated_at": now.isoformat(),
-            "policy": POLICY,
-            "open_observations": open_obs,
-            "registry_recommendations": recommendations,
-            "builtin_skill_stats": sorted(builtin,
-                                          key=lambda b: -b["calls_30d"]),
-            "guidance": ("Cross-reference open observations with these stats "
-                         "to decide the next skill to create, upgrade, or "
-                         "deprecate. Use web research for current best-in-"
-                         "class tech before writing an upgrade.")}
+    return {
+        "generated_at": now.isoformat(),
+        "policy": POLICY,
+        "open_observations": open_obs,
+        "registry_recommendations": recommendations,
+        "builtin_skill_stats": sorted(builtin, key=lambda b: -b["calls_30d"]),
+        "guidance": (
+            "Cross-reference open observations with these stats "
+            "to decide the next skill to create, upgrade, or "
+            "deprecate. Use web research for current best-in-"
+            "class tech before writing an upgrade."
+        ),
+    }
 
 
 # ----------------------------------------------------- dynamic skill loading
@@ -4752,8 +4597,8 @@ def load_generated_skills():
     try:
         with _db() as conn:
             rows = conn.execute(
-                "SELECT name, path FROM skillops_registry "
-                "WHERE status='active'").fetchall()
+                "SELECT name, path FROM skillops_registry WHERE status='active'"
+            ).fetchall()
     except Exception:
         return schemas, dispatch
     for name, path in rows:
@@ -4761,12 +4606,12 @@ def load_generated_skills():
         if not p.exists() or name in RESERVED_NAMES:
             continue
         try:
-            spec = importlib.util.spec_from_file_location(
-                f"pj_generated_{name}", p)
+            spec = importlib.util.spec_from_file_location(f"pj_generated_{name}", p)
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
-            if callable(getattr(mod, "run", None)) and \
-                    isinstance(getattr(mod, "SCHEMA", None), dict):
+            if callable(getattr(mod, "run", None)) and isinstance(
+                getattr(mod, "SCHEMA", None), dict
+            ):
                 schemas.append(mod.SCHEMA)
                 dispatch[name] = mod.run
         except Exception as exc:
@@ -4776,151 +4621,276 @@ def load_generated_skills():
 
 # ----------------------------------------------------------- tool schemas
 SKILLOPS_SCHEMAS = [
-    {"type": "function", "name": "observe_pattern",
-     "description": ("Record a recurring task, friction point, or usage "
-                     "pattern that might justify creating a new PJ skill. "
-                     "Use proactively whenever the user repeats a manual "
-                     "workflow."),
-     "parameters": {"type": "object", "properties": {
-         "pattern": {"type": "string",
-                     "description": "What keeps happening"},
-         "context": {"type": "string",
-                     "description": "Why it matters / examples"},
-         "frequency_hint": {"type": "string",
-                            "description": "e.g. 'daily', '3x this week'"}},
-         "required": ["pattern"]}},
-    {"type": "function", "name": "list_observations",
-     "description": "List recorded automation-worthy patterns (open, addressed, or all).",
-     "parameters": {"type": "object", "properties": {
-         "status": {"type": "string", "enum": ["open", "addressed", "all"]}},
-         "required": []}},
-    {"type": "function", "name": "create_skill",
-     "description": ("Install a new or upgraded PJ skill you have written. "
-                     "Provide Python code defining run(**kwargs)->dict, plus "
-                     "a JSON-schema parameters object. It is validated, "
-                     "optionally smoke-tested, and registered as a candidate "
-                     "pending activation. Prefer stdlib-only, fast, "
-                     "deterministic implementations; research current best "
-                     "practices before writing."),
-     "parameters": {"type": "object", "properties": {
-         "name": {"type": "string",
-                  "description": "lowercase_identifier tool name"},
-         "description": {"type": "string",
-                         "description": "What the skill does (tool description)"},
-         "code": {"type": "string",
-                  "description": "Python source defining run(**kwargs) -> dict"},
-         "parameters_json": {"type": "string",
-                             "description": "JSON string of the tool's parameters schema"},
-         "test_args_json": {"type": "string",
-                            "description": "Optional JSON kwargs for a sandbox smoke test"},
-         "addresses_observation": {"type": "string",
-                                   "description": "Optional observation id this skill resolves"}},
-         "required": ["name", "description", "code"]}},
-    {"type": "function", "name": "activate_skill",
-     "description": ("Promote a candidate (or previously deprecated) skill "
-                     "to active. Active skills load as callable tools on the "
-                     "next PJ session."),
-     "parameters": {"type": "object", "properties": {
-         "name": {"type": "string"}}, "required": ["name"]}},
-    {"type": "function", "name": "review_skills",
-     "description": ("Run the SkillOps lifecycle review: aggregates live "
-                     "telemetry (calls, failure rates, latency) across all "
-                     "skills and recommends promote / optimize / pause / "
-                     "deprecate / tech-refresh actions. Use periodically and "
-                     "before creating new skills."),
-     "parameters": {"type": "object", "properties": {}, "required": []}},
-    {"type": "function", "name": "learn_from_vector_store",
-     "description": ("Process every file in PJ's configured vector store and "
-                     "import supported ITEM corpora into DocOps templates or "
-                     "the shared coding/n8n capability registry with persistent "
-                     "audit."),
-     "parameters": {"type": "object", "properties": {
-         "dry_run": {"type": "boolean",
-                     "description": "Parse and report without mutating templates/aliases"},
-         "max_files": {"type": "integer",
-                       "description": "Optional cap on number of vector-store files to process (0=all)"},
-         "overwrite_existing": {"type": "boolean",
-                                "description": "Allow updating existing templates and alias remaps"},
-         "include_provisional": {"type": "boolean",
-                                 "description": "Import items marked provisional/draft/experimental"},
-         "max_chars_per_file": {"type": "integer",
-                                "description": "Complete-file safety limit (default 5,000,000; files over the limit fail without partial import)"},
-     }, "required": []}},
-    {"type": "function", "name": "sync_vector_store",
-     "description": ("Idempotently synchronize hash-cached vector-store "
-                    "sources into DocOps templates, CodeOps guidance, coding "
-                    "capabilities, or governed n8n capabilities using durable "
-                    "deduplication, source census, a cross-process lock, and "
-                    "run audit. Provider-hosted inputs without an approved local "
-                    "cache are classified as unavailable rather than partially "
-                    "imported."),
-     "parameters": {"type": "object", "properties": {
-        "dry_run": {"type": "boolean",
-                    "description": "Report changes without mutating DocOps, CodeOps, or file sync state"},
-        "max_files": {"type": "integer",
-                      "description": "Optional file cap (0=all)"},
-        "overwrite_existing": {"type": "boolean",
-                               "description": "Update existing DocOps templates (default true)"},
-        "include_provisional": {"type": "boolean",
-                                "description": "Import provisional instructional specs (default true)"},
-        "max_chars_per_file": {"type": "integer",
-                               "description": "Complete-file safety limit (default 5,000,000)"},
-        "force": {"type": "boolean",
-                  "description": "Reprocess files even when identity/content is unchanged"},
-     }, "required": []}},
-    {"type": "function", "name": "get_vector_sync_status",
-     "description": ("Inspect recent durable vector-store sync runs, failures, "
-                    "and per-file synchronization state."),
-     "parameters": {"type": "object", "properties": {
-        "limit": {"type": "integer",
-                  "description": "Number of recent runs to return (1-50)"},
-     }, "required": []}},
-    {"type": "function", "name": "list_coding_capabilities",
-     "description": ("List structured AI coding-tool capabilities learned from "
-                    "training corpora, including freshness requirements, "
-                    "appropriate tasks, workflows, safety controls, sources, "
-                    "and recent import audit."),
-     "parameters": {"type": "object", "properties": {
-        "query": {"type": "string",
-                  "description": "Optional title, ID, surface, or guidance search"},
-        "tool_family": {"type": "string",
-                        "description": "Optional tool-family filter"},
-        "limit": {"type": "integer",
-                  "description": "Maximum capabilities to return (1-100)"},
-     }, "required": []}},
-    {"type": "function", "name": "list_n8n_capabilities",
-     "description": (
-        "List governed n8n capabilities from the shared domain registry, "
-        "including workflows, output contracts, safety controls, deployment "
-        "differences, freshness requirements, and release-gate state."
-     ),
-     "parameters": {"type": "object", "properties": {
-        "query": {"type": "string",
-                  "description": "Optional title, ID, output, or guidance search"},
-        "taxonomy": {"type": "string",
-                     "description": "Optional taxonomy filter"},
-        "task_type": {"type": "string",
-                      "description": "Optional task-type filter"},
-        "limit": {"type": "integer",
-                  "description": "Maximum capabilities to return (1-100)"},
-     }, "required": []}},
-    {"type": "function", "name": "get_n8n_corpus_status",
-     "description": (
-        "Inspect the governed n8n corpus inventory, source census, evaluation "
-        "thresholds, synchronization health, and fail-closed production gate."
-     ),
-     "parameters": {"type": "object", "properties": {
-        "include_census": {
-            "type": "boolean",
-            "description": "Include bounded per-source census details",
+    {
+        "type": "function",
+        "name": "observe_pattern",
+        "description": (
+            "Record a recurring task, friction point, or usage "
+            "pattern that might justify creating a new PJ skill. "
+            "Use proactively whenever the user repeats a manual "
+            "workflow."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "What keeps happening"},
+                "context": {"type": "string", "description": "Why it matters / examples"},
+                "frequency_hint": {"type": "string", "description": "e.g. 'daily', '3x this week'"},
+            },
+            "required": ["pattern"],
         },
-     }, "required": []}},
-    {"type": "function", "name": "deprecate_skill",
-     "description": "Deprecate a generated skill so it no longer loads (reversible via activate_skill).",
-     "parameters": {"type": "object", "properties": {
-         "name": {"type": "string"},
-         "reason": {"type": "string"}}, "required": ["name"]}},
+    },
+    {
+        "type": "function",
+        "name": "list_observations",
+        "description": "List recorded automation-worthy patterns (open, addressed, or all).",
+        "parameters": {
+            "type": "object",
+            "properties": {"status": {"type": "string", "enum": ["open", "addressed", "all"]}},
+            "required": [],
+        },
+    },
+    {
+        "type": "function",
+        "name": "create_skill",
+        "description": (
+            "Install a new or upgraded PJ skill you have written. "
+            "Provide Python code defining run(**kwargs)->dict, plus "
+            "a JSON-schema parameters object. It is validated, "
+            "optionally smoke-tested, and registered as a candidate "
+            "pending activation. Prefer stdlib-only, fast, "
+            "deterministic implementations; research current best "
+            "practices before writing."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "lowercase_identifier tool name"},
+                "description": {
+                    "type": "string",
+                    "description": "What the skill does (tool description)",
+                },
+                "code": {
+                    "type": "string",
+                    "description": "Python source defining run(**kwargs) -> dict",
+                },
+                "parameters_json": {
+                    "type": "string",
+                    "description": "JSON string of the tool's parameters schema",
+                },
+                "test_args_json": {
+                    "type": "string",
+                    "description": "Optional JSON kwargs for a sandbox smoke test",
+                },
+                "addresses_observation": {
+                    "type": "string",
+                    "description": "Optional observation id this skill resolves",
+                },
+            },
+            "required": ["name", "description", "code"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "activate_skill",
+        "description": (
+            "Promote a candidate (or previously deprecated) skill "
+            "to active. Active skills load as callable tools on the "
+            "next PJ session."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "review_skills",
+        "description": (
+            "Run the SkillOps lifecycle review: aggregates live "
+            "telemetry (calls, failure rates, latency) across all "
+            "skills and recommends promote / optimize / pause / "
+            "deprecate / tech-refresh actions. Use periodically and "
+            "before creating new skills."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "type": "function",
+        "name": "learn_from_vector_store",
+        "description": (
+            "Process every file in PJ's configured vector store and "
+            "import supported ITEM corpora into DocOps templates or "
+            "the shared coding/n8n capability registry with persistent "
+            "audit."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Parse and report without mutating templates/aliases",
+                },
+                "max_files": {
+                    "type": "integer",
+                    "description": "Optional cap on number of vector-store files to process (0=all)",
+                },
+                "overwrite_existing": {
+                    "type": "boolean",
+                    "description": "Allow updating existing templates and alias remaps",
+                },
+                "include_provisional": {
+                    "type": "boolean",
+                    "description": "Import items marked provisional/draft/experimental",
+                },
+                "max_chars_per_file": {
+                    "type": "integer",
+                    "description": "Complete-file safety limit (default 5,000,000; files over the limit fail without partial import)",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "type": "function",
+        "name": "sync_vector_store",
+        "description": (
+            "Idempotently synchronize hash-cached vector-store "
+            "sources into DocOps templates, CodeOps guidance, coding "
+            "capabilities, or governed n8n capabilities using durable "
+            "deduplication, source census, a cross-process lock, and "
+            "run audit. Provider-hosted inputs without an approved local "
+            "cache are classified as unavailable rather than partially "
+            "imported."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Report changes without mutating DocOps, CodeOps, or file sync state",
+                },
+                "max_files": {"type": "integer", "description": "Optional file cap (0=all)"},
+                "overwrite_existing": {
+                    "type": "boolean",
+                    "description": "Update existing DocOps templates (default true)",
+                },
+                "include_provisional": {
+                    "type": "boolean",
+                    "description": "Import provisional instructional specs (default true)",
+                },
+                "max_chars_per_file": {
+                    "type": "integer",
+                    "description": "Complete-file safety limit (default 5,000,000)",
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": "Reprocess files even when identity/content is unchanged",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "type": "function",
+        "name": "get_vector_sync_status",
+        "description": (
+            "Inspect recent durable vector-store sync runs, failures, "
+            "and per-file synchronization state."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "integer",
+                    "description": "Number of recent runs to return (1-50)",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "type": "function",
+        "name": "list_coding_capabilities",
+        "description": (
+            "List structured AI coding-tool capabilities learned from "
+            "training corpora, including freshness requirements, "
+            "appropriate tasks, workflows, safety controls, sources, "
+            "and recent import audit."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Optional title, ID, surface, or guidance search",
+                },
+                "tool_family": {"type": "string", "description": "Optional tool-family filter"},
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum capabilities to return (1-100)",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "type": "function",
+        "name": "list_n8n_capabilities",
+        "description": (
+            "List governed n8n capabilities from the shared domain registry, "
+            "including workflows, output contracts, safety controls, deployment "
+            "differences, freshness requirements, and release-gate state."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Optional title, ID, output, or guidance search",
+                },
+                "taxonomy": {"type": "string", "description": "Optional taxonomy filter"},
+                "task_type": {"type": "string", "description": "Optional task-type filter"},
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum capabilities to return (1-100)",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "type": "function",
+        "name": "get_n8n_corpus_status",
+        "description": (
+            "Inspect the governed n8n corpus inventory, source census, evaluation "
+            "thresholds, synchronization health, and fail-closed production gate."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "include_census": {
+                    "type": "boolean",
+                    "description": "Include bounded per-source census details",
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "type": "function",
+        "name": "deprecate_skill",
+        "description": "Deprecate a generated skill so it no longer loads (reversible via activate_skill).",
+        "parameters": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}, "reason": {"type": "string"}},
+            "required": ["name"],
+        },
+    },
 ]
+
+SKILLOPS_SCHEMAS.append(WEBSITE_LEARNING_SCHEMA)
 
 SKILLOPS_DISPATCH = {
     "observe_pattern": observe_pattern,
@@ -4935,4 +4905,5 @@ SKILLOPS_DISPATCH = {
     "list_n8n_capabilities": list_n8n_capabilities,
     "get_n8n_corpus_status": get_n8n_corpus_status,
     "deprecate_skill": deprecate_skill,
+    "learn_from_website": learn_from_website,
 }

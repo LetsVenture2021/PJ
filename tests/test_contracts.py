@@ -9,10 +9,28 @@ from jsonschema import Draft202012Validator, ValidationError
 
 import promptops
 import skills
+from ops.realtime.payload_validation import (
+    MAX_MESSAGE_LENGTH,
+    RealtimePayloadValidationError,
+    validate_inbound_payload,
+)
 from runtime_config import load_tool_policy
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+class RealtimeInputContractTests(unittest.TestCase):
+    def test_responses_turn_accepts_large_prompts_with_a_bounded_limit(self):
+        prompt = "x" * 50_000
+
+        self.assertEqual(
+            validate_inbound_payload("responses.turn", {"message": prompt})["message"],
+            prompt,
+        )
+        with self.assertRaises(RealtimePayloadValidationError):
+            validate_inbound_payload("responses.turn", {"message": "x" * (MAX_MESSAGE_LENGTH + 1)})
+
 
 LEGACY_PROMPT_RESULT_V1_SCHEMA = {
     "type": "object",

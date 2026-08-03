@@ -1,0 +1,25 @@
+{
+  "standard_version": "1.0.0",
+  "ratified_at": "2026-07-29",
+  "owners": {"docs": "PJ maintainers", "security": "PJ security owner", "product": "PJ product owner"},
+  "severity_order": ["info", "warning", "critical", "blocker"],
+  "profiles": {
+    "reference": {"required_headings": 1, "max_age_days": 730, "approval_roles": ["docs"]},
+    "operational": {"required_headings": 2, "max_age_days": 365, "approval_roles": ["docs"]},
+    "security": {"required_headings": 2, "max_age_days": 180, "approval_roles": ["docs", "security"]},
+    "product": {"required_headings": 2, "max_age_days": 365, "approval_roles": ["docs", "product"]},
+    "evidence": {"required_headings": 0, "max_age_days": 365, "approval_roles": ["docs"]},
+    "runtime": {"required_headings": 1, "max_age_days": 365, "approval_roles": ["docs"]}
+  },
+  "rules": {
+    "DOC-META-001": {"severity": "blocker", "owner": "docs", "description": "Manifest metadata is complete"},
+    "DOC-STRUCT-001": {"severity": "critical", "owner": "docs", "description": "Markdown has the profile minimum heading count"},
+    "DOC-PLACEHOLDER-001": {"severity": "blocker", "owner": "docs", "description": "Unresolved placeholders are absent"},
+    "DOC-SEC-001": {"severity": "blocker", "owner": "security", "description": "Credential-like content is absent"},
+    "DOC-PROV-001": {"severity": "warning", "owner": "docs", "description": "Time-bound claims identify provenance"},
+    "DOC-FRESH-001": {"severity": "warning", "owner": "docs", "description": "Review date is within the profile window"},
+    "DOC-LINK-001": {"severity": "critical", "owner": "docs", "description": "Repository-relative links resolve"},
+    "DOC-INTEGRITY-001": {"severity": "blocker", "owner": "security", "description": "Report hash matches the source"}
+  },
+  "formats": ["md", "html", "pdf", "docx", "rtf", "xlsx", "pptx"]
+}

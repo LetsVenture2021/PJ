@@ -1,5 +1,6 @@
-"""Transport-neutral conversation domain."""
+"""Transport-neutral conversation and continuity services."""
 
+from .handoff import Handoff, HandoffStore
 from .models import (
     ConversationContext,
     ConversationEvent,
@@ -13,6 +14,8 @@ __all__ = [
     "ConversationContext",
     "ConversationEvent",
     "ConversationRequest",
+    "Handoff",
+    "HandoffStore",
     "Route",
     "RoutingDecision",
     "RoutingError",

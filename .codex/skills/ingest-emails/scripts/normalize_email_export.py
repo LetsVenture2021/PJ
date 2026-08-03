@@ -37,13 +37,14 @@ class _VisibleText(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         del attrs
-        if tag.lower() in {"script", "style", "template"}:
+        normalized = tag.casefold()
+        if normalized in {"script", "style", "template"}:
             self._hidden += 1
-        elif tag.lower() in {"br", "p", "div", "li", "tr"}:
+        elif normalized in {"br", "p", "div", "li", "tr"}:
             self.chunks.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() in {"script", "style", "template"} and self._hidden:
+        if tag.casefold() in {"script", "style", "template"} and self._hidden:
             self._hidden -= 1
 
     def handle_data(self, data: str) -> None:
@@ -55,9 +56,8 @@ def _decode_header(value: str | None) -> str:
     pieces: list[str] = []
     for chunk, charset in decode_header(value or ""):
         if isinstance(chunk, bytes):
-            encoding = charset or "utf-8"
             try:
-                pieces.append(chunk.decode(encoding, errors="replace"))
+                pieces.append(chunk.decode(charset or "utf-8", errors="replace"))
             except LookupError:
                 pieces.append(chunk.decode("utf-8", errors="replace"))
         else:
@@ -75,13 +75,14 @@ def _payload_text(part: Message) -> str:
         payload = part.get_payload(decode=True)
     except (LookupError, UnicodeError, ValueError):
         return ""
-    if not isinstance(payload, bytes):
-        return ""
     charset = part.get_content_charset() or "utf-8"
-    try:
-        return payload.decode(charset, errors="replace")
-    except LookupError:
-        return payload.decode("utf-8", errors="replace")
+    if isinstance(payload, bytes):
+        try:
+            return payload.decode(charset, errors="replace")
+        except LookupError:
+            return payload.decode("utf-8", errors="replace")
+    raw_payload = part.get_payload()
+    return raw_payload if isinstance(raw_payload, str) else ""
 
 
 def _body(message: Message) -> str:
@@ -90,7 +91,7 @@ def _body(message: Message) -> str:
     for part in message.walk():
         if part.is_multipart() or part.get_content_disposition() == "attachment":
             continue
-        content_type = part.get_content_type().lower()
+        content_type = part.get_content_type().casefold()
         if content_type not in {"text/plain", "text/html"}:
             continue
         text = _payload_text(part)
@@ -137,10 +138,18 @@ def _record(message: Message, source: str) -> dict[str, object]:
 
 
 def _input_files(source: Path) -> list[Path]:
-    candidates = [source] if source.is_file() else sorted(source.rglob("*"))
-    return [
-        path for path in candidates if path.is_file() and path.suffix.lower() in ALLOWED_SUFFIXES
+    if source.is_file():
+        if source.suffix.casefold() not in ALLOWED_SUFFIXES:
+            raise ValueError("source file must end in .eml or .mbox")
+        return [source]
+    candidates = [
+        path
+        for path in sorted(source.rglob("*"))
+        if path.suffix.casefold() in ALLOWED_SUFFIXES and (path.is_file() or path.is_symlink())
     ]
+    if not candidates:
+        raise ValueError("source directory contains no .eml or .mbox files")
+    return candidates
 
 
 def _messages(path: Path, max_bytes: int) -> Iterable[tuple[str, Message]]:
@@ -150,7 +159,7 @@ def _messages(path: Path, max_bytes: int) -> Iterable[tuple[str, Message]]:
         raise ValueError("credential-shaped filename refused")
     if path.stat().st_size > max_bytes:
         raise ValueError("file exceeds byte limit")
-    if path.suffix.lower() == ".eml":
+    if path.suffix.casefold() == ".eml":
         yield str(path), BytesParser(policy=default).parsebytes(path.read_bytes())
         return
     box = mailbox.mbox(path, create=False)
@@ -161,19 +170,42 @@ def _messages(path: Path, max_bytes: int) -> Iterable[tuple[str, Message]]:
         box.close()
 
 
-def normalize(source: Path, output: Path, max_bytes: int, max_messages: int) -> dict[str, int]:
+def _validate_paths(source: Path, output: Path) -> None:
     if not source.exists() or source.is_symlink():
         raise ValueError("source must be an existing, non-symlink file or directory")
-    if output.exists() and output.samefile(source):
+    if output.exists() and output.is_symlink():
+        raise ValueError("output must not be a symlink")
+    source_resolved = source.resolve(strict=False)
+    output_resolved = output.resolve(strict=False)
+    if source_resolved == output_resolved:
         raise ValueError("output must not overwrite the source")
+    if source.is_dir() and output_resolved.is_relative_to(source_resolved):
+        raise ValueError("output must be outside the source directory")
+
+
+def _skip_reason(exc: BaseException) -> str:
+    reason = str(exc).splitlines()[0].strip()
+    return (reason or type(exc).__name__)[:200]
+
+
+def normalize(
+    source: Path,
+    output: Path,
+    max_bytes: int,
+    max_messages: int,
+) -> dict[str, object]:
+    _validate_paths(source, output)
     counts = {"discovered": 0, "written": 0, "duplicates": 0, "skipped": 0}
+    skipped_sources: list[dict[str, str]] = []
     seen: set[str] = set()
+    limit_reached = False
     output.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary_name = tempfile.mkstemp(prefix=f".{output.name}.", dir=output.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as destination:
-            limit_reached = False
             for path in _input_files(source):
+                if limit_reached:
+                    break
                 counts["discovered"] += 1
                 try:
                     for source_name, message in _messages(path, max_bytes):
@@ -188,17 +220,20 @@ def normalize(source: Path, output: Path, max_bytes: int, max_messages: int) -> 
                         seen.add(digest)
                         destination.write(json.dumps(record, ensure_ascii=False) + "\n")
                         counts["written"] += 1
-                    if limit_reached:
-                        break
-                except (OSError, ValueError, mailbox.Error):
+                except (OSError, ValueError, mailbox.Error) as exc:
                     counts["skipped"] += 1
+                    skipped_sources.append({"source": str(path), "reason": _skip_reason(exc)})
             destination.flush()
             os.fsync(destination.fileno())
         os.replace(temporary_name, output)
     except BaseException:
         Path(temporary_name).unlink(missing_ok=True)
         raise
-    return counts
+    return {
+        "counts": counts,
+        "limit_reached": limit_reached,
+        "skipped_sources": skipped_sources,
+    }
 
 
 def main() -> int:
@@ -210,8 +245,11 @@ def main() -> int:
     args = parser.parse_args()
     if args.max_message_bytes < 1 or args.max_messages < 1:
         parser.error("limits must be positive")
-    counts = normalize(args.source, args.output, args.max_message_bytes, args.max_messages)
-    print(json.dumps(counts, sort_keys=True), file=os.sys.stderr)
+    try:
+        summary = normalize(args.source, args.output, args.max_message_bytes, args.max_messages)
+    except ValueError as exc:
+        parser.exit(2, f"error: {exc}\n")
+    print(json.dumps(summary, sort_keys=True), file=os.sys.stderr)
     return 0
 
 
