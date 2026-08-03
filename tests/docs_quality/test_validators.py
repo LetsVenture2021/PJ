@@ -25,12 +25,12 @@ class DocumentQualityTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def report(self, text, **kwargs):
+    def report(self, content, **kwargs):
         source = self.root / "source.md"
-        if isinstance(text, bytes):
-            source.write_bytes(text)
+        if isinstance(content, bytes):
+            source.write_bytes(content)
         else:
-            source.write_text(text, encoding="utf-8")
+            source.write_text(content, encoding="utf-8")
         return validate_document(source, **kwargs)
 
     def test_positive_unicode_rtl_emoji_and_combining_text(self):
