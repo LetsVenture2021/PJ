@@ -2048,12 +2048,11 @@ def artifact_preview(session_id, artifact_id):
     if error:
         return error
     try:
+        preview = ARTIFACT_FACADE.preview(artifact_id, project_id=None, session_id=session_id)
         return _json_response(
             {
                 "ok": True,
-                "preview": ARTIFACT_FACADE.preview(
-                    artifact_id, project_id=None, session_id=session_id
-                ),
+                **preview,
             },
             req_id=req_id,
         )
