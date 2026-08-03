@@ -642,6 +642,59 @@ class TestResponsesRuntime(unittest.TestCase):
         self.assertNotIn("Premature completion", rendered)
         self.assertNotIn("Still no file", rendered)
 
+    def test_generic_document_gets_governed_fallback_after_model_omits_file(self):
+        client = FakeClient(
+            [
+                final_stream("Draft content.", response_id="resp_first"),
+                final_stream("Still no tool call.", response_id="resp_second"),
+            ]
+        )
+        artifact = {
+            "artifact_id": "ART-" + ("d" * 32),
+            "format": "md",
+            "filename": "requested-document.md",
+            "status": "ready",
+        }
+        with patch.object(responses_runtime, "_fallback_markdown_artifact", return_value=artifact):
+            events = list(
+                responses_runtime.ResponsesOrchestrator(client, self.cfg).stream_turn(
+                    "Create a risk assessment for the board"
+                )
+            )
+
+        self.assertEqual(len(client.responses.calls), 2)
+        self.assertEqual(events[-2]["type"], "text.delta")
+        self.assertEqual(events[-1]["deliverable"], {"status": "ready", "requested_format": "md"})
+        self.assertEqual(events[-1]["artifacts"], [artifact])
+        self.assertTrue(any(event["type"] == "artifact.ready" for event in events))
+
+    def test_governed_markdown_fallback_creates_integrity_checked_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old_db = docops._DB_PATH
+            old_docs = docops.DOCS_DIR
+            old_exports = docops.EXPORTS_DIR
+            try:
+                docops._DB_PATH = root / "docops.sqlite3"
+                docops.DOCS_DIR = root / "documents"
+                docops.DOCS_DIR.mkdir()
+                docops.EXPORTS_DIR = docops.DOCS_DIR / "exports"
+                docops.EXPORTS_DIR.mkdir()
+                artifact = responses_runtime._fallback_markdown_artifact(
+                    "Create a risk assessment",
+                    "The principal risk is an unverified dependency.",
+                )
+            finally:
+                docops._DB_PATH = old_db
+                docops.DOCS_DIR = old_docs
+                docops.EXPORTS_DIR = old_exports
+
+        self.assertIsNotNone(artifact)
+        self.assertEqual(artifact["status"], "ready")
+        self.assertEqual(artifact["format"], "md")
+        self.assertRegex(artifact["artifact_id"], r"^ART-[a-f0-9]{32}$")
+        self.assertRegex(artifact["sha256"], r"^[a-f0-9]{64}$")
+
     def test_validated_powerpoint_artifact_enables_completion_and_redacts_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -2163,6 +2216,17 @@ class TestRequestedDeliverableFormat(unittest.TestCase):
                     responses_runtime.requested_deliverable_format(message),
                     expected_format,
                 )
+
+    def test_generic_document_requests_default_to_markdown(self):
+        requests = (
+            "Write a risk assessment for the board.",
+            "Create an employee handbook.",
+            "Draft the project roadmap.",
+            "Generate a customer case study.",
+        )
+        for message in requests:
+            with self.subTest(message=message):
+                self.assertEqual(responses_runtime.requested_deliverable_format(message), "md")
 
     def test_non_string_input_returns_none(self):
         self.assertIsNone(responses_runtime.requested_deliverable_format(None))

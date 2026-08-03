@@ -32,22 +32,16 @@ self.addEventListener("fetch", (event) => {
     STATIC.includes(url.pathname) &&
     !event.request.headers.has("authorization");
   if (!isStatic) return; // API, uploads, transcripts, artifacts and auth are never cached.
-  // Network-first so shipped fixes reach clients immediately; the cache is
-  // only a fallback for offline use. Cache-first previously pinned stale,
-  // broken clients even after server-side repairs shipped.
+  // Prefer the network so a newly deployed voice client is not pinned behind
+  // an old cache entry. The cache remains an offline fallback for static UI.
   event.respondWith(
     fetch(event.request)
       .then((response) => {
         if (response.ok && response.type === "basic") {
-          const copy = response.clone();
-          caches.open(CACHE).then((cache) => cache.put(event.request, copy));
+          caches.open(CACHE).then((cache) => cache.put(event.request, response.clone()));
         }
         return response;
       })
-      .catch(() =>
-        caches
-          .match(event.request, { ignoreSearch: true })
-          .then((cached) => cached || Response.error()),
-      ),
+      .catch(() => caches.match(event.request, { ignoreSearch: true })),
   );
 });
