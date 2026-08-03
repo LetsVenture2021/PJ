@@ -15,9 +15,10 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 
+from .conflicts import git_conflict_marker_match
 
 QUALITY_SCHEMA_VERSION = "1.0"
-VALIDATOR_VERSION = "1.0.0"
+VALIDATOR_VERSION = "1.1.0"
 
 
 class Severity(StrEnum):
@@ -84,6 +85,20 @@ def validate_content(content: str, *, profile: str = "governed") -> dict:
         )
         if finding:
             findings.append(finding)
+
+    conflict_match = git_conflict_marker_match(content)
+    merge_conflict = (
+        Finding(
+            "DOC-COMPLETE-002",
+            Severity.BLOCKER,
+            "An unresolved merge-conflict marker is present.",
+            _line_number(content, conflict_match.start()),
+        )
+        if conflict_match
+        else None
+    )
+    if merge_conflict:
+        findings.append(merge_conflict)
 
     for pattern in _SENSITIVE:
         finding = _finding(

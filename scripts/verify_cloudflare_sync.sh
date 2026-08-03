@@ -3,6 +3,8 @@
 set -uo pipefail
 
 EXPECTED_ROUTES=(
+  "/conversations*"
+  "/projects*"
   "/health"
   "/session"
   "/token"
@@ -31,6 +33,8 @@ REQUIRED_SECRETS=(
 # missing path fails silently: the client reports work in progress and nothing
 # reaches the runtime.
 EXPECTED_WAF_SKIP_PATHS=(
+  "/session"
+  "/token"
   "/execute-tool"
   "/tool-schemas"
   "/health"
@@ -79,8 +83,9 @@ print_waf_checklist() {
   cat <<'EOF'
 
 WAF challenge-skip checklist (manual):
-  [ ] A custom WAF skip rule covers the bridge hostname's authenticated paths:
-      /execute-tool, /tool-schemas, /health, /responses/*, and /upload/*.
+  [ ] A custom WAF skip rule covers the authenticated API paths on the apex
+      and bridge hostnames: /session, /token, /execute-tool, /tool-schemas,
+      /health, /responses/*, and /upload/*.
   [ ] The rule skips the challenge-issuing products in use (for example Super
       Bot Fight Mode) so Worker subrequests are never challenged.
 

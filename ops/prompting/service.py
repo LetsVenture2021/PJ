@@ -31,11 +31,13 @@ _QUANTITY_RE = re.compile(
 _QUOTED_RE = re.compile(r"""(["'])(?:(?!\1).){1,500}\1""")
 _FENCED_CODE_RE = re.compile(r"```[\s\S]*?```")
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+_FLAG_RE = re.compile(r"(?<!\w)--[A-Za-z0-9][A-Za-z0-9-]*")
 _IDENTIFIER_RE = re.compile(
     r"(?<!\w)(?:[A-Za-z0-9]+(?:[_:/.-][A-Za-z0-9]+)+|"
     r"(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*\d)[A-Za-z0-9]+)(?!\w)"
 )
 _MACHINE_IDENTIFIER_RE = re.compile(r"[_:/.\d]")
+_REPAIRABLE_LITERAL_CATEGORIES = frozenset({"URL", "quoted", "code", "identifier", "flag"})
 
 
 class PromptPerfectingError(RuntimeError):
@@ -181,7 +183,17 @@ def _validate_result(original: str, payload: dict, max_output_chars: int) -> dic
             "prompt_intent_changed",
             "Prompt perfecting changed a control response.",
         )
-    missing = _missing_preserved_literals(original, normalized)
+    missing = _missing_preserved_literal_values(original, normalized)
+    if missing:
+        missing_categories = missing.keys()
+        if set(missing_categories).issubset(_REPAIRABLE_LITERAL_CATEGORIES):
+            normalized = _repair_preserved_literals(original, normalized, missing)
+            if len(normalized) > max_output_chars:
+                raise PromptPerfectingError(
+                    "invalid_prompt_perfecting_output",
+                    "Prompt perfecting repair exceeded the configured output limit.",
+                )
+            missing = _missing_preserved_literal_values(original, normalized)
     if missing:
         categories = ", ".join(sorted(missing))
         raise PromptPerfectingError(
@@ -196,7 +208,7 @@ def _validate_result(original: str, payload: dict, max_output_chars: int) -> dic
     }
 
 
-def _missing_preserved_literals(original: str, refined: str) -> set[str]:
+def _literal_extractors():
     def identifiers(text: str) -> set[str]:
         values = set()
         for item in _IDENTIFIER_RE.findall(text):
@@ -204,20 +216,54 @@ def _missing_preserved_literals(original: str, refined: str) -> set[str]:
                 values.add(item)
         return values
 
-    extractors = {
+    return {
         "URL": lambda text: {item.rstrip(".,);]") for item in _URL_RE.findall(text)},
         "date": lambda text: set(_DATE_RE.findall(text)),
         "quantity": lambda text: set(_QUANTITY_RE.findall(text)),
         "quoted": lambda text: {match.group(0) for match in _QUOTED_RE.finditer(text)},
         "code": lambda text: set(_FENCED_CODE_RE.findall(text) + _INLINE_CODE_RE.findall(text)),
         "identifier": identifiers,
+        "flag": lambda text: set(_FLAG_RE.findall(text)),
     }
-    missing = set()
-    for category, extract in extractors.items():
-        values = {value for value in extract(original) if value}
-        if any(value not in refined for value in values):
-            missing.add(category)
+
+
+def _preserved_literals(text: str) -> dict[str, set[str]]:
+    return {
+        category: {value for value in extract(text) if value}
+        for category, extract in _literal_extractors().items()
+    }
+
+
+def _missing_preserved_literal_values(original: str, refined: str) -> dict[str, list[str]]:
+    missing = {}
+    for category, values in _preserved_literals(original).items():
+        absent = sorted(value for value in values if value not in refined)
+        if absent:
+            missing[category] = absent
     return missing
+
+
+def _missing_preserved_literals(original: str, refined: str) -> set[str]:
+    return set(_missing_preserved_literal_values(original, refined))
+
+
+def _repair_preserved_literals(
+    original: str,
+    refined: str,
+    missing: dict[str, list[str]] | None = None,
+) -> str:
+    missing = missing or _missing_preserved_literal_values(original, refined)
+    if not missing:
+        return refined
+    lines = [refined.rstrip(), "", "Immutable literals to preserve exactly:"]
+    seen = set()
+    for category in sorted(missing):
+        for value in missing[category]:
+            if value in seen:
+                continue
+            seen.add(value)
+            lines.append(f"- {value}")
+    return "\n".join(lines).strip()
 
 
 def _unchanged_result(original: str, surface: str, summary: str) -> dict:
@@ -235,6 +281,13 @@ def _unchanged_result(original: str, surface: str, summary: str) -> dict:
     }
 
 
+def fallback_result(prompt: str, surface: str, reason: str = "") -> dict:
+    """Return the user's original prompt as a safe, unrefined perfecting result."""
+    original = _normalize_prompt(prompt if isinstance(prompt, str) else "")
+    summary = reason.strip() or "Prompt perfecting failed; the original prompt was retained."
+    return _unchanged_result(original, surface, summary)
+
+
 def perfect_prompt(
     client,
     cfg: dict,
@@ -249,9 +302,15 @@ def perfect_prompt(
     if not original:
         raise PromptPerfectingError("invalid_prompt", "Prompt must be a non-empty string.")
     if len(original) > settings.max_input_chars:
-        raise PromptPerfectingError(
-            "prompt_too_large",
-            f"Prompt exceeds {settings.max_input_chars} characters.",
+        if required:
+            raise PromptPerfectingError(
+                "prompt_too_large",
+                f"Prompt exceeds {settings.max_input_chars} characters.",
+            )
+        return _unchanged_result(
+            original,
+            surface,
+            "Prompt exceeds the perfecting size limit; the original prompt was retained.",
         )
     if not settings.enabled or surface not in settings.surfaces:
         if required:
@@ -284,10 +343,12 @@ def perfect_prompt(
             "- Boundaries: preserve every stated constraint verbatim - what must "
             "stay unchanged, what to avoid, approvals required before acting - "
             "and add a final self-check when the task is consequential.\n"
-            "Preserve the exact intent, requested format, named entities, facts, "
-            "constraints, dates, quantities, permissions, scope, and uncertainty. "
-            "Write in the user's first person. Do not answer the prompt. Do not "
-            "invent requirements. Keep explicit approval, refusal, stop, or "
+            "Preserve exact URL, code, identifier, quoted, CLI flag, date, and quantity "
+            "literals character-for-character. Preserve the exact intent, "
+            "requested format, named entities, facts, constraints, dates, "
+            "quantities, permissions, scope, and uncertainty. Write in the "
+            "user's first person. Do not answer the prompt. Do not invent "
+            "requirements. Keep explicit approval, refusal, stop, or "
             "confirmation language unchanged. Return only the requested "
             "structured output."
         )
@@ -306,7 +367,7 @@ def perfect_prompt(
                         "strict": True,
                     }
                 },
-                max_output_tokens=4000,
+                max_output_tokens=min(16000, 4000 + len(original) // 2),
                 timeout=settings.timeout_seconds,
             )
         except APIError as exc:

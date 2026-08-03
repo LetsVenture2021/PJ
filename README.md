@@ -21,6 +21,7 @@ voice, a local browser client, and an optional Cloudflare Worker edge proxy.
 - [GitHub security controls](docs/security-controls.md)
 - [Dependency audit report (July 28, 2026)](docs/dependency-audit-2026-07-28.md)
 - [Hugging Face MCP server setup and usage](docs/huggingface-mcp-server.md)
+- [Google Cloud MCP server setup and usage](docs/google-cloud-mcp-server.md)
 
 ## What works
 
@@ -263,12 +264,22 @@ Run commands from the repository root with the virtual environment active.
 
 # Validate a structured response against the checked-in schema
 ./pj --json schemas/task_triage.json "Triage these tasks: ..."
+
+# Inspect the shared CLI/Web Workbench manifest
+./pj workbench
+./pj workbench --json
+
+# Launch a task through a named Workbench workflow
+./pj workbench code "Inspect this repository and fix the failing tests"
 ```
 
 Interactive palette keys are `/` for commands, `#` for local tools, `%` for
 features/connectors, and `$` for generated skills. `/new`, `/chats`,
 `/resume`, `/history`, and `/search` operate on durable SQLite history.
 Feature toggles write to `config.json` or `mcp_servers.json`.
+`/workbench` shows the same workflow readiness surfaced in the browser;
+`/workbench <workflow> <task>` launches a task with that workflow's operating
+prompt while preserving the user's task in chat history.
 
 To avoid the launcher, activate the environment, export `OPENAI_API_KEY`, and
 replace `./pj` with `python pj.py`.
@@ -352,6 +363,18 @@ python huggingface_mcp_server.py
 
 It speaks MCP over stdio. Public metadata search needs no token; inference and
 authorized repositories require `HF_TOKEN`.
+
+### Google Cloud MCP server
+
+```bash
+python google_cloud_mcp_server.py
+```
+
+It speaks MCP over stdio and exposes bounded, read-only project and Cloud Run
+discovery. On Google Cloud it uses an attached service account through the
+metadata server; local development can supply a short-lived
+`GOOGLE_CLOUD_ACCESS_TOKEN`. Configuration and least-privilege setup are
+documented in [the Google Cloud MCP server guide](docs/google-cloud-mcp-server.md).
 
 ### Knowledge ingestion
 
@@ -506,20 +529,20 @@ It deploys API routes only; it does **not** deploy `webrtc_client.html` or
    Wrangler without reading their values, and prints the Cloudflare Access
    application/policy checks that must be confirmed in Zero Trust.
 
-Only `GET /health` and CORS preflight are public. `/session`, `/token`,
-`/tool-schemas`, `/execute-tool`, `/responses/*`, and `/upload/*` require a
-valid Cloudflare Access identity. Full local tools, Full Power, and upload
-routes also require a reachable private runtime and matching bridge token;
-without it the Worker remains useful only for its direct Realtime path and
-reports degraded capability in `/health`.
+Only `GET /health` and CORS preflight are public. `/conversations*`,
+`/projects*`, `/session`, `/token`, `/tool-schemas`, `/execute-tool`,
+`/responses/*`, and `/upload/*` require a valid Cloudflare Access identity.
+Full local tools, Full Power, and upload routes also require a reachable
+private runtime and matching bridge token; without it the Worker remains useful
+only for its direct Realtime path and reports degraded capability in `/health`.
 
 If the zone runs Super Bot Fight Mode or challenge-issuing security features,
 add a WAF custom skip rule for the authenticated API paths on both the apex
-and bridge hostnames — `/session`, `/token`, `/execute-tool`,
-`/tool-schemas`, `/health`, `/responses/*`, and `/upload/*` — because Worker
-subrequests and browser XHR cannot answer challenges. A challenged path fails
-silently: the client reports an upload or tool call in progress and nothing
-reaches the runtime.
+and bridge hostnames — `/conversations*`, `/projects*`, `/session`, `/token`,
+`/execute-tool`, `/tool-schemas`, `/health`, `/responses/*`, and `/upload/*`
+— because Worker subrequests and browser XHR cannot answer challenges. A
+challenged path fails silently: the client reports an upload or tool call in
+progress and nothing reaches the runtime.
 
 If the zone runs the OWASP Core Ruleset, also add a managed-phase skip
 exception for `/upload/*` on both hostnames: OWASP request-body scoring
@@ -537,17 +560,20 @@ workflow.
 
 ### Browser frontend
 
-The repository contains the static client (`webrtc_client.html` and `assets/`)
+The repository contains the static client (`webrtc_client.html`, `assets/`, and `web/`)
 but no committed frontend deployment manifest. The Worker routes intentionally
 exclude `/` and `/assets/*`; serve those paths from a static host such as a
 Cloudflare Pages project on the same domain, protected by the same Access
-application. A direct-upload deploy stages the client as `index.html` plus the
-`assets/` directory:
+application. A direct-upload deploy stages the client as `index.html`, copies
+the manifest and service worker to the site root, and preserves `web/` for
+service-worker dependencies:
 
 ```bash
-mkdir -p /tmp/pj-site/assets
+mkdir -p /tmp/pj-site
 cp webrtc_client.html /tmp/pj-site/index.html
-cp assets/pj_web_utils.js /tmp/pj-site/assets/
+cp webrtc_client.html /tmp/pj-site/webrtc_client.html
+cp -R assets web /tmp/pj-site/
+cp web/manifest.webmanifest web/service-worker.js /tmp/pj-site/
 wrangler pages deploy /tmp/pj-site --project-name=YOUR_PAGES_PROJECT --branch=master
 ```
 

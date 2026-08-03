@@ -68,12 +68,32 @@ class DocumentQualityTests(unittest.TestCase):
         self.assertIn("DOC-LINK-001", rules)
         self.assertIn("DOC-SEC-001", rules)
 
+    def test_item_delimiters_are_not_treated_as_formulas(self):
+        report = self.report("# T\n\n---ITEM_START: N8N-001---\n")
+        self.assertNotIn("DOC-SEC-001", {item.rule_id for item in report.findings})
+
     def test_sensitive_findings_never_contain_raw_value(self):
         secret = "sk-supersecretvalue123456"
         report = self.report(f"# T\n\napi_key={secret}\n")
         serialized = report.to_json()
         self.assertIn("DOC-SEC-002", serialized)
         self.assertNotIn(secret, serialized)
+
+    def test_git_conflict_markers_block_manifest_validation_without_raw_content(self):
+        confidential = "internal resolution details"
+        report = self.report(f"# T\n\n<<<<< ours\n{confidential}\n")
+        serialized = report.to_json()
+        self.assertIn("DOC-COMPLETE-002", {item.rule_id for item in report.findings})
+        self.assertTrue(report.failed)
+        self.assertNotIn(confidential, serialized)
+
+    def test_git_diff3_marker_blocks_manifest_validation(self):
+        report = self.report("# T\n\n||||| base\n")
+        self.assertIn("DOC-COMPLETE-002", {item.rule_id for item in report.findings})
+
+    def test_equals_divider_is_not_a_manifest_conflict_marker(self):
+        report = self.report("# T\n\n=======\n")
+        self.assertNotIn("DOC-COMPLETE-002", {item.rule_id for item in report.findings})
 
     def test_malformed_utf8_is_a_sanitized_blocker(self):
         report = self.report(b"# title\n\xffsecret")
@@ -133,3 +153,19 @@ class DocumentQualityTests(unittest.TestCase):
 
         self.assertEqual(len(reports), 1)
         self.assertEqual(Path(reports[0].source).name, "brief.md")
+
+    def test_validate_manifest_json_entries_do_not_require_markdown_title(self):
+        documents_dir = self.root / "documents"
+        documents_dir.mkdir()
+        source = documents_dir / "record.json"
+        source.write_text('{"status":"ok"}', encoding="utf-8")
+        manifest = documents_dir / "library-manifest.json"
+        manifest.write_text(
+            json.dumps({"documents": [{"path": "documents/record.json"}]}),
+            encoding="utf-8",
+        )
+
+        reports = validate_manifest(manifest)
+
+        self.assertEqual(len(reports), 1)
+        self.assertFalse(reports[0].failed)
