@@ -181,12 +181,9 @@ def list_memories():
     denied = _check_bridge_auth(_request_id(), required=True)
     if denied:
         return denied
-    project_scope = request.args.get("project_scope")
-    if not isinstance(project_scope, str) or not project_scope.strip():
-        return {"error": "project_scope is required"}, 400
     return {
         "memories": _memory_service().store.list(
-            status=request.args.get("status"), project_scope=project_scope.strip()
+            status=request.args.get("status"), project_scope=request.args.get("project_scope")
         )
     }
 
@@ -252,12 +249,6 @@ def memory_settings():
         or not all(isinstance(x, str) for x in body["disabled_categories"])
     ):
         return {"error": "disabled_categories must be an array of strings"}, 400
-    if "disabled_categories" in body:
-        body["disabled_categories"] = list(
-            dict.fromkeys(
-                value.strip().lower() for value in body["disabled_categories"] if value.strip()
-            )
-        )
     for key, value in body.items():
         _memory_service().store.set_setting(key, value)
     return {"updated": sorted(body)}
