@@ -48,6 +48,7 @@ class RuntimeConfig:
     providers: dict[str, Any]
     execution_modes: dict[str, Any]
     collaboration: dict[str, Any]
+    memory: dict[str, Any]
     google_cloud: GoogleCloudSettings
     sources: dict[str, Path]
 
@@ -384,6 +385,13 @@ def load_runtime_config(
             "voice": "marin",
         },
         "worker": _load_worker_config(worker_path, selected),
+        "memory": {
+            "enabled": True,
+            "extraction_enabled": False,
+            "automatic_ui_preferences": False,
+            "max_proposals_per_turn": 3,
+            "database_path": str(base_dir / "pj_data.sqlite3"),
+        },
         "conversation_routing": assistant.pop(
             "conversation_routing",
             {
@@ -503,6 +511,14 @@ def load_runtime_config(
     worker = sections["worker"]
     if not isinstance(worker, dict):
         raise ConfigError("worker configuration must be an object")
+    memory = sections["memory"]
+    if not isinstance(memory, dict):
+        raise ConfigError("memory configuration must be an object")
+    if (
+        not isinstance(memory.get("max_proposals_per_turn"), int)
+        or not 1 <= memory["max_proposals_per_turn"] <= 10
+    ):
+        raise ConfigError("memory.max_proposals_per_turn must be between 1 and 10")
     routing = sections["conversation_routing"]
     routes = {"realtime", "responses", "local", "hosted", "delegated"}
     if not isinstance(routing, dict):
@@ -586,6 +602,7 @@ def load_runtime_config(
         providers=copy.deepcopy(sections["providers"]),
         execution_modes=copy.deepcopy(sections["execution_modes"]),
         collaboration=copy.deepcopy(collaboration),
+        memory=copy.deepcopy(memory),
         google_cloud=google_cloud_settings,
         sources={
             "assistant": assistant_path,

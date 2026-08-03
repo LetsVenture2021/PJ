@@ -671,7 +671,17 @@ _DELIVERABLE_INTENT_PATTERN = re.compile(
     r"save|saves|saved|saving|"
     r"download|downloads|downloaded|downloading|"
     r"draft|drafts|drafted|drafting|"
+    r"write|writes|wrote|writing|"
     r"produce|produces|produced|producing"
+    r")\b"
+)
+
+_DOCUMENT_REQUEST_PATTERN = re.compile(
+    r"\b(?:"
+    r"document|report|brief|memo|proposal|plan|policy|procedure|sop|"
+    r"playbook|manual|guide|handbook|checklist|agenda|minutes|letter|"
+    r"contract|agreement|statement|analysis|assessment|roadmap|strategy|"
+    r"whitepaper|case study|press release|job description|resume|résumé"
     r")\b"
 )
 
@@ -715,7 +725,41 @@ def requested_deliverable_format(message):
     for format_name, patterns in checks:
         if any(re.search(pattern, text) for pattern in patterns):
             return format_name
+    # A user should not need to know a file extension to receive a file. A
+    # generic document request defaults to governed Markdown, which is always
+    # available and can subsequently be revised or exported to another format.
+    if _DOCUMENT_REQUEST_PATTERN.search(text):
+        return "md"
     return None
+
+
+def _fallback_markdown_artifact(message, candidate_text):
+    """Create a governed draft when the model twice omits a requested document."""
+    import docops
+
+    source = strip_citation_markers(str(candidate_text or "")).strip()
+    if not source:
+        source = "A document was requested. This draft records the request for revision."
+    request_context = str(message or "").strip()
+    sections = {
+        "Purpose": request_context or "Produce the requested document.",
+        "Situation": source,
+        "Key Facts": source,
+        "Options": "Revise this governed draft with additional source material as needed.",
+        "Recommendation": source,
+        "Risks": "Verify factual claims, names, dates, and approvals before finalization.",
+        "Next Actions": "Review, revise, approve, and export the audience-ready version.",
+    }
+    drafted = docops.draft_document(
+        "executive_brief",
+        "Requested Document",
+        json.dumps(sections),
+    )
+    doc_id = drafted.get("doc_id") if isinstance(drafted, dict) else None
+    if not doc_id:
+        return None
+    exported = docops.export_document(doc_id, "md")
+    return _verified_artifact_from_result(exported)
 
 
 _SERVER_PATH_PATTERN = re.compile(
@@ -932,6 +976,7 @@ class ResponsesOrchestrator:
         }:
             raise ValueError("unsupported required deliverable format")
         repair_attempts = 0
+        best_document_text = ""
 
         while True:
             operation_key = (
@@ -1178,6 +1223,8 @@ class ResponsesOrchestrator:
                 output_text = _get(final_response, "output_text", None)
                 if output_text is None:
                     output_text = "".join(round_text)
+                if required_format and isinstance(output_text, str) and output_text.strip():
+                    best_document_text = output_text
                 if required_format and not any(
                     artifact.get("format") == required_format
                     for artifact in ready_artifacts.values()
@@ -1198,6 +1245,29 @@ class ResponsesOrchestrator:
                         previous_response_id = response_id
                         first = False
                         continue
+                    if required_format == "md":
+                        artifact = _fallback_markdown_artifact(message, best_document_text)
+                        if artifact:
+                            ready_artifacts[artifact["artifact_id"]] = artifact
+                            yield {"type": "artifact.ready", **artifact}
+                            completion_text = (
+                                "PJ created a governed Markdown draft because the model did not "
+                                "produce the requested document artifact."
+                            )
+                            yield {"type": "text.delta", "delta": completion_text}
+                            yield {
+                                "type": "completion",
+                                "text": completion_text,
+                                "citations": all_citations,
+                                "sources": all_sources,
+                                "artifacts": list(ready_artifacts.values()),
+                                "deliverable": {
+                                    "status": "ready",
+                                    "requested_format": required_format,
+                                },
+                                "_response_id": response_id,
+                            }
+                            return
                     failure_text = (
                         f"The requested .{required_format} deliverable is "
                         "incomplete because no validated artifact was produced."
