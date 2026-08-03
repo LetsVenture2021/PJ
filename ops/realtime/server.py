@@ -1347,9 +1347,16 @@ def prompt_perfect():
             load_config(),
             prompt,
             surface=surface,
+            required=False,
         )
     except promptops.PromptPerfectingError as exc:
-        return _error_response(exc.code, str(exc), 422, req_id)
+        # Fail open: returning the original prompt keeps voice and chat
+        # turns alive; refinement is an enhancement, not a gate.
+        _LOGGER.warning(
+            "prompt.perfecting.fallback",
+            extra={"request_id": req_id, "code": exc.code},
+        )
+        result = promptops.fallback_result(prompt, surface, str(exc))
     return _json_response(
         {"ok": True, "prompt": promptops.public_result(result)},
         req_id=req_id,
@@ -2217,10 +2224,16 @@ def stream_responses_turn(session_id):
             load_config(),
             message,
             surface="full_power",
+            required=False,
         )
     except promptops.PromptPerfectingError as exc:
-        chatlog.release_session_turn(session["id"], turn_token)
-        return _error_response(exc.code, str(exc), 422, req_id)
+        # Perfecting is an enhancement, never a gate: the user's original
+        # wording is always a safe prompt, so the turn proceeds with it.
+        _LOGGER.warning(
+            "prompt.perfecting.fallback",
+            extra={"request_id": req_id, "code": exc.code},
+        )
+        perfected = promptops.fallback_result(message, "full_power", str(exc))
     model_message = perfected["refined_prompt"]
     input_value = model_message
     if not session.get("last_response_id"):

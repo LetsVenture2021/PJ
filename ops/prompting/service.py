@@ -278,6 +278,13 @@ def _unchanged_result(original: str, surface: str, summary: str) -> dict:
     }
 
 
+def fallback_result(prompt: str, surface: str, reason: str = "") -> dict:
+    """Return the user's original prompt as a safe, unrefined perfecting result."""
+    original = _normalize_prompt(prompt if isinstance(prompt, str) else "")
+    summary = reason.strip() or "Prompt perfecting failed; the original prompt was retained."
+    return _unchanged_result(original, surface, summary)
+
+
 def perfect_prompt(
     client,
     cfg: dict,
@@ -292,9 +299,15 @@ def perfect_prompt(
     if not original:
         raise PromptPerfectingError("invalid_prompt", "Prompt must be a non-empty string.")
     if len(original) > settings.max_input_chars:
-        raise PromptPerfectingError(
-            "prompt_too_large",
-            f"Prompt exceeds {settings.max_input_chars} characters.",
+        if required:
+            raise PromptPerfectingError(
+                "prompt_too_large",
+                f"Prompt exceeds {settings.max_input_chars} characters.",
+            )
+        return _unchanged_result(
+            original,
+            surface,
+            "Prompt exceeds the perfecting size limit; the original prompt was retained.",
         )
     if not settings.enabled or surface not in settings.surfaces:
         if required:
@@ -351,7 +364,7 @@ def perfect_prompt(
                         "strict": True,
                     }
                 },
-                max_output_tokens=4000,
+                max_output_tokens=min(16000, 4000 + len(original) // 2),
                 timeout=settings.timeout_seconds,
             )
         except APIError as exc:
