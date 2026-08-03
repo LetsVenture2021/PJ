@@ -188,8 +188,7 @@ def _validate_result(original: str, payload: dict, max_output_chars: int) -> dic
         categories = ", ".join(sorted(drifted_categories))
         raise PromptPerfectingError(
             "prompt_intent_changed",
-            "Prompt perfecting replaced exact "
-            f"{categories} literals from the original request.",
+            f"Prompt perfecting replaced exact {categories} literals from the original request.",
         )
     if missing:
         missing_categories = missing.keys()
@@ -251,7 +250,9 @@ def _unrepairable_literal_drift_categories(
     refined: str,
     missing: dict[str, list[str]] | None = None,
 ) -> set[str]:
-    missing = missing if missing is not None else _missing_preserved_literal_values(original, refined)
+    missing = (
+        missing if missing is not None else _missing_preserved_literal_values(original, refined)
+    )
     if not missing:
         return set()
     strict_categories = {"URL", "date", "quantity"}
