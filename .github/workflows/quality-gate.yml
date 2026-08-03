@@ -68,7 +68,7 @@ jobs:
       - name: Check changed Python formatting
         run: |
           if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            BASE_SHA="$(git rev-parse "${GITHUB_SHA}^1")"
+            BASE_SHA="$(git rev-parse "${GITHUB_SHA}^1" 2>/dev/null || true)"
           else
             BASE_SHA="${{ github.event.before }}"
           fi
