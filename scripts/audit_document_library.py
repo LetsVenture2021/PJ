@@ -33,7 +33,7 @@ def _entry_digest(entry: dict) -> str | None:
 
 
 def _entry_is_legacy(entry: dict) -> bool:
-    return "document_id" in entry or "sha256" in entry
+    return "document_id" in entry or "sha256" in entry or "schema_version" not in entry
 
 
 def _schema_id(value: str) -> str:
