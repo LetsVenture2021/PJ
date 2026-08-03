@@ -31,11 +31,12 @@ _QUANTITY_RE = re.compile(
 _QUOTED_RE = re.compile(r"""(["'])(?:(?!\1).){1,500}\1""")
 _FENCED_CODE_RE = re.compile(r"```[\s\S]*?```")
 _INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
-_COMMAND_FLAG_RE = re.compile(r"(?<![\w-])--[A-Za-z0-9][A-Za-z0-9-]*\b")
+_FLAG_RE = re.compile(r"(?<!\w)--[A-Za-z0-9][A-Za-z0-9-]*")
 _IDENTIFIER_RE = re.compile(
     r"(?<!\w)(?:[A-Za-z0-9]+(?:[_:/.-][A-Za-z0-9]+)+|"
     r"(?=[A-Za-z0-9]*[A-Za-z])(?=[A-Za-z0-9]*\d)[A-Za-z0-9]+)(?!\w)"
 )
+_REPAIRABLE_LITERAL_CATEGORIES = frozenset({"URL", "quoted", "code", "identifier", "flag"})
 
 
 class PromptPerfectingError(RuntimeError):
@@ -183,21 +184,15 @@ def _validate_result(original: str, payload: dict, max_output_chars: int) -> dic
         )
     missing = _missing_preserved_literal_values(original, normalized)
     if missing:
-        semantic_changes = set(missing) & {"date", "quantity"}
-        if semantic_changes:
-            categories = ", ".join(sorted(semantic_changes))
-            raise PromptPerfectingError(
-                "prompt_intent_changed",
-                "Prompt perfecting did not preserve exact "
-                f"{categories} literals from the original request.",
-            )
-        normalized = _repair_preserved_literals(original, normalized, missing)
-        if len(normalized) > max_output_chars:
-            raise PromptPerfectingError(
-                "invalid_prompt_perfecting_output",
-                "Prompt perfecting repair exceeded the configured output limit.",
-            )
-        missing = _missing_preserved_literal_values(original, normalized)
+        missing_categories = missing.keys()
+        if set(missing_categories).issubset(_REPAIRABLE_LITERAL_CATEGORIES):
+            normalized = _repair_preserved_literals(original, normalized, missing)
+            if len(normalized) > max_output_chars:
+                raise PromptPerfectingError(
+                    "invalid_prompt_perfecting_output",
+                    "Prompt perfecting repair exceeded the configured output limit.",
+                )
+            missing = _missing_preserved_literal_values(original, normalized)
     if missing:
         categories = ", ".join(sorted(missing))
         raise PromptPerfectingError(
@@ -219,7 +214,7 @@ def _literal_extractors():
         "quantity": lambda text: set(_QUANTITY_RE.findall(text)),
         "quoted": lambda text: {match.group(0) for match in _QUOTED_RE.finditer(text)},
         "code": lambda text: set(_FENCED_CODE_RE.findall(text) + _INLINE_CODE_RE.findall(text)),
-        "command flag": lambda text: set(_COMMAND_FLAG_RE.findall(text)),
+        "flag": lambda text: set(_FLAG_RE.findall(text)),
         "identifier": lambda text: set(_IDENTIFIER_RE.findall(text)),
     }
 
@@ -340,7 +335,7 @@ def perfect_prompt(
             "- Boundaries: preserve every stated constraint verbatim - what must "
             "stay unchanged, what to avoid, approvals required before acting - "
             "and add a final self-check when the task is consequential.\n"
-            "Preserve exact URL, code, identifier, quoted, date, and quantity "
+            "Preserve exact URL, code, identifier, quoted, CLI flag, date, and quantity "
             "literals character-for-character. Preserve the exact intent, "
             "requested format, named entities, facts, constraints, dates, "
             "quantities, permissions, scope, and uncertainty. Write in the "
