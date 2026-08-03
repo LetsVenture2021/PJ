@@ -142,6 +142,56 @@ class TestPromptOps(unittest.TestCase):
                 surface="cli",
             )
 
+    def test_machine_identifier_must_survive_refinement(self):
+        client = FakeClient(
+            {
+                "refined_prompt": (
+                    "Investigate the failed prompt-perfecting request and keep "
+                    "the 422 error context."
+                ),
+                "intent_summary": "Investigate a failed prompt-perfecting request.",
+                "constraints_preserved": ["422"],
+            }
+        )
+        with self.assertRaisesRegex(
+            promptops.PromptPerfectingError,
+            "identifier",
+        ):
+            promptops.perfect_prompt(
+                client,
+                self.cfg,
+                "Investigate request_id=84929c38-4b3c-4e11-bea5-13a42849c1de "
+                "from the prompt-perfecting 422 error.",
+                surface="cli",
+            )
+
+    def test_natural_language_hyphenated_terms_can_be_refined(self):
+        client = FakeClient(
+            {
+                "refined_prompt": (
+                    "Create an ultra high definition interface using warm off white "
+                    "text, blue black gradients, and one at a time clarification."
+                ),
+                "intent_summary": "Create a refined visual and interaction brief.",
+                "constraints_preserved": [
+                    "visual direction",
+                    "color intent",
+                    "clarification flow",
+                ],
+            }
+        )
+
+        result = promptops.perfect_prompt(
+            client,
+            self.cfg,
+            "Create an ultra-high-definition interface using warm off-white text, "
+            "blue-black gradients, and one-by-one clarification.",
+            surface="cli",
+        )
+
+        self.assertTrue(result["changed"])
+        self.assertIn("ultra high definition", result["refined_prompt"])
+
     def test_optional_mode_repairs_missing_identifier_literals(self):
         client = FakeClient(
             {
