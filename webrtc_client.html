@@ -1819,7 +1819,18 @@
 
       const body = await response.text();
       const contentType = (response.headers.get("content-type") || "").toLowerCase();
-      if (!response.ok || !contentType.includes("application/json")) {
+      if (!response.ok) {
+        throw new Error(buildApiFailureDetail(response, body, "Backend health check"));
+      }
+      if (!contentType.includes("application/json")) {
+        const compactBody = String(body || "").trim().toLowerCase();
+        if (compactBody === "ok" || compactBody === "healthy" || compactBody === "true") {
+          return {
+            ok: true,
+            version: response.headers.get("x-pj-protocol-version") || null,
+            tool_bridge_configured: false,
+          };
+        }
         throw new Error(buildApiFailureDetail(response, body, "Backend health check"));
       }
       let parsed = {};
