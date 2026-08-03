@@ -1,0 +1,46 @@
+# Deployment template for the pj-assistant.ai Worker. GET /health and OPTIONS
+# are public; all other current and future routes require Cloudflare Access.
+# POST /webhook is intentionally not deployed: the legacy Flask handler does
+# not verify OpenAI webhook signatures and Access would block OpenAI delivery.
+#
+# Configure the Access application on pj-assistant.ai/* with an owner-only
+# Allow policy. The Worker independently verifies the injected assertion.
+
+name = "pj-realtime-backend"
+main = "pj_realtime_backend_worker.js"
+compatibility_date = "2026-07-28"
+
+# Bind only API paths so the existing frontend can continue serving `/` and
+# `/assets/*`. Protect these paths with the same owner-only Access application.
+routes = [
+  { pattern = "pj-assistant.ai/conversations*", zone_name = "pj-assistant.ai" },
+  { pattern = "pj-assistant.ai/projects*", zone_name = "pj-assistant.ai" },
+  { pattern = "pj-assistant.ai/health", zone_name = "pj-assistant.ai" },
+  { pattern = "pj-assistant.ai/session", zone_name = "pj-assistant.ai" },
+  { pattern = "pj-assistant.ai/token", zone_name = "pj-assistant.ai" },
+  { pattern = "pj-assistant.ai/tool-schemas", zone_name = "pj-assistant.ai" },
+  { pattern = "pj-assistant.ai/execute-tool", zone_name = "pj-assistant.ai" },
+  { pattern = "pj-assistant.ai/responses/*", zone_name = "pj-assistant.ai" },
+  { pattern = "pj-assistant.ai/upload/*", zone_name = "pj-assistant.ai" },
+]
+
+[vars]
+PJ_ALLOWED_ORIGINS = "https://pj-assistant.ai,https://www.pj-assistant.ai,https://canva.com,https://www.canva.com"
+CF_ACCESS_TEAM_DOMAIN = "aimhi.cloudflareaccess.com"
+CF_ACCESS_AUD = "replace-with-access-application-aud"
+PJ_TOOL_BRIDGE_URL = "https://replace-with-private-runtime/execute-tool"
+PJ_TOOL_SCHEMAS_URL = "https://replace-with-private-runtime/tool-schemas"
+PJ_MAX_UPLOAD_BYTES = "104857600"
+PJ_COLLABORATION_ENABLED = "false"
+
+# Store these with `wrangler secret put`; never commit their values:
+# OPENAI_API_KEY
+# PJ_OWNER_EMAILS
+# PJ_TOOL_BRIDGE_TOKEN
+# PJ_IDENTITY_CONFIG (required JSON secret when collaboration is enabled)
+# PJ_TENANT_CONFIG (required JSON secret when collaboration is enabled)
+#
+# PJ_TOOL_BRIDGE_URL and PJ_TOOL_SCHEMAS_URL must target the private runtime.
+# PJ_RESPONSES_BRIDGE_URL may optionally override the runtime base URL used for
+# Full Power routes; it is derived from PJ_TOOL_BRIDGE_URL when omitted.
+# CF_ACCESS_CERT_CACHE_TTL_MS may optionally override the 300000 ms default.

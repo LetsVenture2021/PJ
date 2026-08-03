@@ -1938,26 +1938,28 @@ export {
 
 export default {
   async fetch(request, env) {
-    const url = new URL(request.url);
     const requestId = request.headers.get("x-pj-client-request-id") || crypto.randomUUID();
-    const allowedOrigins = buildAllowedOrigins(env);
-    const corsOrigin = pickCorsOrigin(request, allowedOrigins);
+    let corsOrigin = "*";
+    try {
+      const url = new URL(request.url);
+      const allowedOrigins = buildAllowedOrigins(env);
+      corsOrigin = pickCorsOrigin(request, allowedOrigins);
 
-    if (!corsOrigin) {
-      return jsonResponse(
-        errorPayload("origin_not_allowed", "Origin is not allowed.", requestId),
-        403,
-        "null",
-        requestId,
-      );
-    }
+      if (!corsOrigin) {
+        return jsonResponse(
+          errorPayload("origin_not_allowed", "Origin is not allowed.", requestId),
+          403,
+          "null",
+          requestId,
+        );
+      }
 
-    if (request.method === "OPTIONS") {
-      return new Response(null, {
-        status: 204,
-        headers: responseHeaders(corsOrigin, requestId, "text/plain"),
-      });
-    }
+      if (request.method === "OPTIONS") {
+        return new Response(null, {
+          status: 204,
+          headers: responseHeaders(corsOrigin, requestId, "text/plain"),
+        });
+      }
 
     const unsupportedVersions = await validateProtocolRequest(request);
     if (unsupportedVersions) {
@@ -2134,11 +2136,27 @@ export default {
       return handleUploadProxy(request, env, corsOrigin, requestId);
     }
 
-    return jsonResponse(
-      errorPayload("not_found", "Not found.", requestId),
-      404,
-      corsOrigin,
-      requestId,
-    );
+      return jsonResponse(
+        errorPayload("not_found", "Not found.", requestId),
+        404,
+        corsOrigin,
+        requestId,
+      );
+    } catch (error) {
+      logEvent(requestId, "worker.unhandled_exception", {
+        detail: trimDetail(error instanceof Error ? error.stack || error.message : error),
+      });
+      return jsonResponse(
+        errorPayload(
+          "internal_server_error",
+          "Internal server error.",
+          requestId,
+          trimDetail(error instanceof Error ? error.message : error),
+        ),
+        500,
+        corsOrigin || "null",
+        requestId,
+      );
+    }
   },
 };

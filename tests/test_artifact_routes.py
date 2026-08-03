@@ -62,11 +62,43 @@ class ArtifactRouteTests(unittest.TestCase):
             )
 
         self.assertEqual(compared.status_code, 200)
+        self.assertTrue(compared.get_json()["ok"])
         self.assertEqual(compared.get_json()["comparison"]["kind"], "text_diff")
         self.assertEqual(restored.status_code, 201)
+        self.assertTrue(restored.get_json()["ok"])
         artifact = restored.get_json()["artifact"]
         self.assertNotEqual(artifact["artifact_id"], self.left.artifact_id)
         self.assertTrue(artifact["download_url"].endswith("/download"))
+
+    def test_artifact_metadata_and_preview_routes_include_ok(self):
+        with (
+            patch.object(realtime_server, "ARTIFACT_FACADE", self.facade),
+            patch.object(
+                realtime_server,
+                "_validated_session",
+                return_value=({"id": "session-test"}, None),
+            ),
+            patch.object(
+                realtime_server.chatlog,
+                "list_session_artifact_ids",
+                return_value=[self.left.artifact_id],
+            ),
+        ):
+            metadata = self.client.get(
+                f"/responses/sessions/session-test/artifacts/{self.left.artifact_id}",
+                headers=self.auth,
+            )
+            preview = self.client.get(
+                f"/responses/sessions/session-test/artifacts/{self.left.artifact_id}/preview",
+                headers=self.auth,
+            )
+
+        self.assertEqual(metadata.status_code, 200)
+        self.assertTrue(metadata.get_json()["ok"])
+        self.assertEqual(metadata.get_json()["artifact"]["artifact_id"], self.left.artifact_id)
+        self.assertEqual(preview.status_code, 200)
+        self.assertTrue(preview.get_json()["ok"])
+        self.assertEqual(preview.get_json()["preview"]["kind"], "text")
 
 
 if __name__ == "__main__":

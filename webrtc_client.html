@@ -1104,6 +1104,8 @@
       activeAssistantBubble: null,
       phase: PHASE.IDLE,
       activeStartRequestId: null,
+      fullPowerStartInFlight: false,
+      lastSystemError: null,
       liveAnnounced: false,
       toolCatalog: null,
       mode: MODE.FULL_POWER_VOICE,
@@ -1788,6 +1790,18 @@
       return bubble;
     }
 
+    function appendSystemErrorOnce(text, windowMs = 8000) {
+      const message = String(text || "").trim();
+      if (!message) return;
+      const now = Date.now();
+      const previous = state.lastSystemError;
+      if (previous && previous.text === message && now - previous.at < windowMs) {
+        return;
+      }
+      state.lastSystemError = { text: message, at: now };
+      appendBubble("system", message);
+    }
+
     function finalizeAssistantBubble() {
       state.activeAssistantBubble = null;
     }
@@ -2103,7 +2117,7 @@
       el.textInput.focus();
       if (state.phase === PHASE.IDLE) {
         startFullPowerSession().catch((error) => {
-          appendBubble("system", `Unable to start workflow: ${shorten(String(error), 240)}`);
+          appendSystemErrorOnce(`Unable to start workflow: ${shorten(String(error), 240)}`);
         });
       }
     }
@@ -2607,12 +2621,13 @@
       }
 
       async function startFullPowerSession() {
-        if (state.phase !== PHASE.IDLE) return;
+        if (state.phase !== PHASE.IDLE || state.fullPowerStartInFlight) return;
         const base = apiBase();
         if (!base) {
           setStatus("Set a valid server URL");
           return;
         }
+        state.fullPowerStartInFlight = true;
         localStorage.setItem(STORAGE_KEY, base);
         setPhase(PHASE.CONNECTING, "Starting Full Power...");
         try {
@@ -2640,7 +2655,9 @@
         } catch (error) {
           state.fullPowerSessionId = null;
           setPhase(PHASE.IDLE, "Full Power unavailable");
-          appendBubble("system", `Unable to start Full Power: ${shorten(String(error), 300)}`);
+          appendSystemErrorOnce(`Unable to start Full Power: ${shorten(String(error), 300)}`);
+        } finally {
+          state.fullPowerStartInFlight = false;
         }
       }
 
@@ -3248,7 +3265,7 @@
           await sendFullPowerMessage();
           el.codexPrompt.value = "";
         } catch (error) {
-          appendBubble("system", `Codex could not start: ${shorten(String(error), 260)}`);
+          appendSystemErrorOnce(`Codex could not start: ${shorten(String(error), 260)}`);
         } finally {
           el.runCodexBtn.disabled = false;
         }
