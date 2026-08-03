@@ -982,10 +982,15 @@
     } from "/assets/pj_web_utils.js?v=2026-07-29.1";
 
     const localHostnames = new Set(["localhost", "127.0.0.1"]);
+    const CANONICAL_API_BASE = "https://pj-assistant.ai";
+    const canvaHostname = (window.location.hostname || "").toLowerCase();
+    const runningOnCanva = canvaHostname === "canva.com"
+      || canvaHostname === "www.canva.com"
+      || canvaHostname.endsWith(".canva.com");
     const DEFAULT_API_BASE = localHostnames.has(window.location.hostname)
       ? `${window.location.protocol}//${window.location.hostname}:3001`
-      : window.location.hostname === "www.pj-assistant.ai"
-        ? "https://pj-assistant.ai"
+      : window.location.hostname === "www.pj-assistant.ai" || runningOnCanva
+        ? CANONICAL_API_BASE
         : window.location.origin;
     const STORAGE_KEY = "pj-web-app-api-base";
     const PHASE = {
@@ -1782,6 +1787,16 @@
       el.messages.scrollTop = el.messages.scrollHeight;
     }
 
+    function buildApiFailureDetail(response, body, label = "API request") {
+      const contentType = (response.headers.get("content-type") || "").trim();
+      const statusLine = `${response.status} ${response.statusText || ""}`.trim();
+      const detail = parseErrorBody(body);
+      const bodyPreview = shorten(String(body || ""), 500);
+      return `${label} failed: ${statusLine}; Content-Type: ${contentType || "missing"};${
+        detail ? ` Detail: ${detail};` : ""
+      } Body: ${bodyPreview || "(empty)"}`;
+    }
+
     async function checkBackendHealth(apiBase, requestId) {
       const response = await fetchWithTimeout(`${apiBase}/health`, {
         headers: requestHeaders(requestId),
@@ -1789,15 +1804,15 @@
       }, 8000);
 
       const body = await response.text();
-      if (!response.ok) {
-        const detail = parseErrorBody(body);
-        throw new Error(`Backend health check failed (${response.status})${detail ? `: ${detail}` : ""}`);
+      const contentType = (response.headers.get("content-type") || "").toLowerCase();
+      if (!response.ok || !contentType.includes("application/json")) {
+        throw new Error(buildApiFailureDetail(response, body, "Backend health check"));
       }
       let parsed = {};
       try {
         parsed = body ? JSON.parse(body) : {};
       } catch (_) {
-        parsed = {};
+        throw new Error(buildApiFailureDetail(response, body, "Backend health response"));
       }
       if (!parsed.ok) {
         throw new Error("Backend health endpoint did not return ok=true.");
@@ -1842,16 +1857,15 @@
       }, 12000);
 
       const body = await response.text();
-      if (!response.ok) {
-        const detail = parseErrorBody(body);
-        throw new Error(`Tool schema fetch failed (${response.status})${detail ? `: ${detail}` : ""}`);
+      const contentType = (response.headers.get("content-type") || "").toLowerCase();
+      if (!response.ok || !contentType.includes("application/json")) {
+        throw new Error(buildApiFailureDetail(response, body, "Tool schema fetch"));
       }
-
       let parsed = {};
       try {
         parsed = body ? JSON.parse(body) : {};
       } catch (_) {
-        parsed = {};
+        throw new Error(buildApiFailureDetail(response, body, "Tool schema response"));
       }
       assertProtocolResponse(response, parsed);
       const tools = Array.isArray(parsed.tools) ? parsed.tools : [];
@@ -1869,17 +1883,17 @@
         ...options,
       }, timeoutMs);
       const body = await response.text();
+      const contentType = (response.headers.get("content-type") || "").toLowerCase();
+      if (!response.ok || !contentType.includes("application/json")) {
+        throw new Error(buildApiFailureDetail(response, body));
+      }
       let parsed = {};
       try {
         parsed = body ? JSON.parse(body) : {};
       } catch (_) {
-        throw new Error("Response payload was not valid JSON.");
+        throw new Error(buildApiFailureDetail(response, body));
       }
       assertProtocolResponse(response, parsed);
-      if (!response.ok) {
-        const detail = parseErrorBody(body);
-        throw new Error(`Request failed (${response.status})${detail ? `: ${detail}` : ""}`);
-      }
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         throw new Error("Response payload did not match the JSON object contract.");
       }
@@ -2041,7 +2055,7 @@
             type: "message",
             role: item.role,
             content: [{
-              type: item.role === "assistant" ? "output_text" : "input_text",
+              type: item.role === "assistant" ? "text" : "input_text",
               text: item.content,
             }],
           },
@@ -2260,16 +2274,16 @@
       }, 15000);
 
       const body = await response.text();
-      if (!response.ok) {
-        const detail = parseErrorBody(body);
-        throw new Error(`Token minting failed (${response.status})${detail ? `: ${detail}` : ""}`);
+      const contentType = (response.headers.get("content-type") || "").toLowerCase();
+      if (!response.ok || !contentType.includes("application/json")) {
+        throw new Error(buildApiFailureDetail(response, body, "Token minting request"));
       }
 
       let parsed = {};
       try {
         parsed = body ? JSON.parse(body) : {};
       } catch (_) {
-        throw new Error("Token minting response was not valid JSON.");
+        throw new Error(buildApiFailureDetail(response, body, "Token minting response"));
       }
       assertProtocolResponse(response, parsed);
 
@@ -2504,17 +2518,25 @@
         let metadata = {};
         if (state.mode === MODE.FULL_POWER_VOICE) {
           setStatus("Refining prompt...", "live");
-          const perfected = await perfectPrompt(
-            message, "full_power_voice"
-          );
-          submitted = perfected.refined_prompt;
-          metadata = {
-            prompt_perfecting_version: perfected.version,
-            refined_prompt: perfected.refined_prompt.slice(0, 4000),
-            refined_prompt_truncated: perfected.refined_prompt.length > 4000,
-            refined_sha256: perfected.refined_sha256,
-            changed: perfected.changed,
-          };
+          try {
+            const perfected = await perfectPrompt(
+              message, "full_power_voice"
+            );
+            submitted = perfected.refined_prompt;
+            metadata = {
+              prompt_perfecting_version: perfected.version,
+              refined_prompt: perfected.refined_prompt.slice(0, 4000),
+              refined_prompt_truncated: perfected.refined_prompt.length > 4000,
+              refined_sha256: perfected.refined_sha256,
+              changed: perfected.changed,
+            };
+          } catch (perfectError) {
+            metadata = { prompt_perfecting_fallback: true };
+            appendBubble(
+              "system",
+              `Refinement unavailable; sending your original words: ${shorten(String(perfectError), 200)}`,
+            );
+          }
         }
         await persistRealtimeMessage({
           externalId,
@@ -3300,16 +3322,28 @@
       try {
         if (state.mode === MODE.FULL_POWER_VOICE) {
           setStatus("Refining transcript...", "live");
-          const perfected = await perfectPrompt(
-            transcript, "full_power_voice"
-          );
-          metadata = {
-            prompt_perfecting_version: perfected.version,
-            refined_prompt: perfected.refined_prompt.slice(0, 4000),
-            refined_prompt_truncated: perfected.refined_prompt.length > 4000,
-            refined_sha256: perfected.refined_sha256,
-            changed: perfected.changed,
-          };
+          let refinedText = null;
+          try {
+            const perfected = await perfectPrompt(
+              transcript, "full_power_voice"
+            );
+            metadata = {
+              prompt_perfecting_version: perfected.version,
+              refined_prompt: perfected.refined_prompt.slice(0, 4000),
+              refined_prompt_truncated: perfected.refined_prompt.length > 4000,
+              refined_sha256: perfected.refined_sha256,
+              changed: perfected.changed,
+            };
+            if (perfected.changed) {
+              refinedText = perfected.refined_prompt;
+            }
+          } catch (perfectError) {
+            metadata = { prompt_perfecting_fallback: true };
+            appendBubble(
+              "system",
+              `Refinement unavailable; responding to your original words: ${shorten(String(perfectError), 200)}`,
+            );
+          }
           await persistRealtimeMessage({
             externalId,
             role: "user",
@@ -3320,21 +3354,23 @@
           if (!state.dataChannel || state.dataChannel.readyState !== "open") {
             throw new Error("Realtime channel closed before transcript replacement.");
           }
-          sendRealtimeEvent({
-            type: "conversation.item.delete",
-            item_id: externalId,
-          });
-          sendRealtimeEvent({
-            type: "conversation.item.create",
-            item: {
-              type: "message",
-              role: "user",
-              content: [{
-                type: "input_text",
-                text: perfected.refined_prompt,
-              }],
-            },
-          });
+          if (refinedText !== null) {
+            sendRealtimeEvent({
+              type: "conversation.item.delete",
+              item_id: externalId,
+            });
+            sendRealtimeEvent({
+              type: "conversation.item.create",
+              item: {
+                type: "message",
+                role: "user",
+                content: [{
+                  type: "input_text",
+                  text: refinedText,
+                }],
+              },
+            });
+          }
           requestResponse();
           setStatus("Live", "live");
           return;

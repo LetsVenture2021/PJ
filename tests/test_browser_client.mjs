@@ -126,3 +126,13 @@ test("artifact and feature-context controls have executable handlers", async () 
   assert.match(html, /structuredOutputEnabled\.checked/);
   assert.match(html, /state\.activeSessionId \|\| state\.fullPowerSessionId/);
 });
+
+test("non-JSON response payloads surface actionable errors instead of raw parse failures", async () => {
+  const html = await readFile(new URL("../webrtc_client.html", import.meta.url), "utf8");
+  // A non-JSON body arriving with a JSON content-type (for example an edge
+  // security interstitial) must not throw a raw SyntaxError. Every response
+  // parse guards JSON.parse and re-throws buildApiFailureDetail(...).
+  assert.doesNotMatch(html, /const parsed = body \? JSON\.parse\(body\)/);
+  assert.match(html, /buildApiFailureDetail\(response, body, "Backend health response"\)/);
+  assert.match(html, /buildApiFailureDetail\(response, body, "Tool schema response"\)/);
+});

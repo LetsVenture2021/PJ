@@ -529,20 +529,20 @@ It deploys API routes only; it does **not** deploy `webrtc_client.html` or
    Wrangler without reading their values, and prints the Cloudflare Access
    application/policy checks that must be confirmed in Zero Trust.
 
-Only `GET /health` and CORS preflight are public. `/session`, `/token`,
-`/tool-schemas`, `/execute-tool`, `/responses/*`, and `/upload/*` require a
-valid Cloudflare Access identity. Full local tools, Full Power, and upload
-routes also require a reachable private runtime and matching bridge token;
-without it the Worker remains useful only for its direct Realtime path and
-reports degraded capability in `/health`.
+Only `GET /health` and CORS preflight are public. `/conversations*`,
+`/projects*`, `/session`, `/token`, `/tool-schemas`, `/execute-tool`,
+`/responses/*`, and `/upload/*` require a valid Cloudflare Access identity.
+Full local tools, Full Power, and upload routes also require a reachable
+private runtime and matching bridge token; without it the Worker remains useful
+only for its direct Realtime path and reports degraded capability in `/health`.
 
 If the zone runs Super Bot Fight Mode or challenge-issuing security features,
 add a WAF custom skip rule for the authenticated API paths on both the apex
-and bridge hostnames — `/session`, `/token`, `/execute-tool`,
-`/tool-schemas`, `/health`, `/responses/*`, and `/upload/*` — because Worker
-subrequests and browser XHR cannot answer challenges. A challenged path fails
-silently: the client reports an upload or tool call in progress and nothing
-reaches the runtime.
+and bridge hostnames — `/conversations*`, `/projects*`, `/session`, `/token`,
+`/execute-tool`, `/tool-schemas`, `/health`, `/responses/*`, and `/upload/*`
+— because Worker subrequests and browser XHR cannot answer challenges. A
+challenged path fails silently: the client reports an upload or tool call in
+progress and nothing reaches the runtime.
 
 If the zone runs the OWASP Core Ruleset, also add a managed-phase skip
 exception for `/upload/*` on both hostnames: OWASP request-body scoring

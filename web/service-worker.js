@@ -8,6 +8,7 @@ const STATIC = [
 
 self.addEventListener("install", (event) => {
   event.waitUntil(caches.open(CACHE).then((cache) => cache.addAll(STATIC)));
+  self.skipWaiting();
 });
 self.addEventListener("activate", (event) => {
   event.waitUntil(

@@ -185,7 +185,8 @@ test("deployment routes cover APIs without claiming frontend assets", () => {
     /PJ_TOOL_BRIDGE_URL = "https:\/\/replace-with-private-runtime\/execute-tool"/,
   );
   assert.match(webClientSource, /window\.location\.hostname === "www\.pj-assistant\.ai"/);
-  assert.match(webClientSource, /\? "https:\/\/pj-assistant\.ai"/);
+  assert.match(webClientSource, /const CANONICAL_API_BASE = "https:\/\/pj-assistant\.ai"/);
+  assert.match(webClientSource, /runningOnCanva/);
 });
 
 test("only health and preflight are public", () => {
@@ -620,6 +621,58 @@ test("Full Power proxy streams SSE with only allowlisted bridge headers", async 
   assert.match(await response.text(), /"type":"completion"/);
 });
 
+test("Full Power proxy maps non-JSON bridge bodies to responses_edge_challenged", async () => {
+  const response = await handleResponsesProxy(
+    new Request("https://pj-assistant.ai/responses/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "test" }),
+    }),
+    {
+      PJ_TOOL_BRIDGE_URL: "https://tools.pj-assistant.ai/execute-tool",
+      PJ_TOOL_BRIDGE_TOKEN: "bridge-secret",
+    },
+    "https://pj-assistant.ai",
+    "request-responses-nonjson",
+    async () =>
+      new Response("<html>challenge</html>", {
+        status: 403,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      }),
+  );
+
+  assert.equal(response.status, 502);
+  assert.equal(response.headers.get("content-type"), "application/json");
+  const payload = await response.json();
+  assert.equal(payload.error.code, "responses_edge_challenged");
+});
+
+test("Full Power proxy maps malformed JSON bridge bodies to responses_invalid_json", async () => {
+  const response = await handleResponsesProxy(
+    new Request("https://pj-assistant.ai/responses/sessions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "test" }),
+    }),
+    {
+      PJ_TOOL_BRIDGE_URL: "https://tools.pj-assistant.ai/execute-tool",
+      PJ_TOOL_BRIDGE_TOKEN: "bridge-secret",
+    },
+    "https://pj-assistant.ai",
+    "request-responses-invalid-json",
+    async () =>
+      new Response('{"session":', {
+        status: 200,
+        headers: { "content-type": "application/json; charset=utf-8" },
+      }),
+  );
+
+  assert.equal(response.status, 502);
+  assert.equal(response.headers.get("content-type"), "application/json");
+  const payload = await response.json();
+  assert.equal(payload.error.code, "responses_invalid_json");
+});
+
 test("Full Power proxy preserves verified binary downloads with safe filenames", async () => {
   const artifactId = `ART-${"a".repeat(32)}`;
   let captured = null;
@@ -785,6 +838,33 @@ test("privileged routes authenticate before performing work", async () => {
   assert.equal(payload.error.code, "access_authentication_required");
 });
 
+test("canva origin is allowed for authenticated routes", async () => {
+  const response = await worker.fetch(
+    new Request("https://pj-assistant.ai/future-full-power", {
+      headers: { Origin: "https://www.canva.com" },
+    }),
+    env,
+  );
+  assert.equal(response.status, 401);
+  const payload = await response.json();
+  assert.equal(payload.error.code, "access_authentication_required");
+});
+
+test("allowed origin is trusted even when referer is a different host", async () => {
+  const response = await worker.fetch(
+    new Request("https://pj-assistant.ai/future-full-power", {
+      headers: {
+        Origin: "https://pj-assistant.ai",
+        Referer: "https://canvas.instructure.com/courses/123/pages/example",
+      },
+    }),
+    env,
+  );
+  assert.equal(response.status, 401);
+  const payload = await response.json();
+  assert.equal(payload.error.code, "access_authentication_required");
+});
+
 test("public health has security headers and future routes fail closed", async () => {
   const health = await worker.fetch(new Request("https://pj-assistant.ai/health"), env);
   assert.equal(health.status, 200);
@@ -872,6 +952,7 @@ test("all Worker responses use the hardened response header policy", () => {
   );
   assert.equal(headers["referrer-policy"], "no-referrer");
   assert.match(headers["access-control-expose-headers"], /content-disposition/);
+  assert.equal(headers["access-control-allow-credentials"], "true");
 });
 
 test("realtime excludes long-running tools and aligns bridge timeouts", () => {
@@ -1185,9 +1266,9 @@ test("browser module initializes with Full Power helpers in shared scope", async
     __testFetches: [],
     __directToolOutput: null,
     location: {
-      hostname: "localhost",
-      protocol: "http:",
-      origin: "http://localhost:3001",
+      hostname: "www.canva.com",
+      protocol: "https:",
+      origin: "https://www.canva.com",
     },
   };
   const localStorage = {
@@ -1218,6 +1299,7 @@ test("browser module initializes with Full Power helpers in shared scope", async
 
   const hooks = initialize(window, document, localStorage, navigator);
   assert.ok(hooks);
+  assert.equal(elements.get("apiBase").value, "https://pj-assistant.ai");
   assert.equal(hooks.shouldUseEphemeralSignalingFallback(500, ""), true);
   assert.equal(hooks.shouldUseEphemeralSignalingFallback(503, "gateway unavailable"), true);
   assert.equal(hooks.shouldUseEphemeralSignalingFallback(599, "upstream failure"), true);

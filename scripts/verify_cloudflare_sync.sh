@@ -3,6 +3,8 @@
 set -uo pipefail
 
 EXPECTED_ROUTES=(
+  "/conversations*"
+  "/projects*"
   "/health"
   "/session"
   "/token"

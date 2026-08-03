@@ -1188,29 +1188,38 @@ class TestResponsesRoutes(unittest.TestCase):
         )
         self.assertEqual(fake_client.responses.calls[0]["input"], refined)
 
-    def test_prompt_failure_preserves_original_turn_and_releases_claim(self):
+    def test_prompt_failure_falls_back_to_original_prompt(self):
         session = chatlog.new_session(channel="web")
         original = "Preserve this exact request"
-        with patch.object(
-            realtime_server.promptops,
-            "perfect_prompt",
-            side_effect=realtime_server.promptops.PromptPerfectingError(
-                "prompt_perfecting_provider_error",
-                "Prompt perfecting is temporarily unavailable.",
+        fake_client = FakeClient([final_stream("Complete.")])
+        with (
+            patch.object(
+                realtime_server.promptops,
+                "perfect_prompt",
+                side_effect=realtime_server.promptops.PromptPerfectingError(
+                    "prompt_perfecting_provider_error",
+                    "Prompt perfecting is temporarily unavailable.",
+                ),
+            ),
+            patch.object(
+                realtime_server,
+                "OPENAI_CLIENT_FACTORY",
+                return_value=fake_client,
             ),
         ):
             response = self.client.post(
                 f"/responses/sessions/{session['id']}/turns",
                 json={"message": original},
                 headers=self.auth,
+                buffered=True,
             )
 
-        self.assertEqual(response.status_code, 422)
-        self.assertEqual(
-            response.get_json()["error"]["code"],
-            "prompt_perfecting_provider_error",
-        )
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        self.assertIn("event: prompt.perfected", body)
         self.assertEqual(chatlog.history(session["id"])[0]["content"], original)
+        submitted = fake_client.responses.calls[0]["input"]
+        self.assertIn(original, submitted)
         token = chatlog.claim_session_turn(session["id"])
         self.assertIsNotNone(token)
         chatlog.release_session_turn(session["id"], token)

@@ -25,7 +25,7 @@ routes = [
 ]
 
 [vars]
-PJ_ALLOWED_ORIGINS = "https://pj-assistant.ai,https://www.pj-assistant.ai"
+PJ_ALLOWED_ORIGINS = "https://pj-assistant.ai,https://www.pj-assistant.ai,https://canva.com,https://www.canva.com"
 CF_ACCESS_TEAM_DOMAIN = "aimhi.cloudflareaccess.com"
 CF_ACCESS_AUD = "replace-with-access-application-aud"
 PJ_TOOL_BRIDGE_URL = "https://replace-with-private-runtime/execute-tool"
