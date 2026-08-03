@@ -80,6 +80,8 @@ class TestRuntimeConfig(unittest.TestCase):
                     "PJ_MODEL": "environment-model",
                     "PJ_REALTIME_VOICE": "cedar",
                     "PJ_CONFIG__ASSISTANT__TOOL_SEARCH_ENABLED": "false",
+                    "PJ_CONFIG__GOOGLE_CLOUD__PROJECT": '"example-project"',
+                    "PJ_CONFIG__GOOGLE_CLOUD__TIMEOUT_SECONDS": "45",
                     "PJ_ALLOWED_ORIGINS": "https://override.example.test",
                 },
             )
@@ -89,6 +91,22 @@ class TestRuntimeConfig(unittest.TestCase):
         self.assertFalse(config.assistant["tool_search_enabled"])
         self.assertEqual(config.realtime["voice"], "cedar")
         self.assertEqual(config.worker["PJ_ALLOWED_ORIGINS"], "https://override.example.test")
+        self.assertEqual(config.google_cloud.project, "example-project")
+        self.assertEqual(config.google_cloud.timeout_seconds, 45)
+
+    def test_google_cloud_metadata_override_rejects_other_hosts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._project(root)
+            with self.assertRaisesRegex(ConfigError, "Google metadata host"):
+                load_runtime_config(
+                    root,
+                    environ={
+                        "PJ_CONFIG__GOOGLE_CLOUD__METADATA_TOKEN_URL": (
+                            '"http://attacker.test/token"'
+                        )
+                    },
+                )
 
     def test_missing_profile_environment_fails_fast(self):
         with tempfile.TemporaryDirectory() as directory:

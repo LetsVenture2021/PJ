@@ -21,6 +21,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+import tempfile
 import zipfile
 from pathlib import Path
 from pathlib import PurePosixPath
@@ -51,6 +52,7 @@ from ops.docs import formats as upload_formats
 from ops.productivity.ui import blueprint as productivity_blueprint
 from ops.docs import uploads as document_uploads
 from ops.artifacts import ArtifactError, ArtifactFacade
+from ops.projects import service as projects
 from pj_contract import CONTRACT_VERSION, PROTOCOL_VERSION
 from ops.shared.logging import (
     bind_log_context,
@@ -61,6 +63,7 @@ from ops.shared.logging import (
     set_log_context,
 )
 from ops.realtime.payload_validation import (
+    MAX_MESSAGE_LENGTH,
     RealtimePayloadValidationError,
     validate_inbound_payload,
     validate_outbound_event,
@@ -86,7 +89,6 @@ from responses_runtime import (
 BASE_DIR = Path(__file__).resolve().parents[2]
 MAX_ERROR_DETAIL_LENGTH = 320
 MAX_SESSION_TITLE_LENGTH = 120
-MAX_MESSAGE_LENGTH = 20000
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 ARTIFACT_ID_PATTERN = re.compile(r"^ART-[a-f0-9]{32}$")
 SCHEMA_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
@@ -97,6 +99,7 @@ DEFAULT_MAX_UPLOAD_TOTAL_BYTES = 100 * 1024 * 1024
 UPLOAD_MULTIPART_OVERHEAD_BYTES = 1024 * 1024
 UPLOAD_CHUNK_BYTES = 1024 * 1024
 UPLOAD_ID_PATTERN = re.compile(r"^UPL-[a-f0-9]{32}$")
+IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{16,128}$")
 ALLOWED_UPLOAD_TYPES = {
     ".csv": {"text/csv", "application/vnd.ms-excel"},
     ".doc": {"application/msword"},
@@ -337,6 +340,14 @@ def _validate_protocol_request(req_id):
         if str(version) != str(PROTOCOL_VERSION)
     ]
     if not unsupported:
+        key = request.headers.get("x-pj-idempotency-key")
+        if key is not None and not IDEMPOTENCY_KEY_PATTERN.fullmatch(key):
+            return _error_response(
+                "invalid_idempotency_key",
+                "The idempotency key must be an opaque 16-128 character value.",
+                400,
+                req_id,
+            )
         return None
     return _error_response(
         "unsupported_protocol_version",
@@ -1011,6 +1022,32 @@ def web_client():
     return response
 
 
+@app.route("/webrtc_client.html", methods=["GET"])
+def web_client_compatibility():
+    """Preserve the historic entry point without changing its authorization."""
+    return web_client()
+
+
+@app.route("/manifest.webmanifest", methods=["GET"])
+def web_manifest():
+    response = send_from_directory(BASE_DIR / "web", "manifest.webmanifest")
+    response.headers["Cache-Control"] = "public, max-age=3600"
+    return response
+
+
+@app.route("/service-worker.js", methods=["GET"])
+def service_worker():
+    response = send_from_directory(BASE_DIR / "web", "service-worker.js")
+    response.headers["Cache-Control"] = "no-cache"
+    response.headers["Service-Worker-Allowed"] = "/"
+    return response
+
+
+@app.route("/web/<path:filename>", methods=["GET"])
+def web_module(filename):
+    return send_from_directory(BASE_DIR / "web", filename)
+
+
 @app.route("/health", methods=["GET"])
 def health():
     req_id = _request_id()
@@ -1040,12 +1077,192 @@ def health():
                 "/responses/artifacts/<artifact-id>",
                 "/upload/files",
                 "/upload/folder",
+                "/projects",
                 "/health",
             ],
         },
         status=200,
         req_id=req_id,
     )
+
+
+def _project_owner_id():
+    """Return the authenticated owner namespace without trusting request bodies."""
+    value = (request.headers.get("X-PJ-Owner-ID") or "local-owner").strip()
+    return value[:200] or "local-owner"
+
+
+def _project_error(exc, req_id, status=400):
+    return _error_response("project_error", str(exc), status, req_id)
+
+
+@app.route("/projects", methods=["GET", "POST"])
+def projects_collection():
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id)
+    if auth_error:
+        return auth_error
+    owner_id = _project_owner_id()
+    try:
+        if request.method == "GET":
+            include_archived = request.args.get("include_archived") == "1"
+            records = projects.list_projects(owner_id, include_archived=include_archived)
+            return _json_response(
+                {"ok": True, "count": len(records), "projects": records}, req_id=req_id
+            )
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or set(payload) - {"name", "description", "template_id"}:
+            return _error_response("invalid_project", "Invalid project payload.", 400, req_id)
+        record = projects.create_project(
+            owner_id,
+            payload.get("name", ""),
+            payload.get("description", ""),
+            template_id=payload.get("template_id"),
+        )
+        return _json_response({"ok": True, "project": record}, 201, req_id)
+    except projects.ProjectError as exc:
+        return _project_error(exc, req_id)
+
+
+@app.route("/projects/<project_id>", methods=["GET", "PATCH", "DELETE"])
+def project_item(project_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id)
+    if auth_error:
+        return auth_error
+    owner_id = _project_owner_id()
+    try:
+        if request.method == "GET":
+            record = projects.get_project(project_id, owner_id=owner_id)
+        elif request.method == "PATCH":
+            payload = request.get_json(silent=True)
+            if not isinstance(payload, dict) or set(payload) - {"name", "description"}:
+                return _error_response("invalid_project", "Invalid project payload.", 400, req_id)
+            record = projects.update_project(
+                project_id,
+                owner_id,
+                name=payload.get("name"),
+                description=payload.get("description"),
+            )
+        else:
+            projects.delete_project(project_id, owner_id)
+            return _json_response({"ok": True}, req_id=req_id)
+        return _json_response({"ok": True, "project": record}, req_id=req_id)
+    except projects.ProjectError as exc:
+        return _project_error(exc, req_id, 404 if "not found" in str(exc) else 400)
+
+
+@app.route("/projects/<project_id>/archive", methods=["POST"], defaults={"action": "archive"})
+@app.route("/projects/<project_id>/restore", methods=["POST"], defaults={"action": "restore"})
+def project_action(project_id, action):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id)
+    if auth_error:
+        return auth_error
+    try:
+        method = projects.archive_project if action == "archive" else projects.restore_project
+        record = method(project_id, _project_owner_id())
+        return _json_response({"ok": True, "project": record}, req_id=req_id)
+    except projects.ProjectError as exc:
+        return _project_error(exc, req_id)
+
+
+@app.route("/projects/<project_id>/<kind>", methods=["GET", "POST"])
+def project_records(project_id, kind):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id)
+    if auth_error:
+        return auth_error
+    if kind not in {"conversations", "sources", "artifacts", "goals"}:
+        return _error_response(
+            "invalid_project_records", "Unknown project record type.", 404, req_id
+        )
+    try:
+        projects.get_project(project_id, owner_id=_project_owner_id())
+        if request.method == "GET":
+            records = projects.list_records(project_id, kind)
+            return _json_response({"ok": True, "count": len(records), kind: records}, req_id=req_id)
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return _error_response("invalid_project_record", "JSON object required.", 400, req_id)
+        if kind == "conversations":
+            record = projects.link_conversation(
+                project_id,
+                payload.get("conversation_id", ""),
+                payload.get("conversation_type", "responses"),
+            )
+        elif kind == "sources":
+            record = projects.add_source(
+                project_id,
+                payload.get("source_type", ""),
+                payload.get("source_id", ""),
+                label=payload.get("label", ""),
+                provenance=payload.get("provenance"),
+            )
+        elif kind == "artifacts":
+            record = projects.link_artifact(
+                project_id,
+                payload.get("artifact_type", ""),
+                payload.get("artifact_id", ""),
+                relative_path=payload.get("relative_path"),
+                sha256=payload.get("sha256"),
+                provenance=payload.get("provenance"),
+            )
+        else:
+            record = projects.add_goal(
+                project_id, payload.get("title", ""), description=payload.get("description", "")
+            )
+        return _json_response({"ok": True, "record": record}, 201, req_id)
+    except (projects.ProjectError, sqlite3.IntegrityError) as exc:
+        return _project_error(exc, req_id)
+
+
+@app.route("/projects/conversations/<conversation_id>", methods=["DELETE"])
+def remove_project_conversation(conversation_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id)
+    if auth_error:
+        return auth_error
+    projects.unlink_conversation(conversation_id)
+    return _json_response({"ok": True}, req_id=req_id)
+
+
+@app.route("/projects/<project_id>/export", methods=["POST"])
+def project_export(project_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    try:
+        destination = Path(tempfile.gettempdir()) / f"pj-project-{secrets.token_hex(8)}.zip"
+        projects.export_project(
+            project_id, destination, owner_id=_project_owner_id(), artifact_root=BASE_DIR
+        )
+        return send_file(destination, as_attachment=True, download_name=f"project-{project_id}.zip")
+    except projects.ProjectError as exc:
+        return _project_error(exc, req_id)
+
+
+@app.route("/projects/import", methods=["POST"])
+def project_import():
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    upload = request.files.get("bundle")
+    if upload is None:
+        return _error_response("invalid_project_bundle", "A bundle file is required.", 400, req_id)
+    destination = Path(tempfile.gettempdir()) / f"pj-project-import-{secrets.token_hex(8)}.zip"
+    try:
+        upload.save(destination)
+        record = projects.import_project(
+            destination, owner_id=_project_owner_id(), artifact_root=BASE_DIR
+        )
+        return _json_response({"ok": True, "project": record}, 201, req_id)
+    except (projects.ProjectError, zipfile.BadZipFile) as exc:
+        return _project_error(exc, req_id)
+    finally:
+        destination.unlink(missing_ok=True)
 
 
 @app.route("/tool-schemas", methods=["GET"])
@@ -1130,9 +1347,16 @@ def prompt_perfect():
             load_config(),
             prompt,
             surface=surface,
+            required=False,
         )
     except promptops.PromptPerfectingError as exc:
-        return _error_response(exc.code, str(exc), 422, req_id)
+        # Fail open: returning the original prompt keeps voice and chat
+        # turns alive; refinement is an enhancement, not a gate.
+        _LOGGER.warning(
+            "prompt.perfecting.fallback",
+            extra={"request_id": req_id, "code": exc.code},
+        )
+        result = promptops.fallback_result(prompt, surface, str(exc))
     return _json_response(
         {"ok": True, "prompt": promptops.public_result(result)},
         req_id=req_id,
@@ -1806,6 +2030,64 @@ def artifact_preview(session_id, artifact_id):
         return _error_response(exc.code, str(exc), 409, req_id)
 
 
+@app.route("/responses/sessions/<session_id>/artifacts/<artifact_id>/restore", methods=["POST"])
+def artifact_restore(session_id, artifact_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    _artifact, error = _facade_access(artifact_id, session_id, req_id)
+    if error:
+        return error
+    try:
+        restored = ARTIFACT_FACADE.restore(artifact_id, project_id=None, session_id=session_id)
+        chatlog.link_session_artifact(session_id, restored.artifact_id)
+        path = ARTIFACT_FACADE.verified_path(
+            restored.artifact_id, project_id=None, session_id=session_id
+        )
+        public_artifact = restored.as_dict() | {
+            "filename": path.name,
+            "format": path.suffix.removeprefix(".") or "bin",
+            "mime_type": restored.media_type,
+            "byte_size": path.stat().st_size,
+            "sha256": restored.content_hash,
+            "download_url": (
+                f"/responses/sessions/{session_id}/artifacts/{restored.artifact_id}/download"
+            ),
+        }
+        return _json_response({"artifact": public_artifact}, 201, req_id)
+    except ArtifactError as exc:
+        return _error_response(exc.code, str(exc), 409, req_id)
+
+
+@app.route("/responses/sessions/<session_id>/artifacts/compare", methods=["POST"])
+def artifact_compare(session_id):
+    req_id = _request_id()
+    auth_error = _check_bridge_auth(req_id, required=True)
+    if auth_error:
+        return auth_error
+    payload, error = _validated_json(
+        req_id,
+        allowed={"left_artifact_id", "right_artifact_id"},
+        required={"left_artifact_id", "right_artifact_id"},
+    )
+    if error:
+        return error
+    left_id = payload["left_artifact_id"]
+    right_id = payload["right_artifact_id"]
+    for artifact_id in (left_id, right_id):
+        _artifact, access_error = _facade_access(artifact_id, session_id, req_id)
+        if access_error:
+            return access_error
+    try:
+        comparison = ARTIFACT_FACADE.compare(
+            left_id, right_id, project_id=None, session_id=session_id
+        )
+        return _json_response({"comparison": comparison}, req_id=req_id)
+    except ArtifactError as exc:
+        return _error_response(exc.code, str(exc), 409, req_id)
+
+
 @app.route("/responses/sessions/<session_id>/artifacts/<artifact_id>/download", methods=["GET"])
 def artifact_download(session_id, artifact_id):
     req_id = _request_id()
@@ -1942,10 +2224,16 @@ def stream_responses_turn(session_id):
             load_config(),
             message,
             surface="full_power",
+            required=False,
         )
     except promptops.PromptPerfectingError as exc:
-        chatlog.release_session_turn(session["id"], turn_token)
-        return _error_response(exc.code, str(exc), 422, req_id)
+        # Perfecting is an enhancement, never a gate: the user's original
+        # wording is always a safe prompt, so the turn proceeds with it.
+        _LOGGER.warning(
+            "prompt.perfecting.fallback",
+            extra={"request_id": req_id, "code": exc.code},
+        )
+        perfected = promptops.fallback_result(message, "full_power", str(exc))
     model_message = perfected["refined_prompt"]
     input_value = model_message
     if not session.get("last_response_id"):

@@ -56,7 +56,16 @@ export function parseErrorBody(rawText) {
 
 export async function fetchWithTimeout(url, options = {}, timeoutMs = 25000) {
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(new Error("timeout")), timeoutMs);
+  const callerSignal = options.signal;
+  const abortFromCaller = () => controller.abort(callerSignal.reason);
+
+  if (callerSignal?.aborted) abortFromCaller();
+  else callerSignal?.addEventListener("abort", abortFromCaller, { once: true });
+
+  const timeoutId = setTimeout(
+    () => controller.abort(new DOMException("Request timed out", "TimeoutError")),
+    timeoutMs,
+  );
   try {
     return await fetch(url, {
       ...options,
@@ -64,5 +73,6 @@ export async function fetchWithTimeout(url, options = {}, timeoutMs = 25000) {
     });
   } finally {
     clearTimeout(timeoutId);
+    callerSignal?.removeEventListener("abort", abortFromCaller);
   }
 }

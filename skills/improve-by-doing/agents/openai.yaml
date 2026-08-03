@@ -1,0 +1,4 @@
+interface:
+  display_name: "Improve by doing"
+  short_description: "Iterate through action, evidence, and reflection"
+  default_prompt: "Use $improve-by-doing to make progress through small actions, validate the results, and adapt from evidence."

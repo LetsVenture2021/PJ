@@ -3,9 +3,11 @@
 
 import contextvars
 import copy
+import importlib.util
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 from time import perf_counter
 
@@ -101,6 +103,185 @@ def _expand_secret_value(value, environ):
 
 def _public_url(value):
     return _shared_public_url(value)
+
+
+def _tool_names(functions):
+    return {
+        tool.get("name")
+        for tool in functions
+        if (
+            isinstance(tool, dict)
+            and tool.get("type", "function") == "function"
+            and tool.get("name")
+        )
+    }
+
+
+def _function_status(function_names, required):
+    required = set(required)
+    available = required & function_names
+    if available == required:
+        return "active"
+    if available:
+        return "degraded"
+    return "unavailable"
+
+
+def _experience_manifest(cfg, *, functions, native, mcp_servers, image_status):
+    function_names = _tool_names(functions)
+    codex_runtime = {
+        "sdk_installed": importlib.util.find_spec("openai_codex") is not None,
+        "cli_available": shutil.which("codex") is not None,
+        "requires_local_login": True,
+    }
+    codex_tools_status = _function_status(
+        function_names,
+        {"run_codex_task", "codex_analyze", "codex_generate_artifact"},
+    )
+    codex_runtime_ready = codex_runtime["sdk_installed"] and codex_runtime["cli_available"]
+    codex_status = (
+        "active"
+        if codex_tools_status == "active" and codex_runtime_ready
+        else "degraded"
+        if codex_tools_status in {"active", "degraded"}
+        else "unavailable"
+    )
+    mcp_ready = sum(1 for server in mcp_servers if server["status"] == "configured")
+    mcp_degraded = sum(1 for server in mcp_servers if server["status"] == "degraded")
+    image_generation_status = (
+        "active"
+        if image_status.get("generation") == "active"
+        else "disabled"
+        if image_status.get("generation") == "disabled"
+        else "degraded"
+    )
+
+    return {
+        "target": "codex_class_private_assistant",
+        "parity_boundary": (
+            "PJ exposes open, configurable equivalents of the user-visible "
+            "assistant workflows; proprietary ChatGPT/Codex internals and "
+            "unconnected external accounts are not cloned."
+        ),
+        "default_mode": "full_power_text",
+        "modes": [
+            {
+                "id": "full_power_text",
+                "label": "Full Power Text",
+                "status": "active",
+                "entrypoint": "browser_and_cli",
+                "capabilities": [
+                    "responses_streaming",
+                    "tool_calls",
+                    "web_search",
+                    "file_search",
+                    "mcp",
+                    "local_functions",
+                    "artifacts",
+                    "structured_output",
+                ],
+            },
+            {
+                "id": "full_power_voice",
+                "label": "Full Force Voice",
+                "status": "active",
+                "entrypoint": "browser_and_terminal",
+                "capabilities": [
+                    "realtime_audio",
+                    "prompt_refinement",
+                    "shared_history",
+                    "tool_delegation",
+                ],
+            },
+            {
+                "id": "realtime_voice",
+                "label": "Realtime Voice",
+                "status": "active",
+                "entrypoint": "browser",
+                "capabilities": ["low_latency_audio", "bounded_realtime_tools"],
+            },
+        ],
+        "workflows": [
+            {
+                "id": "assistant_chat",
+                "label": "Chat",
+                "status": "active",
+                "launch_prompt": "Help me solve this with a concise plan, tool use where useful, and clear next steps.",
+                "tools": ["responses", "web_search", "file_search", "local_functions"],
+            },
+            {
+                "id": "codex_workspace",
+                "label": "Code",
+                "status": codex_status,
+                "launch_prompt": (
+                    "Use the Codex workspace path: inspect the repository, state a short plan, "
+                    "make scoped changes only if approved, and run relevant validation."
+                ),
+                "tools": ["codex_analyze", "run_codex_task", "codex_generate_artifact"],
+                "runtime": codex_runtime,
+                "approval_required_for": ["workspace_write", "generated_artifact_promotion"],
+            },
+            {
+                "id": "documents_and_artifacts",
+                "label": "Files",
+                "status": _function_status(
+                    function_names,
+                    {"draft_document", "export_document", "list_uploaded_documents"},
+                ),
+                "launch_prompt": "Use uploaded files and DocOps to produce a verified, downloadable deliverable.",
+                "tools": ["upload", "docops", "artifact_registry"],
+            },
+            {
+                "id": "research",
+                "label": "Research",
+                "status": (
+                    "active"
+                    if native["web_search"]["status"] == "active"
+                    or "start_deep_research" in function_names
+                    else "degraded"
+                ),
+                "launch_prompt": "Research this with cited sources, separate facts from assumptions, and preserve links.",
+                "tools": ["web_search", "start_deep_research", "fetch_url"],
+            },
+            {
+                "id": "vision_and_media",
+                "label": "Visual",
+                "status": (
+                    "active"
+                    if "analyze_uploaded_image" in function_names
+                    else image_generation_status
+                ),
+                "launch_prompt": "Analyze or generate the needed visual asset and return a verified artifact.",
+                "tools": [
+                    "analyze_uploaded_image",
+                    "generate_image_asset",
+                    "create_controlled_image",
+                ],
+            },
+            {
+                "id": "connectors",
+                "label": "Apps",
+                "status": "active" if mcp_ready else "degraded" if mcp_degraded else "unavailable",
+                "launch_prompt": "Use connected app tools only when configured and approval-gated.",
+                "ready_count": mcp_ready,
+                "needs_setup_count": mcp_degraded,
+            },
+        ],
+        "approval_boundaries": [
+            "file_writes",
+            "codex_workspace_write",
+            "external_connectors",
+            "publishing",
+            "paid_image_generation",
+            "environment_file_edits",
+        ],
+        "limits": [
+            "No hidden access to proprietary ChatGPT/Codex internals.",
+            "External app access depends on configured MCP endpoints and credentials.",
+            "Provider-priced actions remain budget and approval gated.",
+        ],
+        "secret_values_included": False,
+    }
 
 
 def sanitize_text_urls(value):
@@ -308,6 +489,13 @@ def capability_manifest(cfg=None, *, mcp_servers=None, environ=None):
             "tools": functions,
         },
         "mcp_servers": mcp,
+        "experience": _experience_manifest(
+            cfg,
+            functions=functions,
+            native=native,
+            mcp_servers=mcp,
+            image_status=image_status,
+        ),
         "disabled_capabilities": [
             name for name, value in native.items() if value["status"] in ("disabled", "unavailable")
         ]
@@ -483,7 +671,17 @@ _DELIVERABLE_INTENT_PATTERN = re.compile(
     r"save|saves|saved|saving|"
     r"download|downloads|downloaded|downloading|"
     r"draft|drafts|drafted|drafting|"
+    r"write|writes|wrote|writing|"
     r"produce|produces|produced|producing"
+    r")\b"
+)
+
+_DOCUMENT_REQUEST_PATTERN = re.compile(
+    r"\b(?:"
+    r"document|report|brief|memo|proposal|plan|policy|procedure|sop|"
+    r"playbook|manual|guide|handbook|checklist|agenda|minutes|letter|"
+    r"contract|agreement|statement|analysis|assessment|roadmap|strategy|"
+    r"whitepaper|case study|press release|job description|resume|résumé"
     r")\b"
 )
 
@@ -527,7 +725,41 @@ def requested_deliverable_format(message):
     for format_name, patterns in checks:
         if any(re.search(pattern, text) for pattern in patterns):
             return format_name
+    # A user should not need to know a file extension to receive a file. A
+    # generic document request defaults to governed Markdown, which is always
+    # available and can subsequently be revised or exported to another format.
+    if _DOCUMENT_REQUEST_PATTERN.search(text):
+        return "md"
     return None
+
+
+def _fallback_markdown_artifact(message, candidate_text):
+    """Create a governed draft when the model twice omits a requested document."""
+    import docops
+
+    source = strip_citation_markers(str(candidate_text or "")).strip()
+    if not source:
+        source = "A document was requested. This draft records the request for revision."
+    request_context = str(message or "").strip()
+    sections = {
+        "Purpose": request_context or "Produce the requested document.",
+        "Situation": source,
+        "Key Facts": source,
+        "Options": "Revise this governed draft with additional source material as needed.",
+        "Recommendation": source,
+        "Risks": "Verify factual claims, names, dates, and approvals before finalization.",
+        "Next Actions": "Review, revise, approve, and export the audience-ready version.",
+    }
+    drafted = docops.draft_document(
+        "executive_brief",
+        "Requested Document",
+        json.dumps(sections),
+    )
+    doc_id = drafted.get("doc_id") if isinstance(drafted, dict) else None
+    if not doc_id:
+        return None
+    exported = docops.export_document(doc_id, "md")
+    return _verified_artifact_from_result(exported)
 
 
 _SERVER_PATH_PATTERN = re.compile(
@@ -744,6 +976,7 @@ class ResponsesOrchestrator:
         }:
             raise ValueError("unsupported required deliverable format")
         repair_attempts = 0
+        best_document_text = ""
 
         while True:
             operation_key = (
@@ -990,6 +1223,8 @@ class ResponsesOrchestrator:
                 output_text = _get(final_response, "output_text", None)
                 if output_text is None:
                     output_text = "".join(round_text)
+                if required_format and isinstance(output_text, str) and output_text.strip():
+                    best_document_text = output_text
                 if required_format and not any(
                     artifact.get("format") == required_format
                     for artifact in ready_artifacts.values()
@@ -1010,6 +1245,29 @@ class ResponsesOrchestrator:
                         previous_response_id = response_id
                         first = False
                         continue
+                    if required_format == "md":
+                        artifact = _fallback_markdown_artifact(message, best_document_text)
+                        if artifact:
+                            ready_artifacts[artifact["artifact_id"]] = artifact
+                            yield {"type": "artifact.ready", **artifact}
+                            completion_text = (
+                                "PJ created a governed Markdown draft because the model did not "
+                                "produce the requested document artifact."
+                            )
+                            yield {"type": "text.delta", "delta": completion_text}
+                            yield {
+                                "type": "completion",
+                                "text": completion_text,
+                                "citations": all_citations,
+                                "sources": all_sources,
+                                "artifacts": list(ready_artifacts.values()),
+                                "deliverable": {
+                                    "status": "ready",
+                                    "requested_format": required_format,
+                                },
+                                "_response_id": response_id,
+                            }
+                            return
                     failure_text = (
                         f"The requested .{required_format} deliverable is "
                         "incomplete because no validated artifact was produced."

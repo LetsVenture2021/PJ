@@ -12,6 +12,8 @@ name = "pj-realtime-backend"
 main = "pj_realtime_backend_worker.js"
 
 routes = [
+  { pattern = "example.com/conversations*", zone_name = "example.com" },
+  { pattern = "example.com/projects*", zone_name = "example.com" },
   { pattern = "example.com/health", zone_name = "example.com" },
   { pattern = "example.com/session", zone_name = "example.com" },
   { pattern = "example.com/token", zone_name = "example.com" },
@@ -53,6 +55,7 @@ WRANGLER_BIN="$test_dir/wrangler" "$validator" "$test_dir/wrangler.toml" \
   >"$test_dir/pass.out" 2>"$test_dir/pass.err"
 grep -Fq "Cloudflare sync validation passed." "$test_dir/pass.out"
 grep -Fq "Cloudflare Access application/policy checklist" "$test_dir/pass.out"
+grep -Fq "/session, /token, /execute-tool" "$test_dir/pass.out"
 
 sed '/example.com\/token/d' "$test_dir/wrangler.toml" >"$test_dir/incomplete.toml"
 if WRANGLER_BIN="$test_dir/wrangler" "$validator" "$test_dir/incomplete.toml" \

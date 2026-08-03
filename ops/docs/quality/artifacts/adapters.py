@@ -210,12 +210,12 @@ class DOCXAdapter(OOXMLAdapter):
             "w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
             "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
         }
-        required = {"word/document.xml", "word/styles.xml", "docProps/core.xml"}
+        required = {"word/document.xml", "docProps/core.xml"}
         if not required <= names:
             result.errors.append(
                 {
                     "code": "docx_parts",
-                    "message": "required document, style, or core-property part missing",
+                    "message": "required document or core-property part missing",
                 }
             )
             return result
@@ -245,7 +245,7 @@ class DOCXAdapter(OOXMLAdapter):
         ]
         result.checks.update(
             {
-                "styles": True,
+                "styles": "word/styles.xml" in names,
                 "core_properties": True,
                 "embedded_media": sorted(n for n in names if n.startswith("word/media/")),
                 "table_semantics": True,
