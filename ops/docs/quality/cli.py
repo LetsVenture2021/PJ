@@ -12,6 +12,8 @@ from jsonschema import validate as validate_schema
 from .model import report_schema
 from .service import QualityGateError, validate_manifest
 
+FAILURE_SEVERITIES = {"blocker", "critical", "major"}
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m ops.docs.quality.cli")
@@ -45,6 +47,16 @@ def main(argv: list[str] | None = None) -> int:
             f"{report.as_dict()['status'].upper():4} {report.source} "
             f"({len(report.findings)} findings, {report.digest[:12]})"
         )
+        if report.failed:
+            for finding in report.ordered_findings():
+                if finding.waived or finding.severity not in FAILURE_SEVERITIES:
+                    continue
+                print(
+                    "  - "
+                    f"{finding.rule_id} {finding.severity} "
+                    f"line {finding.line}:"
+                    f"{finding.column} {finding.message}"
+                )
     if args.json_path:
         for report in payload["reports"]:
             validate_schema(report, report_schema())
